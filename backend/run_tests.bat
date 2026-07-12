@@ -1,0 +1,3 @@
+@echo off
+echo Running backend tests...
+.\.venv\Scripts\pytest tests/ -v

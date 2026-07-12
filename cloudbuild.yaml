@@ -1,0 +1,84 @@
+# CD workflow: runs tests, builds, pushes to Artifact Registry, deploys to Cloud Run
+# Used only by GitHub main-branch deployment trigger
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+substitutions:
+  _REGION: us-west1
+  _REPOSITORY: cinequeue
+  _SERVICE: cinequeue
+  _RUNTIME_SERVICE_ACCOUNT: cinequeue-runner@cinequeue-inouye-2026.iam.gserviceaccount.com
+  _TMDB_SECRET: tmdb-api-key
+
+steps:
+  # A. Install and run backend tests
+  - name: python:3.12-slim
+    entrypoint: python
+    args: ["-m", "pip", "install", "-r", "backend/requirements.txt"]
+    dir: "."
+  - name: python:3.12-slim
+    entrypoint: python
+    args: ["-m", "pytest", "backend/tests/", "-v"]
+    dir: "."
+
+  # B. Install and run frontend tests
+  - name: node:22
+    entrypoint: npm
+    args: ["ci"]
+    dir: "frontend"
+  - name: node:22
+    entrypoint: npm
+    args: ["run", "test"]
+    dir: "frontend"
+
+  # C. Build the production frontend
+  - name: node:22
+    entrypoint: npm
+    args: ["run", "build"]
+    dir: "frontend"
+
+  # D. Build the Docker image
+  - name: gcr.io/cloud-builders/docker
+    args:
+      [
+        "build",
+        "-t",
+        "us-west1-docker.pkg.dev/cinequeue-inouye-2026/cinequeue/cinequeue:$SHORT_SHA",
+        "-t",
+        "us-west1-docker.pkg.dev/cinequeue-inouye-2026/cinequeue/cinequeue:latest",
+        ".",
+      ]
+
+  # E. Tag the image with $SHORT_SHA (already done in build step)
+
+  # F. Push the image to Artifact Registry
+  - name: gcr.io/cloud-builders/docker
+    args:
+      [
+        "push",
+        "us-west1-docker.pkg.dev/cinequeue-inouye-2026/cinequeue/cinequeue:$SHORT_SHA",
+      ]
+  - name: gcr.io/cloud-builders/docker
+    args:
+      [
+        "push",
+        "us-west1-docker.pkg.dev/cinequeue-inouye-2026/cinequeue/cinequeue:latest",
+      ]
+
+  # G. Deploy that exact image to Cloud Run
+  - name: gcr.io/cloud-builders/gcloud
+    args:
+      [
+        "run",
+        "deploy",
+        "${_SERVICE}",
+        "--image=us-west1-docker.pkg.dev/cinequeue-inouye-2026/cinequeue/cinequeue:$SHORT_SHA",
+        "--platform=managed",
+        "--region=${_REGION}",
+        "--allow-unauthenticated",
+        "--min-instances=0",
+        "--max-instances=1",
+        "--service-account=${_RUNTIME_SERVICE_ACCOUNT}",
+        "--set-secrets=TMDB_API_KEY=${_TMDB_SECRET}:latest",
+      ]

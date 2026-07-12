@@ -1,0 +1,51 @@
+# Environment and secrets
+.env
+.env.*
+.env.local
+*.key
+*.pem
+service-account*.json
+
+# Node modules
+node_modules/
+frontend/node_modules/
+
+# Build outputs
+frontend/dist/
+dist/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+backend/.pytest_cache/
+backend/__pycache__/
+
+# Database files
+*.db
+backend/data/*.db
+backend/data/
+
+# Logs
+backend/logs/
+logs/
+*.log
+
+# Editor and temporary files
+.DS_Store
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Test output
+coverage/
+.nyc_output/

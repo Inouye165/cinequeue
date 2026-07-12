@@ -1,0 +1,35 @@
+# CI-only workflow: runs tests and builds, never deploys
+# Used by GitHub pull-request trigger
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+steps:
+  # Backend tests
+  - name: python:3.12-slim
+    entrypoint: python
+    args: ["-m", "pip", "install", "-r", "backend/requirements.txt"]
+    dir: "."
+  - name: python:3.12-slim
+    entrypoint: python
+    args: ["-m", "pytest", "backend/tests/", "-v"]
+    dir: "."
+
+  # Frontend tests (using lockfile)
+  - name: node:22
+    entrypoint: npm
+    args: ["ci"]
+    dir: "frontend"
+  - name: node:22
+    entrypoint: npm
+    args: ["run", "test"]
+    dir: "frontend"
+
+  # Build production frontend
+  - name: node:22
+    entrypoint: npm
+    args: ["run", "build"]
+    dir: "frontend"
+
+  # Validate Docker build (no push, no deploy)
+  - name: gcr.io/cloud-builders/docker
+    args: ["build", "-t", "cinequeue-ci-test", "."]

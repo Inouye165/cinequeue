@@ -1,0 +1,196 @@
+from typing import Any
+
+import feedparser
+import httpx
+
+from app.config import TMDB_API_KEY, TMDB_BASE_URL, TMDB_IMAGE_BASE
+from app.models import days_label, days_until, enrich_media_item, poster_url
+
+
+class TmdbClient:
+    def __init__(self) -> None:
+        if not TMDB_API_KEY:
+            raise RuntimeError("TMDB_API_KEY is not set")
+        self._client = httpx.AsyncClient(
+            base_url=TMDB_BASE_URL,
+            params={"api_key": TMDB_API_KEY},
+            timeout=20.0,
+        )
+
+    async def close(self) -> None:
+        await self._client.aclose()
+
+    async def _get(self, path: str, **params: Any) -> Any:
+        response = await self._client.get(path, params=params)
+        response.raise_for_status()
+        return response.json()
+
+    async def search(self, query: str) -> list[dict[str, Any]]:
+        movie_data = await self._get("/search/movie", query=query)
+        tv_data = await self._get("/search/tv", query=query)
+        results: list[dict[str, Any]] = []
+        for item in movie_data.get("results", [])[:8]:
+            results.append(enrich_media_item(item, "movie"))
+        for item in tv_data.get("results", [])[:8]:
+            results.append(enrich_media_item(item, "tv"))
+        results.sort(key=lambda x: x.get("popularity") or 0, reverse=True)
+        return results[:12]
+
+    async def upcoming_movies(self) -> list[dict[str, Any]]:
+        data = await self._get("/movie/upcoming", region="US")
+        return [enrich_media_item(item, "movie") for item in data.get("results", [])]
+
+    async def now_playing(self) -> list[dict[str, Any]]:
+        data = await self._get("/movie/now_playing", region="US")
+        return [enrich_media_item(item, "movie") for item in data.get("results", [])]
+
+    async def trending(self) -> list[dict[str, Any]]:
+        data = await self._get("/trending/all/week")
+        results = []
+        for item in data.get("results", []):
+            media_type = item.get("media_type")
+            if media_type in {"movie", "tv"}:
+                results.append(enrich_media_item(item, media_type))
+        return results
+
+    async def on_air_tv(self) -> list[dict[str, Any]]:
+        data = await self._get("/tv/on_the_air")
+        return [enrich_media_item(item, "tv") for item in data.get("results", [])]
+
+    async def get_details(self, media_type: str, tmdb_id: int) -> dict[str, Any]:
+        data = await self._get(f"/{media_type}/{tmdb_id}")
+        release = data.get("release_date") or data.get("first_air_date")
+        days = days_until(release)
+        genres = [g["name"] for g in data.get("genres", [])]
+        runtime = data.get("runtime")
+        if not runtime and data.get("episode_run_time"):
+            runtime = data["episode_run_time"][0] if data["episode_run_time"] else None
+
+        return {
+            "id": data["id"],
+            "media_type": media_type,
+            "title": data.get("title") or data.get("name"),
+            "overview": data.get("overview", ""),
+            "tagline": data.get("tagline", ""),
+            "poster_url": poster_url(data.get("poster_path")),
+            "backdrop_url": poster_url(data.get("backdrop_path"), "w1280"),
+            "release_date": release,
+            "days_away": days,
+            "days_label": days_label(days),
+            "vote_average": data.get("vote_average"),
+            "vote_count": data.get("vote_count"),
+            "genres": genres,
+            "runtime_minutes": runtime,
+            "status": data.get("status"),
+            "homepage": data.get("homepage"),
+        }
+
+    async def get_watch_providers(self, media_type: str, tmdb_id: int) -> dict[str, Any]:
+        data = await self._get(f"/{media_type}/{tmdb_id}/watch/providers")
+        us = data.get("results", {}).get("US", {})
+        categories = {
+            "streaming": _format_providers(us.get("flatrate", [])),
+            "rent": _format_providers(us.get("rent", [])),
+            "buy": _format_providers(us.get("buy", [])),
+        }
+        link = us.get("link")
+        in_theatres = media_type == "movie" and await self._is_in_theatres(tmdb_id)
+        if in_theatres:
+            categories["theatres"] = [{"name": "In theatres now", "logo_url": None}]
+        return {"link": link, "categories": categories}
+
+    async def _is_in_theatres(self, tmdb_id: int) -> bool:
+        now_playing = await self.now_playing()
+        return any(item["id"] == tmdb_id for item in now_playing)
+
+    async def get_reviews(self, media_type: str, tmdb_id: int) -> list[dict[str, Any]]:
+        data = await self._get(f"/{media_type}/{tmdb_id}/reviews")
+        reviews = []
+        for review in data.get("results", [])[:8]:
+            reviews.append(
+                {
+                    "author": review.get("author", "Anonymous"),
+                    "rating": review.get("author_details", {}).get("rating"),
+                    "content": review.get("content", ""),
+                    "url": review.get("url"),
+                    "created_at": review.get("created_at"),
+                }
+            )
+        return reviews
+
+    async def get_release_info(self, media_type: str, tmdb_id: int) -> dict[str, Any]:
+        if media_type == "movie":
+            data = await self._get(f"/movie/{tmdb_id}/release_dates")
+            theatrical = None
+            digital = None
+            for entry in data.get("results", []):
+                if entry.get("iso_3166_1") != "US":
+                    continue
+                for release in entry.get("release_dates", []):
+                    release_type = release.get("type")
+                    date_value = release.get("release_date", "")[:10]
+                    if release_type == 3 and not theatrical:
+                        theatrical = date_value
+                    if release_type in {4, 5} and not digital:
+                        digital = date_value
+            return {
+                "theatrical": theatrical,
+                "digital": digital,
+                "theatrical_days_away": days_until(theatrical),
+                "digital_days_away": days_until(digital),
+            }
+        data = await self._get(f"/tv/{tmdb_id}")
+        next_episode = data.get("next_episode_to_air")
+        if not next_episode:
+            return {"next_episode": None}
+        air_date = next_episode.get("air_date")
+        return {
+            "next_episode": {
+                "name": next_episode.get("name"),
+                "season": next_episode.get("season_number"),
+                "episode": next_episode.get("episode_number"),
+                "air_date": air_date,
+                "days_away": days_until(air_date),
+                "days_label": days_label(days_until(air_date)),
+            }
+        }
+
+
+def _format_providers(providers: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    formatted = []
+    seen = set()
+    for provider in providers:
+        name = provider.get("provider_name")
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        logo_path = provider.get("logo_path")
+        formatted.append(
+            {
+                "name": name,
+                "logo_url": f"{TMDB_IMAGE_BASE}/w45{logo_path}" if logo_path else None,
+            }
+        )
+    return formatted
+
+
+async def fetch_news(title: str, limit: int = 6) -> list[dict[str, Any]]:
+    from urllib.parse import quote_plus
+
+    query = quote_plus(f"{title} movie OR show")
+    url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        feed = await client.get(url)
+        feed.raise_for_status()
+        parsed = feedparser.parse(feed.text)
+    articles = []
+    for entry in parsed.entries[:limit]:
+        articles.append(
+            {
+                "title": entry.get("title", ""),
+                "url": entry.get("link", ""),
+                "published": entry.get("published", ""),
+                "source": entry.get("source", {}).get("title") if entry.get("source") else None,
+            }
+        )
+    return articles
