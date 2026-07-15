@@ -81,4 +81,5 @@ steps:
         "--max-instances=1",
         "--service-account=${_RUNTIME_SERVICE_ACCOUNT}",
         "--set-secrets=TMDB_API_KEY=${_TMDB_SECRET}:latest",
+        "--update-env-vars=WATCHLIST_BACKEND=firestore,GOOGLE_CLOUD_PROJECT=cinequeue-inouye-2026",
       ]
