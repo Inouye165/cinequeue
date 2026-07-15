@@ -49,3 +49,9 @@ logs/
 # Test output
 coverage/
 .nyc_output/
+
+# TypeScript build info cache
+*.tsbuildinfo
+
+# Scratch files
+scratch/
