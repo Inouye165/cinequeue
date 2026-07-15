@@ -25,5 +25,5 @@ def setup_database():
 
     repo = SqliteWatchlistRepository()
     app.state.watchlist_repo = repo
-    repo.clear_all()
+    repo.clear_all("local_test_user")
     yield

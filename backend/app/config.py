@@ -25,3 +25,48 @@ WATCHLIST_BACKEND = os.getenv("WATCHLIST_BACKEND", "sqlite")
 GOOGLE_CLOUD_PROJECT = os.getenv("GOOGLE_CLOUD_PROJECT", "")
 
 PORT = int(os.getenv("PORT", "8080"))
+
+# --- Authentication Configuration ---
+ENVIRONMENT = os.getenv("ENVIRONMENT", "development").strip().lower()
+AUTH_ENABLED = os.getenv("AUTH_ENABLED", "false").strip().lower() == "true"
+AUTH_MODE = os.getenv("AUTH_MODE", "allowlist").strip().lower()
+
+_raw_emails = os.getenv("AUTH_ALLOWED_EMAILS", "")
+AUTH_ALLOWED_EMAILS = [e.strip().lower() for e in _raw_emails.split(",") if e.strip()]
+
+_raw_origins = os.getenv("AUTH_ALLOWED_ORIGINS", "")
+AUTH_ALLOWED_ORIGINS = [o.strip() for o in _raw_origins.split(",") if o.strip()] or [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:8080",
+    "http://127.0.0.1:8080",
+]
+
+FIREBASE_PROJECT_ID = os.getenv("FIREBASE_PROJECT_ID", GOOGLE_CLOUD_PROJECT or "cinequeue-inouye-2026").strip()
+
+FIREBASE_API_KEY = os.getenv("FIREBASE_API_KEY", "AIzaSyAOlo4dMXfvW7Su-33uHogwdu_3zz1TR9M").strip()
+FIREBASE_AUTH_DOMAIN = os.getenv("FIREBASE_AUTH_DOMAIN", "cinequeue-inouye-2026.firebaseapp.com").strip()
+FIREBASE_APP_ID = os.getenv("FIREBASE_APP_ID", "1:568212960791:web:000e9657bed24ce73e8e52").strip()
+FIREBASE_MESSAGING_SENDER_ID = os.getenv("FIREBASE_MESSAGING_SENDER_ID", "568212960791").strip()
+
+SESSION_COOKIE_DAYS = int(os.getenv("SESSION_COOKIE_DAYS", "5"))
+
+# Cookie security settings
+# Use Secure cookies in production by default
+SESSION_COOKIE_SECURE = os.getenv("SESSION_COOKIE_SECURE", "true" if ENVIRONMENT == "production" else "false").strip().lower() == "true"
+
+# Name of the session cookie
+if SESSION_COOKIE_SECURE:
+    SESSION_COOKIE_NAME = "__Host-cinequeue_session"
+else:
+    SESSION_COOKIE_NAME = "cinequeue_session"
+
+# Fail-closed validation for production
+if AUTH_ENABLED:
+    if not FIREBASE_PROJECT_ID:
+        raise ValueError("FIREBASE_PROJECT_ID must be set when AUTH_ENABLED is True")
+    if AUTH_MODE == "allowlist" and not AUTH_ALLOWED_EMAILS:
+        raise ValueError("AUTH_ALLOWED_EMAILS must be set when AUTH_MODE is 'allowlist' and AUTH_ENABLED is True")
+    if ENVIRONMENT == "production" and not AUTH_ALLOWED_ORIGINS:
+        raise ValueError("AUTH_ALLOWED_ORIGINS must be set in production when AUTH_ENABLED is True")
+

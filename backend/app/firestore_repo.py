@@ -26,14 +26,17 @@ class FirestoreWatchlistRepository(WatchlistRepository):
 
     def __init__(self, project: str | None = None) -> None:
         self._db = firestore.Client(project=project)
-        self._col = self._db.collection(COLLECTION)
         logger.info("Firestore watchlist repository initialised (project=%s)", project)
+
+    def _user_watchlist_col(self, user_id: str):
+        return self._db.collection("users").document(user_id).collection(COLLECTION)
 
     # -- Repository interface --------------------------------------------------
 
-    def list_items(self) -> list[dict[str, Any]]:
+    def list_items(self, user_id: str) -> list[dict[str, Any]]:
+        col = self._user_watchlist_col(user_id)
         docs = (
-            self._col
+            col
             .order_by("added_at", direction=firestore.Query.DESCENDING)
             .stream()
         )
@@ -41,6 +44,7 @@ class FirestoreWatchlistRepository(WatchlistRepository):
 
     def add_item(
         self,
+        user_id: str,
         media_type: str,
         tmdb_id: int,
         title: str,
@@ -48,7 +52,8 @@ class FirestoreWatchlistRepository(WatchlistRepository):
         release_date: str | None,
     ) -> dict[str, Any]:
         doc_id = _doc_id(media_type, tmdb_id)
-        doc_ref = self._col.document(doc_id)
+        col = self._user_watchlist_col(user_id)
+        doc_ref = col.document(doc_id)
 
         # Check for duplicate
         if doc_ref.get().exists:
@@ -66,9 +71,10 @@ class FirestoreWatchlistRepository(WatchlistRepository):
         doc_ref.set(data)
         return data
 
-    def remove_item(self, media_type: str, tmdb_id: int) -> bool:
+    def remove_item(self, user_id: str, media_type: str, tmdb_id: int) -> bool:
         doc_id = _doc_id(media_type, tmdb_id)
-        doc_ref = self._col.document(doc_id)
+        col = self._user_watchlist_col(user_id)
+        doc_ref = col.document(doc_id)
 
         if not doc_ref.get().exists:
             return False
@@ -76,6 +82,7 @@ class FirestoreWatchlistRepository(WatchlistRepository):
         doc_ref.delete()
         return True
 
-    def clear_all(self) -> None:
-        for doc in self._col.stream():
+    def clear_all(self, user_id: str) -> None:
+        col = self._user_watchlist_col(user_id)
+        for doc in col.stream():
             doc.reference.delete()
