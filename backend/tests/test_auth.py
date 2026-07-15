@@ -34,9 +34,9 @@ def client_with_auth():
         # We need to reload main to recreate App and mount new route dependencies
         import app.main
         importlib.reload(app.main)
-        app.main.app.state.tmdb = AsyncMock()
         
         with TestClient(app.main.app, base_url="https://testserver") as c:
+            app.main.app.state.tmdb = AsyncMock()
             yield c
             
         # Restore configuration to defaults
