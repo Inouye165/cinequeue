@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useEffect, useState } from "react";
-import { initializeApp, getApps, getApp } from "firebase/app";
+import { initializeApp, getApps, getApp, deleteApp } from "firebase/app";
 import {
   initializeAuth,
   inMemoryPersistence,
@@ -34,7 +34,18 @@ async function getFirebaseAuth(): Promise<FirebaseAuth> {
   if (firebaseAuthInstance) return firebaseAuthInstance;
 
   const config = await api.firebaseConfig();
-  const app = getApps().length === 0 ? initializeApp(config) : getApp();
+  let app;
+  if (getApps().length === 0) {
+    app = initializeApp(config);
+  } else {
+    app = getApp();
+    try {
+      await deleteApp(app);
+    } catch (err) {
+      console.warn("Failed to delete existing app:", err);
+    }
+    app = initializeApp(config);
+  }
   firebaseAuthInstance = initializeAuth(app, {
     persistence: inMemoryPersistence
   });
