@@ -16,6 +16,12 @@ TMDB_IMAGE_BASE = "https://image.tmdb.org/t/p"
 DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
 DB_PATH = DATA_DIR / "watchlist.db"
 # NOTE: SQLite data is temporary on Cloud Run (containers are ephemeral)
-# For persistent storage, migrate to Cloud SQL or Firestore
+# For persistent storage, set WATCHLIST_BACKEND=firestore
+
+# Watchlist storage backend: "sqlite" (default for local dev) or "firestore"
+WATCHLIST_BACKEND = os.getenv("WATCHLIST_BACKEND", "sqlite")
+
+# Google Cloud project ID — used by the Firestore client when set
+GOOGLE_CLOUD_PROJECT = os.getenv("GOOGLE_CLOUD_PROJECT", "")
 
 PORT = int(os.getenv("PORT", "8080"))

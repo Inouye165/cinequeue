@@ -7,8 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.config import TMDB_API_KEY
-from app.database import init_db
+from app.config import TMDB_API_KEY, WATCHLIST_BACKEND, GOOGLE_CLOUD_PROJECT
 from app.logging_config import setup_logging
 from app.routers import movies, watchlist
 from app.services.tmdb import TmdbClient
@@ -22,7 +21,21 @@ FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting application lifespan")
-    init_db()
+
+    # -- Watchlist repository --------------------------------------------------
+    if WATCHLIST_BACKEND == "firestore":
+        from app.firestore_repo import FirestoreWatchlistRepository
+
+        project = GOOGLE_CLOUD_PROJECT or None
+        app.state.watchlist_repo = FirestoreWatchlistRepository(project=project)
+        logger.info("Using Firestore watchlist backend (project=%s)", project)
+    else:
+        from app.sqlite_repo import SqliteWatchlistRepository
+
+        app.state.watchlist_repo = SqliteWatchlistRepository()
+        logger.info("Using SQLite watchlist backend")
+
+    # -- TMDB client -----------------------------------------------------------
     if TMDB_API_KEY:
         try:
             app.state.tmdb = TmdbClient()

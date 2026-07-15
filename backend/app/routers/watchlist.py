@@ -3,8 +3,8 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 
-from app.database import get_connection, row_to_dict, utc_now_iso
 from app.models import days_label, days_until, poster_url
+from app.repository import DuplicateItemError
 from app.services.tmdb import TmdbClient, fetch_news
 
 logger = logging.getLogger(__name__)
@@ -16,15 +16,12 @@ router = APIRouter(prefix="/api/watchlist", tags=["watchlist"])
 async def list_watchlist(request: Request) -> list[dict[str, Any]]:
     logger.info("List watchlist request")
     try:
-        with get_connection() as conn:
-            rows = conn.execute(
-                "SELECT * FROM watchlist ORDER BY added_at DESC"
-            ).fetchall()
+        repo = request.app.state.watchlist_repo
+        rows = repo.list_items()
 
         tmdb: TmdbClient = request.app.state.tmdb
         items = []
-        for row in rows:
-            item = row_to_dict(row)
+        for item in rows:
             try:
                 details = await tmdb.get_details(item["media_type"], item["tmdb_id"])
                 item.update(
@@ -66,21 +63,8 @@ async def add_to_watchlist(request: Request, body: dict[str, Any]) -> dict[str, 
     release_date = body.get("release_date")
 
     try:
-        with get_connection() as conn:
-            try:
-                conn.execute(
-                    """
-                    INSERT INTO watchlist (media_type, tmdb_id, title, poster_path, release_date, added_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    (media_type, tmdb_id, title, poster_path, release_date, utc_now_iso()),
-                )
-            except Exception as exc:
-                if "UNIQUE" in str(exc):
-                    logger.warning(f"Item already on watchlist: {media_type}/{tmdb_id}")
-                    raise HTTPException(status_code=409, detail="Already on watchlist") from exc
-                logger.error(f"Database error adding to watchlist: {exc}")
-                raise
+        repo = request.app.state.watchlist_repo
+        repo.add_item(media_type, tmdb_id, title, poster_path, release_date)
 
         days = days_until(release_date)
         logger.info(f"Successfully added to watchlist: {media_type}/{tmdb_id}")
@@ -93,6 +77,9 @@ async def add_to_watchlist(request: Request, body: dict[str, Any]) -> dict[str, 
             "days_label": days_label(days),
             "poster_url": poster_url(poster_path),
         }
+    except DuplicateItemError:
+        logger.warning(f"Item already on watchlist: {media_type}/{tmdb_id}")
+        raise HTTPException(status_code=409, detail="Already on watchlist")
     except HTTPException:
         raise
     except Exception as e:
@@ -101,20 +88,17 @@ async def add_to_watchlist(request: Request, body: dict[str, Any]) -> dict[str, 
 
 
 @router.delete("/{media_type}/{tmdb_id}")
-async def remove_from_watchlist(media_type: str, tmdb_id: int) -> dict[str, str]:
+async def remove_from_watchlist(media_type: str, tmdb_id: int, request: Request) -> dict[str, str]:
     logger.info(f"Remove from watchlist request: {media_type}/{tmdb_id}")
     if media_type not in {"movie", "tv"}:
         logger.warning(f"Invalid media_type for removal: {media_type}")
         raise HTTPException(status_code=400, detail="Invalid media_type")
     try:
-        with get_connection() as conn:
-            result = conn.execute(
-                "DELETE FROM watchlist WHERE media_type = ? AND tmdb_id = ?",
-                (media_type, tmdb_id),
-            )
-            if result.rowcount == 0:
-                logger.warning(f"Item not found for removal: {media_type}/{tmdb_id}")
-                raise HTTPException(status_code=404, detail="Not found")
+        repo = request.app.state.watchlist_repo
+        removed = repo.remove_item(media_type, tmdb_id)
+        if not removed:
+            logger.warning(f"Item not found for removal: {media_type}/{tmdb_id}")
+            raise HTTPException(status_code=404, detail="Not found")
         logger.info(f"Successfully removed from watchlist: {media_type}/{tmdb_id}")
         return {"status": "removed"}
     except HTTPException:
