@@ -157,3 +157,10 @@ Expected response: `{"status": "ok", "tmdb_configured": true}`
 ## Future ML hooks
 
 The Python backend is structured so you can add recommendation or sentiment models under `backend/app/services/` without changing the React UI.
+
+## CI/CD Pipeline
+
+- Pull requests into main run cloudbuild-ci.yaml.
+- Merges into main run cloudbuild.yaml.
+- Successful main builds deploy Cinequeue to Google Cloud Run.
+

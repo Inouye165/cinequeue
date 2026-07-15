@@ -14,12 +14,12 @@ substitutions:
 steps:
   # A. Install and run backend tests
   - name: python:3.12-slim
-    entrypoint: python
-    args: ["-m", "pip", "install", "-r", "backend/requirements.txt"]
-    dir: "."
-  - name: python:3.12-slim
-    entrypoint: python
-    args: ["-m", "pytest", "backend/tests/", "-v"]
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        python -m pip install --no-cache-dir -r backend/requirements.txt
+        python -m pytest backend/tests/ -v
     dir: "."
 
   # B. Install and run frontend tests
