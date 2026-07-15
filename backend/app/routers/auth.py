@@ -89,46 +89,102 @@ async def get_csrf(response: Response):
 @router.post("/session")
 async def create_session(body: SessionRequest, request: Request, response: Response):
     """Exchange Firebase ID token for a secure session cookie."""
-    # 1. Verify CSRF
-    validate_csrf(request, body.csrf_token)
-
-    # 2. Validate Origin
-    validate_origin(request)
-
     if not AUTH_ENABLED:
         # If authentication is disabled, we don't proceed with Firebase verification
         return {"status": "ok", "message": "Auth is disabled"}
 
+    # Stage 2: CSRF Validation
     try:
-        # 3. Verify Firebase ID token
-        # This checks the token signature and expiration
+        validate_csrf(request, body.csrf_token)
+        logger.info("Session Creation Stage 2: CSRF validation succeeded")
+    except Exception as e:
+        logger.warning("Session Creation Stage 2: CSRF validation failed: %s", e)
+        raise
+
+    # Stage 3: Origin Validation
+    try:
+        validate_origin(request)
+        logger.info("Session Creation Stage 3: Origin validation succeeded")
+    except Exception as e:
+        logger.warning("Session Creation Stage 3: Origin validation failed: %s", e)
+        raise
+
+    # Stage 4: Firebase ID-token verification
+    try:
         decoded_token = firebase_auth.verify_id_token(body.id_token)
-        
-        # 4. Require auth_time no older than 5 minutes
+        logger.info("Session Creation Stage 4: Firebase ID-token verification succeeded")
+    except Exception as e:
+        if "Token used too early" in str(e):
+            logger.warning("Session Creation Stage 4: Token used too early due to clock skew. Retrying in 2 seconds...")
+            time.sleep(2)
+            try:
+                decoded_token = firebase_auth.verify_id_token(body.id_token)
+                logger.info("Session Creation Stage 4: Firebase ID-token verification succeeded after retry")
+            except Exception as retry_err:
+                logger.error("Session Creation Stage 4: Firebase ID-token verification failed after retry. Class: %s, Message: %s",
+                             retry_err.__class__.__name__, retry_err)
+                raise HTTPException(status_code=401, detail="Invalid ID token or session generation failed")
+        else:
+            logger.error("Session Creation Stage 4: Firebase ID-token verification failed. "
+                         "Class: %s, Message: %s, Project: %s",
+                         e.__class__.__name__, e, FIREBASE_PROJECT_ID)
+            raise HTTPException(status_code=401, detail="Invalid ID token or session generation failed")
+
+    # Stage 5: auth_time freshness validation
+    try:
         auth_time = decoded_token.get("auth_time")
-        if not auth_time or (time.time() - auth_time) > 5 * 60:
-            logger.warning("ID token auth_time is too old: %s", auth_time)
+        age = time.time() - auth_time if auth_time else None
+        logger.info("Session Creation Stage 5: auth_time age calculation: %s seconds", age)
+        if not auth_time or age > 5 * 60:
+            logger.warning("Session Creation Stage 5: ID token auth_time is too old: %s", auth_time)
             raise HTTPException(status_code=401, detail="Authentication time is too old")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Session Creation Stage 5 failed: %s", e)
+        raise HTTPException(status_code=401, detail="Invalid ID token or session generation failed")
 
-        # 5. Require email_verified=true
-        if not decoded_token.get("email_verified"):
-            logger.warning("Email is not verified for user: %s", decoded_token.get("email"))
+    # Stage 6: email_verified validation
+    try:
+        email_verified = decoded_token.get("email_verified")
+        logger.info("Session Creation Stage 6: email_verified value: %s", email_verified)
+        if not email_verified:
+            logger.warning("Session Creation Stage 6: Email is not verified")
             raise HTTPException(status_code=401, detail="Email is not verified")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Session Creation Stage 6 failed: %s", e)
+        raise HTTPException(status_code=401, detail="Invalid ID token or session generation failed")
 
-        # 6. Normalize email to lowercase
+    # Stage 7: Email allowlist authorization
+    try:
         email = decoded_token.get("email", "").strip().lower()
-
-        # 7. Apply authorization check
+        email_domain = email.split("@")[-1] if "@" in email else "unknown"
+        logger.info("Session Creation Stage 7: Email domain check: %s, allowlist mode: %s", email_domain, AUTH_MODE)
         if AUTH_MODE == "allowlist":
             if email not in AUTH_ALLOWED_EMAILS:
-                logger.warning("User %s is not authorized under allowlist", email)
+                logger.warning("Session Creation Stage 7: User is not authorized under allowlist")
                 raise HTTPException(status_code=403, detail="Forbidden: User is not authorized")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Session Creation Stage 7 failed: %s", e)
+        raise HTTPException(status_code=401, detail="Invalid ID token or session generation failed")
 
-        # 9. Create session cookie lasting five days
+    # Stage 8: Firebase session-cookie creation
+    try:
         expires_in = datetime.timedelta(days=SESSION_COOKIE_DAYS)
         session_cookie = firebase_auth.create_session_cookie(body.id_token, expires_in=expires_in)
+        logger.info("Session Creation Stage 8: Firebase session-cookie creation succeeded")
+    except Exception as e:
+        logger.error("Session Creation Stage 8: Firebase session-cookie creation failed. "
+                     "Class: %s, Message: %s, Project: %s",
+                     e.__class__.__name__, e, FIREBASE_PROJECT_ID)
+        raise HTTPException(status_code=401, detail="Invalid ID token or session generation failed")
 
-        # 10. Set the secure HTTP-only cookie
+    # Stage 9: Cookie response creation
+    try:
         max_age = SESSION_COOKIE_DAYS * 24 * 60 * 60
         response.set_cookie(
             key=SESSION_COOKIE_NAME,
@@ -139,12 +195,10 @@ async def create_session(body: SessionRequest, request: Request, response: Respo
             path="/",
             max_age=max_age,
         )
+        logger.info("Session Creation Stage 9: Cookie response successfully created")
         return {"status": "success"}
-
-    except HTTPException:
-        raise
     except Exception as e:
-        logger.error("Session creation failed: %s", e)
+        logger.error("Session Creation Stage 9 failed: %s", e)
         raise HTTPException(status_code=401, detail="Invalid ID token or session generation failed")
 
 @router.get("/me", response_model=CurrentUser)

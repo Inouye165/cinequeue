@@ -22,6 +22,26 @@ FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 async def lifespan(app: FastAPI):
     logger.info("Starting application lifespan")
 
+    if ENVIRONMENT == "development":
+        from app.config import (
+            AUTH_ENABLED,
+            AUTH_MODE,
+            AUTH_ALLOWED_ORIGINS,
+            FIREBASE_PROJECT_ID,
+            SESSION_COOKIE_SECURE,
+            SESSION_COOKIE_NAME,
+        )
+        logger.info("=== Development Auth Diagnostics ===")
+        logger.info("ENVIRONMENT: %s", ENVIRONMENT)
+        logger.info("AUTH_ENABLED: %s", AUTH_ENABLED)
+        logger.info("AUTH_MODE: %s", AUTH_MODE)
+        logger.info("AUTH_ALLOWED_ORIGINS: %s", AUTH_ALLOWED_ORIGINS)
+        logger.info("FIREBASE_PROJECT_ID: %s", FIREBASE_PROJECT_ID)
+        logger.info("SESSION_COOKIE_SECURE: %s", SESSION_COOKIE_SECURE)
+        logger.info("SESSION_COOKIE_NAME: %s", SESSION_COOKIE_NAME)
+        logger.info("WATCHLIST_BACKEND: %s", WATCHLIST_BACKEND)
+        logger.info("====================================")
+
     # -- Watchlist repository --------------------------------------------------
     if WATCHLIST_BACKEND == "firestore":
         from app.firestore_repo import FirestoreWatchlistRepository
