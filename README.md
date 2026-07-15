@@ -4,10 +4,34 @@ Personal movie and TV tracker with release countdowns, where-to-watch info, revi
 
 ## Stack
 
-- **Frontend:** React + TypeScript (Vite)
-- **Backend:** Python FastAPI
-- **Data:** TMDB API + Google News RSS
+- **Frontend:** React + TypeScript (Vite), Google Firebase Authentication (Client SDK)
+- **Backend:** Python FastAPI, Google Firebase Admin SDK (Session Cookie Verification)
+- **Data:** TMDB API + Google News RSS + Google Cloud Firestore (Watchlist Persistence)
 - **Deploy:** Google Cloud Run (Docker) via GitHub CI/CD
+
+## Authentication & Authorization
+
+Cinequeue features production-grade per-user authentication and authorization using Firebase Authentication.
+
+### Key Security Design Patterns
+- **Token Exchange:** The frontend exchanges a short-lived Firebase ID token for a secure backend-managed session cookie.
+- **Secure Cookies:** In production, session cookies are configured with `HttpOnly`, `Secure`, `SameSite=Lax`, `Path=/`, and use the `__Host-` prefix (no `Domain` attribute) to protect against XSS and session hijacking.
+- **CSRF Protection:** Crucial mutation endpoints (session login, logout, watchlist writes) validate a stateful CSRF token set by the backend via a separate cookie and validated matching custom headers.
+- **User Scoping:** The watchlist database (both SQLite and Firestore) scopes records under the verified user's `uid`. User A cannot read or mutate User B's watchlist.
+- **Fail Closed:** The application configuration defaults to failing closed. Any missing environment configuration in production throws immediate validation errors.
+
+## Environment Variables
+
+| Variable | Description | Default | Required in Prod |
+| :--- | :--- | :--- | :--- |
+| `TMDB_API_KEY` | TMDB developer API key for movie/TV database queries | None | **Yes** |
+| `WATCHLIST_BACKEND` | Database backend: `sqlite` or `firestore` | `sqlite` | **Yes** (set to `firestore`) |
+| `AUTH_ENABLED` | Set `true` to enable Firebase Auth and per-user database scoping | `false` | **Yes** (set to `true`) |
+| `AUTH_MODE` | Authorization mode: `allowlist` (only authorized emails) or `all` | `allowlist` | **Yes** |
+| `AUTH_ALLOWED_EMAILS` | Comma-separated allowlist of Google emails (e.g. `inouye165@gmail.com`) | None | **Yes** (when `AUTH_MODE=allowlist`) |
+| `AUTH_ALLOWED_ORIGINS` | Comma-separated allowed frontend Origins for CORS and CSRF | None | **Yes** (when `AUTH_ENABLED=true`) |
+| `SESSION_COOKIE_SECURE` | Set `true` to mandate HTTPS and use `__Host-` session cookies | `false` | **Yes** (when `AUTH_ENABLED=true`) |
+| `FIREBASE_PROJECT_ID` | GCP/Firebase project ID (`cinequeue-inouye-2026`) | None | **Yes** (when `AUTH_ENABLED=true`) |
 
 ## Local Development
 
@@ -17,11 +41,9 @@ Create a free key at [themoviedb.org/settings/api](https://www.themoviedb.org/se
 
 ### 2. Configure environment
 
-```bash
-cp .env.example .env
-```
-
-Set `TMDB_API_KEY` in `.env`.
+Create a `.env` file in the root workspace (or copy `.env.example`). Set:
+- `TMDB_API_KEY=your_tmdb_key_here`
+- `AUTH_ENABLED=false` (this enables local SQLite mock mode automatically bypasses Google sign-in and authenticates as `Local Developer` with local database storage).
 
 ### 3. Backend development
 
@@ -30,7 +52,7 @@ cd backend
 python -m venv .venv
 .venv\Scripts\activate   # Windows
 pip install -r requirements.txt
-uvicorn app.main:app --reload --port 8000
+uvicorn app.main:app --reload --port 8081
 ```
 
 ### 4. Frontend development (separate terminal)
@@ -41,7 +63,7 @@ npm install
 npm run dev
 ```
 
-Open [http://localhost:5173](http://localhost:5173). The Vite dev server proxies `/api` to port 8000.
+Open [http://localhost:5173](http://localhost:5173). The Vite dev server proxies `/api` to port 8081.
 
 ### 5. Local testing
 

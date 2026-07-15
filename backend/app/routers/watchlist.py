@@ -1,23 +1,24 @@
 import logging
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Depends
 
+from app.auth import get_current_user, CurrentUser
 from app.models import days_label, days_until, poster_url
 from app.repository import DuplicateItemError
 from app.services.tmdb import TmdbClient, fetch_news
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/watchlist", tags=["watchlist"])
+router = APIRouter(prefix="/api/watchlist", tags=["watchlist"], dependencies=[Depends(get_current_user)])
 
 
 @router.get("")
-async def list_watchlist(request: Request) -> list[dict[str, Any]]:
-    logger.info("List watchlist request")
+async def list_watchlist(request: Request, current_user: CurrentUser = Depends(get_current_user)) -> list[dict[str, Any]]:
+    logger.info("List watchlist request for user: %s", current_user.uid)
     try:
         repo = request.app.state.watchlist_repo
-        rows = repo.list_items()
+        rows = repo.list_items(current_user.uid)
 
         tmdb: TmdbClient = request.app.state.tmdb
         items = []
@@ -50,11 +51,11 @@ async def list_watchlist(request: Request) -> list[dict[str, Any]]:
 
 
 @router.post("")
-async def add_to_watchlist(request: Request, body: dict[str, Any]) -> dict[str, Any]:
+async def add_to_watchlist(request: Request, body: dict[str, Any], current_user: CurrentUser = Depends(get_current_user)) -> dict[str, Any]:
     media_type = body.get("media_type")
     tmdb_id = body.get("tmdb_id")
     title = body.get("title")
-    logger.info(f"Add to watchlist request: {media_type}/{tmdb_id} - {title}")
+    logger.info(f"Add to watchlist request for user {current_user.uid}: {media_type}/{tmdb_id} - {title}")
     if media_type not in {"movie", "tv"} or not tmdb_id or not title:
         logger.warning(f"Invalid add to watchlist request: {body}")
         raise HTTPException(status_code=400, detail="media_type, tmdb_id, and title are required")
@@ -64,7 +65,7 @@ async def add_to_watchlist(request: Request, body: dict[str, Any]) -> dict[str, 
 
     try:
         repo = request.app.state.watchlist_repo
-        repo.add_item(media_type, tmdb_id, title, poster_path, release_date)
+        repo.add_item(current_user.uid, media_type, tmdb_id, title, poster_path, release_date)
 
         days = days_until(release_date)
         logger.info(f"Successfully added to watchlist: {media_type}/{tmdb_id}")
@@ -88,14 +89,14 @@ async def add_to_watchlist(request: Request, body: dict[str, Any]) -> dict[str, 
 
 
 @router.delete("/{media_type}/{tmdb_id}")
-async def remove_from_watchlist(media_type: str, tmdb_id: int, request: Request) -> dict[str, str]:
-    logger.info(f"Remove from watchlist request: {media_type}/{tmdb_id}")
+async def remove_from_watchlist(media_type: str, tmdb_id: int, request: Request, current_user: CurrentUser = Depends(get_current_user)) -> dict[str, str]:
+    logger.info(f"Remove from watchlist request for user {current_user.uid}: {media_type}/{tmdb_id}")
     if media_type not in {"movie", "tv"}:
         logger.warning(f"Invalid media_type for removal: {media_type}")
         raise HTTPException(status_code=400, detail="Invalid media_type")
     try:
         repo = request.app.state.watchlist_repo
-        removed = repo.remove_item(media_type, tmdb_id)
+        removed = repo.remove_item(current_user.uid, media_type, tmdb_id)
         if not removed:
             logger.warning(f"Item not found for removal: {media_type}/{tmdb_id}")
             raise HTTPException(status_code=404, detail="Not found")

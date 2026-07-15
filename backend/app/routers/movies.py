@@ -1,13 +1,14 @@
 import logging
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request, Depends
 
+from app.auth import get_current_user
 from app.services.tmdb import TmdbClient, fetch_news
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api", tags=["movies"])
+router = APIRouter(prefix="/api", tags=["movies"], dependencies=[Depends(get_current_user)])
 
 
 @router.get("/search")

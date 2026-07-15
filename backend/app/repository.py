@@ -17,13 +17,14 @@ class WatchlistRepository(ABC):
     """Abstract base class for watchlist storage backends."""
 
     @abstractmethod
-    def list_items(self) -> list[dict[str, Any]]:
+    def list_items(self, user_id: str) -> list[dict[str, Any]]:
         """Return all watchlist items ordered by added_at descending."""
         ...
 
     @abstractmethod
     def add_item(
         self,
+        user_id: str,
         media_type: str,
         tmdb_id: int,
         title: str,
@@ -38,7 +39,7 @@ class WatchlistRepository(ABC):
         ...
 
     @abstractmethod
-    def remove_item(self, media_type: str, tmdb_id: int) -> bool:
+    def remove_item(self, user_id: str, media_type: str, tmdb_id: int) -> bool:
         """Remove an item from the watchlist.
 
         Returns:
@@ -47,7 +48,7 @@ class WatchlistRepository(ABC):
         ...
 
     @abstractmethod
-    def clear_all(self) -> None:
+    def clear_all(self, user_id: str) -> None:
         """Remove all items. Used for testing."""
         ...
 

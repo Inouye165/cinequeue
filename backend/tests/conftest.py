@@ -3,8 +3,9 @@ import sys
 import tempfile
 from pathlib import Path
 
-# Ensure WATCHLIST_BACKEND defaults to sqlite for tests
+# Ensure WATCHLIST_BACKEND and AUTH_ENABLED default for tests
 os.environ.setdefault("WATCHLIST_BACKEND", "sqlite")
+os.environ.setdefault("AUTH_ENABLED", "false")
 
 # Use a temporary directory for test databases so tests don't pollute real data
 _test_data_dir = tempfile.mkdtemp(prefix="cinequeue_test_")
@@ -25,5 +26,5 @@ def setup_database():
 
     repo = SqliteWatchlistRepository()
     app.state.watchlist_repo = repo
-    repo.clear_all()
+    repo.clear_all("local_test_user")
     yield

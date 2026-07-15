@@ -7,9 +7,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.config import TMDB_API_KEY, WATCHLIST_BACKEND, GOOGLE_CLOUD_PROJECT
+from app.config import TMDB_API_KEY, WATCHLIST_BACKEND, GOOGLE_CLOUD_PROJECT, AUTH_ALLOWED_ORIGINS, ENVIRONMENT
 from app.logging_config import setup_logging
-from app.routers import movies, watchlist
+from app.routers import movies, watchlist, auth
 from app.services.tmdb import TmdbClient
 
 setup_logging()
@@ -21,6 +21,26 @@ FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting application lifespan")
+
+    if ENVIRONMENT == "development":
+        from app.config import (
+            AUTH_ENABLED,
+            AUTH_MODE,
+            AUTH_ALLOWED_ORIGINS,
+            FIREBASE_PROJECT_ID,
+            SESSION_COOKIE_SECURE,
+            SESSION_COOKIE_NAME,
+        )
+        logger.info("=== Development Auth Diagnostics ===")
+        logger.info("ENVIRONMENT: %s", ENVIRONMENT)
+        logger.info("AUTH_ENABLED: %s", AUTH_ENABLED)
+        logger.info("AUTH_MODE: %s", AUTH_MODE)
+        logger.info("AUTH_ALLOWED_ORIGINS: %s", AUTH_ALLOWED_ORIGINS)
+        logger.info("FIREBASE_PROJECT_ID: %s", FIREBASE_PROJECT_ID)
+        logger.info("SESSION_COOKIE_SECURE: %s", SESSION_COOKIE_SECURE)
+        logger.info("SESSION_COOKIE_NAME: %s", SESSION_COOKIE_NAME)
+        logger.info("WATCHLIST_BACKEND: %s", WATCHLIST_BACKEND)
+        logger.info("====================================")
 
     # -- Watchlist repository --------------------------------------------------
     if WATCHLIST_BACKEND == "firestore":
@@ -57,7 +77,7 @@ app = FastAPI(title="Cinequeue", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=AUTH_ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -65,8 +85,36 @@ app.add_middleware(
 
 
 @app.middleware("http")
+async def add_security_headers(request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    
+    csp = (
+        "default-src 'self'; "
+        "script-src 'self' https://apis.google.com https://www.gstatic.com; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+        "font-src 'self' https://fonts.gstatic.com; "
+        "img-src 'self' data: https://image.tmdb.org https://*.googleusercontent.com; "
+        "frame-src 'self' https://cinequeue-inouye-2026.firebaseapp.com https://*.firebaseapp.com; "
+        "connect-src 'self' https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://*.googleapis.com;"
+    )
+    response.headers["Content-Security-Policy"] = csp
+    
+    if ENVIRONMENT == "production":
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains; preload"
+        
+    return response
+
+
+@app.middleware("http")
 async def check_tmdb_key(request, call_next):
-    if request.url.path.startswith("/api") and request.url.path != "/api/health":
+    if (
+        request.url.path.startswith("/api")
+        and not request.url.path.startswith("/api/auth")
+        and request.url.path != "/api/health"
+    ):
         if not app.state.tmdb:
             from fastapi.responses import JSONResponse
 
@@ -82,6 +130,7 @@ async def health():
     return {"status": "ok", "tmdb_configured": bool(TMDB_API_KEY)}
 
 
+app.include_router(auth.router)
 app.include_router(movies.router)
 app.include_router(watchlist.router)
 
