@@ -52,7 +52,7 @@ cd backend
 python -m venv .venv
 .venv\Scripts\activate   # Windows
 pip install -r requirements.txt
-uvicorn app.main:app --reload --port 8000
+uvicorn app.main:app --reload --port 8081
 ```
 
 ### 4. Frontend development (separate terminal)
@@ -63,7 +63,7 @@ npm install
 npm run dev
 ```
 
-Open [http://localhost:5173](http://localhost:5173). The Vite dev server proxies `/api` to port 8000.
+Open [http://localhost:5173](http://localhost:5173). The Vite dev server proxies `/api` to port 8081.
 
 ### 5. Local testing
 
