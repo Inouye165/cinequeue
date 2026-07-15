@@ -1,6 +1,8 @@
 import logging
 import secrets
 import hmac
+import re
+import time
 from typing import Optional
 from fastapi import Request, HTTPException, Depends
 from fastapi.security import APIKeyCookie
@@ -69,9 +71,31 @@ async def get_current_user(
         raise HTTPException(status_code=401, detail="Session cookie is missing")
 
     try:
-        # Verify the session cookie, checking for revoked or disabled sessions.
-        # This will query the Identity Platform backend and respects the roles/firebaseauth.viewer permission.
-        decoded_claims = auth.verify_session_cookie(session_cookie, check_revoked=True)
+        try:
+            # Verify the session cookie, checking for revoked or disabled sessions.
+            # This will query the Identity Platform backend and respects the roles/firebaseauth.viewer permission.
+            decoded_claims = auth.verify_session_cookie(session_cookie, check_revoked=True)
+        except Exception as e:
+            if "Token used too early" in str(e):
+                match = re.search(r"Token used too early,\s*(\d+)\s*<\s*(\d+)", str(e))
+                sleep_time = 5.0
+                drift_val = "unknown"
+                if match:
+                    local_time_val = int(match.group(1))
+                    token_time_val = int(match.group(2))
+                    drift_seconds = token_time_val - local_time_val
+                    drift_val = str(drift_seconds)
+                    sleep_time = float(drift_seconds) + 2.0
+                
+                logger.warning(
+                    "Session cookie used too early due to clock skew (%s seconds drift). "
+                    "Retrying in %s seconds...",
+                    drift_val, sleep_time
+                )
+                time.sleep(sleep_time)
+                decoded_claims = auth.verify_session_cookie(session_cookie, check_revoked=True)
+            else:
+                raise
         
         email = decoded_claims.get("email")
         if not email:
