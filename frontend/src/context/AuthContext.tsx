@@ -1,8 +1,7 @@
 import React, { createContext, useContext, useEffect, useState } from "react";
 import { initializeApp, getApps, getApp, deleteApp } from "firebase/app";
 import {
-  initializeAuth,
-  inMemoryPersistence,
+  getAuth,
   GoogleAuthProvider,
   signInWithPopup,
   signOut as firebaseSignOut,
@@ -34,21 +33,26 @@ async function getFirebaseAuth(): Promise<FirebaseAuth> {
   if (firebaseAuthInstance) return firebaseAuthInstance;
 
   const config = await api.firebaseConfig();
+  console.log("Firebase Config fetched:", config);
+  
   let app;
   if (getApps().length === 0) {
     app = initializeApp(config);
+    console.log("Initialized new Firebase App");
   } else {
     app = getApp();
     try {
       await deleteApp(app);
+      console.log("Deleted old Firebase App");
     } catch (err) {
       console.warn("Failed to delete existing app:", err);
     }
     app = initializeApp(config);
+    console.log("Re-initialized Firebase App");
   }
-  firebaseAuthInstance = initializeAuth(app, {
-    persistence: inMemoryPersistence
-  });
+  
+  firebaseAuthInstance = getAuth(app);
+  console.log("Firebase Auth instance:", firebaseAuthInstance);
   return firebaseAuthInstance;
 }
 
