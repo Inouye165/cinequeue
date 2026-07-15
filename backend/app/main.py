@@ -90,12 +90,11 @@ async def add_security_headers(request, call_next):
 
 @app.middleware("http")
 async def check_tmdb_key(request, call_next):
-    if request.url.path.startswith("/api") and request.url.path not in {
-        "/api/health",
-        "/api/auth/config",
-        "/api/auth/csrf",
-        "/api/auth/session",
-    }:
+    if (
+        request.url.path.startswith("/api")
+        and not request.url.path.startswith("/api/auth")
+        and request.url.path != "/api/health"
+    ):
         if not app.state.tmdb:
             from fastapi.responses import JSONResponse
 
