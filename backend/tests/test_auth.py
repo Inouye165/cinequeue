@@ -1,6 +1,6 @@
 import time
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 from fastapi.testclient import TestClient
 from firebase_admin import auth as firebase_auth
 
@@ -34,6 +34,7 @@ def client_with_auth():
         # We need to reload main to recreate App and mount new route dependencies
         import app.main
         importlib.reload(app.main)
+        app.main.app.state.tmdb = AsyncMock()
         
         with TestClient(app.main.app, base_url="https://testserver") as c:
             yield c
@@ -294,9 +295,10 @@ def test_user_watchlist_isolation(mock_verify_cookie, client_with_auth):
     }
 
     # Add item to User A's watchlist
-    # Mock TMDB details
-    app.state.tmdb = MagicMock()
-    app.state.tmdb.get_details = MagicMock()
+    # Mock TMDB details on the active reloaded app instance
+    import app.main
+    app.main.app.state.tmdb = AsyncMock()
+    app.main.app.state.tmdb.get_details = AsyncMock()
     
     # Use AsyncMock for async methods
     async def mock_get_details(media_type, tmdb_id):
@@ -306,7 +308,7 @@ def test_user_watchlist_isolation(mock_verify_cookie, client_with_auth):
             "title": "Movie A",
             "overview": "Overview A"
         }
-    app.state.tmdb.get_details = mock_get_details
+    app.main.app.state.tmdb.get_details = mock_get_details
     
     csrf_res = client_with_auth.get("/api/auth/csrf")
     csrf_token = csrf_res.json()["csrf_token"]
