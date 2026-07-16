@@ -13,6 +13,7 @@ def client_with_admin_auth():
         "AUTH_ALLOWED_ORIGINS": "https://cinequeue-7tvty3vmvq-uw.a.run.app",
         "ENVIRONMENT": "production",
         "SESSION_COOKIE_SECURE": "true",
+        "FIREBASE_API_KEY": "mock_firebase_api_key",
         "ADMIN_USERNAME": "admin",
         "ADMIN_PASSWORD": "admin_secure_pass_2026"
     }):
