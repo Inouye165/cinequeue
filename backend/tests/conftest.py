@@ -1,11 +1,16 @@
+"""Shared fixtures and environment setup for backend tests."""
+
+# The test environment must be configured before importing the application.
+# pylint: disable=wrong-import-position,import-outside-toplevel
+
 import os
 import sys
 import tempfile
 from pathlib import Path
 
-# Ensure WATCHLIST_BACKEND and AUTH_ENABLED default for tests
-os.environ.setdefault("WATCHLIST_BACKEND", "sqlite")
-os.environ.setdefault("AUTH_ENABLED", "false")
+# Keep the default test app unauthenticated regardless of local shell or .env settings.
+os.environ["WATCHLIST_BACKEND"] = "sqlite"
+os.environ["AUTH_ENABLED"] = "false"
 
 # Use a temporary directory for test databases so tests don't pollute real data
 _test_data_dir = tempfile.mkdtemp(prefix="cinequeue_test_")

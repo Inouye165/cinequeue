@@ -9,7 +9,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.config import TMDB_API_KEY, WATCHLIST_BACKEND, GOOGLE_CLOUD_PROJECT, AUTH_ALLOWED_ORIGINS, ENVIRONMENT
 from app.logging_config import setup_logging
-from app.routers import movies, watchlist, auth
+from app.routers import movies, watchlist, auth, admin
 from app.services.tmdb import TmdbClient
 
 setup_logging()
@@ -66,6 +66,19 @@ async def lifespan(app: FastAPI):
     else:
         logger.warning("TMDB_API_KEY not configured")
         app.state.tmdb = None
+    # -- Initialize Admin User -------------------------------------------------
+    repo = app.state.watchlist_repo
+    from app.config import ADMIN_USERNAME, ADMIN_PASSWORD
+    from app.services.admin_auth import hash_password, generate_salt
+    try:
+        if not repo.get_admin_user(ADMIN_USERNAME):
+            salt = generate_salt()
+            pwd_hash = hash_password(ADMIN_PASSWORD, salt)
+            repo.create_admin_user(ADMIN_USERNAME, pwd_hash, salt)
+            logger.info("Initialized default admin user '%s' in database", ADMIN_USERNAME)
+    except Exception as e:
+        logger.error("Failed to initialize default admin user: %s", e)
+
     yield
     if app.state.tmdb:
         await app.state.tmdb.close()
@@ -131,6 +144,7 @@ async def health():
 
 
 app.include_router(auth.router)
+app.include_router(admin.router)
 app.include_router(movies.router)
 app.include_router(watchlist.router)
 

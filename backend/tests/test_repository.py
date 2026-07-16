@@ -80,6 +80,33 @@ class TestSqliteRepository:
         assert items[0]["title"] == "Second"
         assert items[1]["title"] == "First"
 
+    def test_add_item_owned(self):
+        result = self.repo.add_item("local_test_user", "movie", 987, "Owned Movie", None, None, is_owned=True, owned_format="hard_copy")
+        assert result["is_owned"] is True
+        assert result["owned_format"] == "hard_copy"
+
+        items = self.repo.list_items("local_test_user")
+        assert len(items) == 1
+        assert items[0]["is_owned"] is True
+        assert items[0]["owned_format"] == "hard_copy"
+
+    def test_update_item(self):
+        self.repo.add_item("local_test_user", "movie", 555, "Unowned Movie", None, None, is_owned=False)
+        items = self.repo.list_items("local_test_user")
+        assert items[0]["is_owned"] is False
+
+        updated = self.repo.update_item("local_test_user", "movie", 555, is_owned=True, owned_format="electronic")
+        assert updated is not None
+        assert updated["is_owned"] is True
+        assert updated["owned_format"] == "electronic"
+
+        items = self.repo.list_items("local_test_user")
+        assert items[0]["is_owned"] is True
+        assert items[0]["owned_format"] == "electronic"
+
+        # Update non-existent
+        assert self.repo.update_item("local_test_user", "movie", 999, is_owned=True, owned_format="cloud") is None
+
 
 # ---------------------------------------------------------------------------
 # Firestore repository tests (mocked — no production access)

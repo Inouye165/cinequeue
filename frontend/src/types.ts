@@ -20,6 +20,8 @@ export interface WatchlistItem extends MediaItem {
   poster_path?: string;
   added_at?: string;
   status?: string;
+  is_owned?: boolean;
+  owned_format?: "electronic" | "cloud" | "hard_copy" | null;
 }
 
 export interface Provider {

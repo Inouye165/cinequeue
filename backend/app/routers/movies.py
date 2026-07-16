@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from typing import Any
 
@@ -85,10 +86,14 @@ async def media_details(media_type: str, tmdb_id: int, request: Request) -> dict
     tmdb: TmdbClient = request.app.state.tmdb
     try:
         details = await tmdb.get_details(media_type, tmdb_id)
-        providers = await tmdb.get_watch_providers(media_type, tmdb_id)
-        reviews = await tmdb.get_reviews(media_type, tmdb_id)
-        release_info = await tmdb.get_release_info(media_type, tmdb_id)
-        news = await fetch_news(details["title"])
+        
+        # Concurrently fetch other details
+        providers, reviews, release_info, news = await asyncio.gather(
+            tmdb.get_watch_providers(media_type, tmdb_id),
+            tmdb.get_reviews(media_type, tmdb_id),
+            tmdb.get_release_info(media_type, tmdb_id),
+            fetch_news(details["title"]),
+        )
         logger.info(f"Media details retrieved successfully for {media_type}/{tmdb_id}")
         return {
             **details,

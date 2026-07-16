@@ -36,15 +36,15 @@ AUTH_ALLOWED_EMAILS = [e.strip().lower() for e in _raw_emails.split(",") if e.st
 
 _raw_origins = os.getenv("AUTH_ALLOWED_ORIGINS", "")
 AUTH_ALLOWED_ORIGINS = [o.strip() for o in _raw_origins.split(",") if o.strip()] or [
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
+    "http://localhost:5180",
+    "http://127.0.0.1:5180",
     "http://localhost:8080",
     "http://127.0.0.1:8080",
 ]
 
 FIREBASE_PROJECT_ID = os.getenv("FIREBASE_PROJECT_ID", GOOGLE_CLOUD_PROJECT or "cinequeue-inouye-2026").strip()
 
-FIREBASE_API_KEY = os.getenv("FIREBASE_API_KEY", "AIzaSyAOlo4dMXfvW7Su-33uHogwdu_3zz1TR9M").strip()
+FIREBASE_API_KEY = os.getenv("FIREBASE_API_KEY", "").strip()
 FIREBASE_AUTH_DOMAIN = os.getenv("FIREBASE_AUTH_DOMAIN", "cinequeue-inouye-2026.firebaseapp.com").strip()
 FIREBASE_APP_ID = os.getenv("FIREBASE_APP_ID", "1:568212960791:web:000e9657bed24ce73e8e52").strip()
 FIREBASE_MESSAGING_SENDER_ID = os.getenv("FIREBASE_MESSAGING_SENDER_ID", "568212960791").strip()
@@ -61,12 +61,26 @@ if SESSION_COOKIE_SECURE:
 else:
     SESSION_COOKIE_NAME = "cinequeue_session"
 
+# Admin configurations
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin").strip()
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "").strip()
+
+# Default admin password for local development
+if ENVIRONMENT == "development" and not ADMIN_PASSWORD:
+    ADMIN_PASSWORD = "admin_secure_pass_2026"
+
+ADMIN_SESSION_COOKIE_NAME = "cinequeue_admin_session"
+
 # Fail-closed validation for production
 if AUTH_ENABLED:
     if not FIREBASE_PROJECT_ID:
         raise ValueError("FIREBASE_PROJECT_ID must be set when AUTH_ENABLED is True")
+    if not FIREBASE_API_KEY:
+        raise ValueError("FIREBASE_API_KEY must be set when AUTH_ENABLED is True")
     if AUTH_MODE == "allowlist" and not AUTH_ALLOWED_EMAILS:
         raise ValueError("AUTH_ALLOWED_EMAILS must be set when AUTH_MODE is 'allowlist' and AUTH_ENABLED is True")
     if ENVIRONMENT == "production" and not AUTH_ALLOWED_ORIGINS:
         raise ValueError("AUTH_ALLOWED_ORIGINS must be set in production when AUTH_ENABLED is True")
+    if ENVIRONMENT == "production" and not ADMIN_PASSWORD:
+        raise ValueError("ADMIN_PASSWORD must be set in production when AUTH_ENABLED is True")
 

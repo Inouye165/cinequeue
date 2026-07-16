@@ -1,14 +1,17 @@
-import time
-import pytest
-from unittest.mock import patch, MagicMock, AsyncMock
-from fastapi.testclient import TestClient
-from firebase_admin import auth as firebase_auth
+"""Tests for the backend authentication and authorization flow."""
 
-from app.main import app
-from app.config import SESSION_COOKIE_NAME
+# pylint: disable=redefined-outer-name,import-outside-toplevel
+
+import time
+from unittest.mock import patch, AsyncMock
+
+import pytest
+from fastapi.testclient import TestClient
+
 
 @pytest.fixture
 def client_with_auth():
+    """Fixture to provide a test client with mock Firebase Auth enabled."""
     # Force AUTH_ENABLED=True during these tests
     with patch.dict("os.environ", {
         "AUTH_ENABLED": "true",
@@ -16,7 +19,9 @@ def client_with_auth():
         "AUTH_ALLOWED_EMAILS": "inouye165@gmail.com",
         "AUTH_ALLOWED_ORIGINS": "https://cinequeue-7tvty3vmvq-uw.a.run.app",
         "ENVIRONMENT": "production",
-        "SESSION_COOKIE_SECURE": "true"
+        "SESSION_COOKIE_SECURE": "true",
+        "FIREBASE_API_KEY": "mock_firebase_api_key",
+        "ADMIN_PASSWORD": "mock_admin_password_2026"
     }):
         # Reload app configurations to pick up env vars
         import importlib
@@ -30,41 +35,43 @@ def client_with_auth():
         importlib.reload(app.routers.watchlist)
         import app.routers.movies
         importlib.reload(app.routers.movies)
-        
+
         # We need to reload main to recreate App and mount new route dependencies
         import app.main
         importlib.reload(app.main)
-        
+
         with TestClient(app.main.app, base_url="https://testserver") as c:
             app.main.app.state.tmdb = AsyncMock()
             yield c
-            
-        # Restore configuration to defaults
-        importlib.reload(app.config)
-        importlib.reload(app.auth)
-        import app.routers.auth
-        importlib.reload(app.routers.auth)
-        import app.routers.watchlist
-        importlib.reload(app.routers.watchlist)
-        import app.routers.movies
-        importlib.reload(app.routers.movies)
-        importlib.reload(app.auth)
-        importlib.reload(app.main)
+
+    # Reload only after patch.dict restores the unauthenticated test environment.
+    importlib.reload(app.config)
+    importlib.reload(app.auth)
+    import app.routers.auth
+    importlib.reload(app.routers.auth)
+    import app.routers.watchlist
+    importlib.reload(app.routers.watchlist)
+    import app.routers.movies
+    importlib.reload(app.routers.movies)
+    importlib.reload(app.main)
+
 
 def test_health_remains_public(client_with_auth):
     """Health endpoint remains public when auth is enabled."""
     response = client_with_auth.get("/api/health")
     assert response.status_code == 200
 
+
 def test_endpoints_require_authentication(client_with_auth):
     """Application endpoints require authentication."""
     # Search
     response = client_with_auth.get("/api/search?q=matrix")
     assert response.status_code == 401
-    
+
     # Watchlist
     response = client_with_auth.get("/api/watchlist")
     assert response.status_code == 401
+
 
 def test_csrf_generation(client_with_auth):
     """CSRF endpoint generates token and sets cookie."""
@@ -74,6 +81,7 @@ def test_csrf_generation(client_with_auth):
     assert "csrf_token" in data
     assert "cinequeue_csrf" in response.cookies
     assert response.cookies["cinequeue_csrf"] == data["csrf_token"]
+
 
 @patch("app.routers.auth.firebase_auth.verify_id_token")
 @patch("app.routers.auth.firebase_auth.create_session_cookie")
@@ -134,6 +142,7 @@ def test_session_creation_rejects_non_allowlist(mock_verify_token, client_with_a
     )
     assert response.status_code == 403
 
+
 @patch("app.routers.auth.firebase_auth.verify_id_token")
 def test_session_creation_rejects_unverified_email(mock_verify_token, client_with_auth):
     """Unverified email gets 401."""
@@ -154,6 +163,7 @@ def test_session_creation_rejects_unverified_email(mock_verify_token, client_wit
     )
     assert response.status_code == 401
 
+
 @patch("app.routers.auth.firebase_auth.verify_id_token")
 def test_session_creation_rejects_old_auth_time(mock_verify_token, client_with_auth):
     """Old auth_time (>5 mins) gets 401."""
@@ -161,7 +171,7 @@ def test_session_creation_rejects_old_auth_time(mock_verify_token, client_with_a
         "uid": "user_abc",
         "email": "inouye165@gmail.com",
         "email_verified": True,
-        "auth_time": time.time() - 360 # 6 minutes ago
+        "auth_time": time.time() - 360  # 6 minutes ago
     }
 
     csrf_res = client_with_auth.get("/api/auth/csrf")
@@ -174,6 +184,7 @@ def test_session_creation_rejects_old_auth_time(mock_verify_token, client_with_a
     )
     assert response.status_code == 401
 
+
 def test_session_creation_requires_valid_csrf(client_with_auth):
     """Session creation fails with mismatched CSRF."""
     response = client_with_auth.post(
@@ -182,6 +193,7 @@ def test_session_creation_requires_valid_csrf(client_with_auth):
         headers={"Origin": "https://cinequeue-7tvty3vmvq-uw.a.run.app"}
     )
     assert response.status_code == 401
+
 
 def test_session_creation_rejects_mismatched_origin(client_with_auth):
     """Session creation rejects invalid Origin."""
@@ -194,6 +206,7 @@ def test_session_creation_rejects_mismatched_origin(client_with_auth):
         headers={"Origin": "https://malicious.com"}
     )
     assert response.status_code == 401
+
 
 @patch("app.auth.auth.verify_session_cookie")
 def test_me_endpoint_success(mock_verify_cookie, client_with_auth):
@@ -218,6 +231,7 @@ def test_me_endpoint_success(mock_verify_cookie, client_with_auth):
     # Never return all Firebase token claims
     assert "email_verified" not in data
 
+
 @patch("app.auth.auth.verify_session_cookie")
 def test_me_endpoint_invalid_cookie(mock_verify_cookie, client_with_auth):
     """Invalid session cookie returns 401."""
@@ -228,6 +242,7 @@ def test_me_endpoint_invalid_cookie(mock_verify_cookie, client_with_auth):
         headers={"Cookie": "__Host-cinequeue_session=invalid_token"}
     )
     assert response.status_code == 401
+
 
 @patch("app.auth.auth.verify_session_cookie")
 def test_me_endpoint_revoked_cookie(mock_verify_cookie, client_with_auth):
@@ -241,6 +256,7 @@ def test_me_endpoint_revoked_cookie(mock_verify_cookie, client_with_auth):
     )
     assert response.status_code == 401
 
+
 @patch("app.auth.auth.verify_session_cookie")
 def test_me_endpoint_disabled_user(mock_verify_cookie, client_with_auth):
     """Disabled user account returns 401."""
@@ -253,6 +269,7 @@ def test_me_endpoint_disabled_user(mock_verify_cookie, client_with_auth):
     )
     assert response.status_code == 401
 
+
 def test_logout_requires_csrf(client_with_auth):
     """Logout endpoint requires valid CSRF."""
     response = client_with_auth.post(
@@ -261,6 +278,7 @@ def test_logout_requires_csrf(client_with_auth):
         headers={"Origin": "https://cinequeue-7tvty3vmvq-uw.a.run.app"}
     )
     assert response.status_code == 401
+
 
 def test_logout_clears_cookies(client_with_auth):
     """Logout endpoint clears cookies Instruction: verify clear headers."""
@@ -276,13 +294,14 @@ def test_logout_clears_cookies(client_with_auth):
         }
     )
     assert response.status_code == 200
-    
+
     # Verify set-cookie header clears the session cookie
     set_cookies = response.headers.get_list("set-cookie")
     session_cookie = [c for c in set_cookies if "__Host-cinequeue_session" in c]
     assert len(session_cookie) > 0
     cookie_str = session_cookie[0]
     assert "Max-Age=0" in cookie_str or "expires=Thu, 01 Jan 1970 00:00:00 GMT" in cookie_str
+
 
 @patch("app.auth.auth.verify_session_cookie")
 def test_user_watchlist_isolation(mock_verify_cookie, client_with_auth):
@@ -299,7 +318,7 @@ def test_user_watchlist_isolation(mock_verify_cookie, client_with_auth):
     import app.main
     app.main.app.state.tmdb = AsyncMock()
     app.main.app.state.tmdb.get_details = AsyncMock()
-    
+
     # Use AsyncMock for async methods
     async def mock_get_details(media_type, tmdb_id):
         return {
@@ -309,7 +328,7 @@ def test_user_watchlist_isolation(mock_verify_cookie, client_with_auth):
             "overview": "Overview A"
         }
     app.main.app.state.tmdb.get_details = mock_get_details
-    
+
     csrf_res = client_with_auth.get("/api/auth/csrf")
     csrf_token = csrf_res.json()["csrf_token"]
 
@@ -339,21 +358,22 @@ def test_user_watchlist_isolation(mock_verify_cookie, client_with_auth):
         "email": "inouye165@gmail.com",
         "email_verified": True
     }
-    
+
     # Retrieve User B's watchlist (should be empty!)
-    list_res_B = client_with_auth.get(
+    list_res_b = client_with_auth.get(
         "/api/watchlist",
         headers={"Cookie": "__Host-cinequeue_session=session_token_value"}
     )
-    assert list_res_B.status_code == 200
-    assert len(list_res_B.json()) == 0
+    assert list_res_b.status_code == 200
+    assert len(list_res_b.json()) == 0
+
 
 def test_production_fails_closed_if_config_missing():
     """Production configuration fails closed on missing parameters."""
     with patch.dict("os.environ", {
         "AUTH_ENABLED": "true",
         "ENVIRONMENT": "production",
-        "AUTH_ALLOWED_EMAILS": "", # Missing allowlist
+        "AUTH_ALLOWED_EMAILS": "",  # Missing allowlist
     }):
         with pytest.raises(ValueError):
             import importlib

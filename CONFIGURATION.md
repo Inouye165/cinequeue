@@ -20,7 +20,7 @@ BACKEND_PORT=8001
 BACKEND_HOST=127.0.0.1
 
 # Frontend Configuration
-FRONTEND_PORT=5173
+FRONTEND_PORT=5180
 ```
 
 ### Future Services (Placeholders)

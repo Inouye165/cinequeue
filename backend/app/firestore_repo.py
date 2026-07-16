@@ -40,7 +40,13 @@ class FirestoreWatchlistRepository(WatchlistRepository):
             .order_by("added_at", direction=firestore.Query.DESCENDING)
             .stream()
         )
-        return [doc.to_dict() for doc in docs]
+        res = []
+        for doc in docs:
+            d = doc.to_dict()
+            d.setdefault("is_owned", False)
+            d.setdefault("owned_format", None)
+            res.append(d)
+        return res
 
     def add_item(
         self,
@@ -50,6 +56,8 @@ class FirestoreWatchlistRepository(WatchlistRepository):
         title: str,
         poster_path: str | None,
         release_date: str | None,
+        is_owned: bool = False,
+        owned_format: str | None = None,
     ) -> dict[str, Any]:
         doc_id = _doc_id(media_type, tmdb_id)
         col = self._user_watchlist_col(user_id)
@@ -67,9 +75,52 @@ class FirestoreWatchlistRepository(WatchlistRepository):
             "poster_path": poster_path,
             "release_date": release_date,
             "added_at": added_at,
+            "is_owned": is_owned,
+            "owned_format": owned_format,
         }
         doc_ref.set(data)
         return data
+
+    def update_item(
+        self,
+        user_id: str,
+        media_type: str,
+        tmdb_id: int,
+        is_owned: bool,
+        owned_format: str | None,
+    ) -> dict[str, Any] | None:
+        doc_id = _doc_id(media_type, tmdb_id)
+        col = self._user_watchlist_col(user_id)
+        doc_ref = col.document(doc_id)
+        snapshot = doc_ref.get()
+        if not snapshot.exists:
+            return None
+        data = {
+            "is_owned": is_owned,
+            "owned_format": owned_format,
+        }
+        doc_ref.update(data)
+        updated = snapshot.to_dict()
+        updated.update(data)
+        return updated
+
+    def update_item_cache(
+        self,
+        user_id: str,
+        media_type: str,
+        tmdb_id: int,
+        details_cached: dict[str, Any],
+    ) -> None:
+        doc_id = _doc_id(media_type, tmdb_id)
+        col = self._user_watchlist_col(user_id)
+        doc_ref = col.document(doc_id)
+        if doc_ref.get().exists:
+            last_updated = self.utc_now_iso()
+            doc_ref.update({
+                "details_cached": details_cached,
+                "last_updated": last_updated,
+            })
+
 
     def remove_item(self, user_id: str, media_type: str, tmdb_id: int) -> bool:
         doc_id = _doc_id(media_type, tmdb_id)
@@ -86,3 +137,117 @@ class FirestoreWatchlistRepository(WatchlistRepository):
         col = self._user_watchlist_col(user_id)
         for doc in col.stream():
             doc.reference.delete()
+
+    # -- Admin & Auth Methods -------------------------------------------------
+
+    def get_admin_user(self, username: str) -> dict[str, Any] | None:
+        doc_ref = self._db.collection("admin_users").document(username)
+        snapshot = doc_ref.get()
+        if snapshot.exists:
+            res = snapshot.to_dict()
+            res["username"] = username
+            return res
+        return None
+
+    def create_admin_user(self, username: str, password_hash: str, salt: str) -> None:
+        doc_ref = self._db.collection("admin_users").document(username)
+        doc_ref.set({
+            "password_hash": password_hash,
+            "salt": salt
+        })
+
+    def create_admin_session(self, session_id: str, username: str, expires_at: str) -> None:
+        created_at = self.utc_now_iso()
+        doc_ref = self._db.collection("admin_sessions").document(session_id)
+        doc_ref.set({
+            "username": username,
+            "created_at": created_at,
+            "expires_at": expires_at
+        })
+
+    def get_admin_session(self, session_id: str) -> dict[str, Any] | None:
+        doc_ref = self._db.collection("admin_sessions").document(session_id)
+        snapshot = doc_ref.get()
+        if snapshot.exists:
+            res = snapshot.to_dict()
+            res["session_id"] = session_id
+            return res
+        return None
+
+    def delete_admin_session(self, session_id: str) -> None:
+        doc_ref = self._db.collection("admin_sessions").document(session_id)
+        doc_ref.delete()
+
+    def get_user_approval(self, email: str) -> dict[str, Any] | None:
+        doc_ref = self._db.collection("user_approvals").document(email)
+        snapshot = doc_ref.get()
+        if snapshot.exists:
+            res = snapshot.to_dict()
+            res["email"] = email
+            return res
+        return None
+
+    def create_user_approval(self, email: str, status: str, requested_at: str) -> None:
+        doc_ref = self._db.collection("user_approvals").document(email)
+        if not doc_ref.get().exists:
+            doc_ref.set({
+                "status": status,
+                "requested_at": requested_at,
+                "decided_at": None,
+                "decided_by": None
+            })
+
+    def update_user_approval(self, email: str, status: str, decided_at: str, decided_by: str) -> None:
+        doc_ref = self._db.collection("user_approvals").document(email)
+        doc_ref.update({
+            "status": status,
+            "decided_at": decided_at,
+            "decided_by": decided_by
+        })
+
+    def list_user_approvals(self) -> list[dict[str, Any]]:
+        docs = (
+            self._db.collection("user_approvals")
+            .order_by("requested_at", direction=firestore.Query.DESCENDING)
+            .stream()
+        )
+        res = []
+        for doc in docs:
+            d = doc.to_dict()
+            d["email"] = doc.id
+            res.append(d)
+        return res
+
+    def log_login_attempt(
+        self,
+        email: str,
+        status: str,
+        reason: str,
+        ip_address: str,
+        user_agent: str,
+        timestamp: str,
+    ) -> None:
+        col = self._db.collection("login_logs")
+        col.add({
+            "email": email,
+            "timestamp": timestamp,
+            "status": status,
+            "reason": reason,
+            "ip_address": ip_address,
+            "user_agent": user_agent
+        })
+
+    def list_login_logs(self, limit: int = 100) -> list[dict[str, Any]]:
+        docs = (
+            self._db.collection("login_logs")
+            .order_by("timestamp", direction=firestore.Query.DESCENDING)
+            .limit(limit)
+            .stream()
+        )
+        res = []
+        for doc in docs:
+            d = doc.to_dict()
+            d["id"] = doc.id
+            res.append(d)
+        return res
+
