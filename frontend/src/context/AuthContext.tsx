@@ -38,6 +38,10 @@ async function getFirebaseAuth(): Promise<FirebaseAuth> {
   const config = await api.firebaseConfig();
   console.log("Firebase Config fetched:", config);
   
+  if (!config || !config.apiKey) {
+    throw new Error("Firebase API key is missing or empty. Please verify your backend .env file contains FIREBASE_API_KEY and restart the backend server.");
+  }
+  
   let app;
   if (getApps().length === 0) {
     app = initializeApp(config);
