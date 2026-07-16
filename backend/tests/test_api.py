@@ -239,7 +239,7 @@ def test_watchlist_graceful_error_handling(client, app_with_mock):
     bad_item = next(item for item in data if item["tmdb_id"] == 202)
     assert "overview" not in bad_item
     assert "vote_average" not in bad_item
-    assert "status" not in bad_item
+    assert "media_status" not in bad_item
     assert bad_item["days_away"] is not None
 
 
