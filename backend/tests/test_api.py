@@ -55,6 +55,7 @@ def mock_tmdb():
         },
     }
     tmdb.get_reviews.return_value = []
+    tmdb.get_videos.return_value = [{"key": "abc", "name": "Official Trailer"}]
     tmdb.get_release_info.return_value = {
         "theatrical": "2024-01-01",
         "digital": "2024-01-15",
@@ -139,6 +140,7 @@ def test_media_details_endpoint(client, app_with_mock):
     assert "reviews" in data
     assert "release_info" in data
     assert "news" in data
+    assert "trailers" in data
 
 
 def test_media_details_invalid_type(client, app_with_mock):
@@ -421,4 +423,44 @@ def test_watchlist_patch_not_found(client, app_with_mock):
         }
     )
     assert response.status_code == 404
+
+
+def test_watchlist_add_status(client, app_with_mock):
+    """Test adding an item with custom status."""
+    response = client.post(
+        "/api/watchlist",
+        json={
+            "media_type": "movie",
+            "tmdb_id": 901,
+            "title": "Following Movie",
+            "status": "following"
+        }
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "following"
+
+
+def test_watchlist_patch_status(client, app_with_mock):
+    """Test patching custom status of an item."""
+    client.post(
+        "/api/watchlist",
+        json={
+            "media_type": "movie",
+            "tmdb_id": 902,
+            "title": "Queue Movie",
+            "status": "queue"
+        }
+    )
+    
+    response = client.patch(
+        "/api/watchlist/movie/902",
+        json={
+            "status": "following"
+        }
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status_value"] == "following"
+
 

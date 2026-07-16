@@ -107,6 +107,24 @@ class TestSqliteRepository:
         # Update non-existent
         assert self.repo.update_item("local_test_user", "movie", 999, is_owned=True, owned_format="cloud") is None
 
+    def test_status_support(self):
+        # Default status is 'queue'
+        self.repo.add_item("local_test_user", "movie", 601, "Movie 601", None, None)
+        items = self.repo.list_items("local_test_user")
+        assert items[0]["status"] == "queue"
+
+        # Explicit status on add
+        self.repo.add_item("local_test_user", "movie", 602, "Movie 602", None, None, status="following")
+        items = self.repo.list_items("local_test_user")
+        item_602 = next(i for i in items if i["tmdb_id"] == 602)
+        assert item_602["status"] == "following"
+
+        # Update status
+        self.repo.update_item("local_test_user", "movie", 601, status="following")
+        items = self.repo.list_items("local_test_user")
+        item_601 = next(i for i in items if i["tmdb_id"] == 601)
+        assert item_601["status"] == "following"
+
 
 # ---------------------------------------------------------------------------
 # Firestore repository tests (mocked — no production access)
@@ -241,6 +259,21 @@ class TestFirestoreRepository:
         mock_doc1.reference.delete.assert_called_once()
         mock_doc2.reference.delete.assert_called_once()
         self.mock_users_collection.document.assert_called_with("user123")
+
+    def test_status_support(self):
+        mock_doc_ref = MagicMock()
+        mock_snapshot = MagicMock()
+        mock_snapshot.exists = True
+        mock_snapshot.to_dict.return_value = {"media_type": "movie", "tmdb_id": 12345, "title": "Test Movie"}
+        mock_doc_ref.get.return_value = mock_snapshot
+        self.mock_collection.document.return_value = mock_doc_ref
+
+        # Update status
+        result = self.repo.update_item("user123", "movie", 12345, status="following")
+        self.mock_collection.document.assert_called_with("movie_12345")
+        mock_doc_ref.update.assert_called_with({"status": "following"})
+        assert result is not None
+        assert result["status"] == "following"
 
 
 # ---------------------------------------------------------------------------

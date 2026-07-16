@@ -33,6 +33,7 @@ class SqliteWatchlistRepository(WatchlistRepository):
                     owned_format TEXT,
                     details_cached TEXT,
                     last_updated TEXT,
+                    status TEXT DEFAULT 'queue',
                     UNIQUE(user_id, media_type, tmdb_id)
                 )
                 """
@@ -101,6 +102,10 @@ class SqliteWatchlistRepository(WatchlistRepository):
                 conn.execute("ALTER TABLE watchlist ADD COLUMN last_updated TEXT")
             except sqlite3.OperationalError:
                 pass
+            try:
+                conn.execute("ALTER TABLE watchlist ADD COLUMN status TEXT DEFAULT 'queue'")
+            except sqlite3.OperationalError:
+                pass
 
     @contextmanager
     def _connection(self):
@@ -125,6 +130,7 @@ class SqliteWatchlistRepository(WatchlistRepository):
         for row in rows:
             d = dict(row)
             d["is_owned"] = bool(d.get("is_owned"))
+            d["status"] = d.get("status") or "queue"
             items.append(d)
         return items
 
@@ -138,16 +144,17 @@ class SqliteWatchlistRepository(WatchlistRepository):
         release_date: str | None,
         is_owned: bool = False,
         owned_format: str | None = None,
+        status: str = "queue",
     ) -> dict[str, Any]:
         added_at = self.utc_now_iso()
         try:
             with self._connection() as conn:
                 conn.execute(
                     """
-                    INSERT INTO watchlist (user_id, media_type, tmdb_id, title, poster_path, release_date, added_at, is_owned, owned_format)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO watchlist (user_id, media_type, tmdb_id, title, poster_path, release_date, added_at, is_owned, owned_format, status)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (user_id, media_type, tmdb_id, title, poster_path, release_date, added_at, 1 if is_owned else 0, owned_format),
+                    (user_id, media_type, tmdb_id, title, poster_path, release_date, added_at, 1 if is_owned else 0, owned_format, status),
                 )
         except sqlite3.IntegrityError as exc:
             raise DuplicateItemError(
@@ -163,6 +170,7 @@ class SqliteWatchlistRepository(WatchlistRepository):
             "added_at": added_at,
             "is_owned": is_owned,
             "owned_format": owned_format,
+            "status": status,
         }
 
     def update_item(
@@ -170,8 +178,9 @@ class SqliteWatchlistRepository(WatchlistRepository):
         user_id: str,
         media_type: str,
         tmdb_id: int,
-        is_owned: bool,
-        owned_format: str | None,
+        is_owned: bool | None = None,
+        owned_format: str | None = None,
+        status: str | None = None,
     ) -> dict[str, Any] | None:
         with self._connection() as conn:
             # First check if item exists
@@ -182,13 +191,19 @@ class SqliteWatchlistRepository(WatchlistRepository):
             if not row:
                 return None
 
+            current_is_owned = bool(row["is_owned"]) if is_owned is None else is_owned
+            current_owned_format = row["owned_format"] if is_owned is None else owned_format
+            if current_is_owned is False:
+                current_owned_format = None
+            current_status = row["status"] if status is None else status
+
             conn.execute(
                 """
                 UPDATE watchlist
-                SET is_owned = ?, owned_format = ?
+                SET is_owned = ?, owned_format = ?, status = ?
                 WHERE user_id = ? AND media_type = ? AND tmdb_id = ?
                 """,
-                (1 if is_owned else 0, owned_format, user_id, media_type, tmdb_id),
+                (1 if current_is_owned else 0, current_owned_format, current_status, user_id, media_type, tmdb_id),
             )
             
             # Fetch updated item
@@ -200,6 +215,7 @@ class SqliteWatchlistRepository(WatchlistRepository):
         if updated_row:
             d = dict(updated_row)
             d["is_owned"] = bool(d.get("is_owned"))
+            d["status"] = d.get("status") or "queue"
             return d
         return None
 

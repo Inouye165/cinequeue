@@ -23,11 +23,23 @@ def days_label(days: int | None) -> str:
     if days is None:
         return "Date TBA"
     if days < 0:
-        return f"Released {abs(days)}d ago"
+        return ""
     if days == 0:
         return "Out today"
     if days == 1:
         return "1 day away"
+    if days >= 30:
+        months = days // 30
+        return f"{months} month{'s' if months > 1 else ''} away"
+    if days >= 14:
+        weeks = days // 7
+        return f"{weeks} week{'s' if weeks > 1 else ''} away"
+    if days >= 7:
+        weeks = days // 7
+        remaining_days = days % 7
+        if remaining_days > 0:
+            return f"{weeks} week{'s' if weeks > 1 else ''} {remaining_days} day{'s' if remaining_days > 1 else ''} away"
+        return f"{weeks} week{'s' if weeks > 1 else ''} away"
     return f"{days} days away"
 
 

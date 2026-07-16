@@ -1,17 +1,85 @@
-import type { MediaDetails } from "../types";
+import { useState } from "react";
+import type { MediaDetails, Trailer } from "../types";
 
 interface Props {
   details: MediaDetails;
-  isOnWatchlist: boolean;
+  isOnQueue: boolean;
+  isFollowing: boolean;
   isOwned: boolean;
   ownedFormat: "electronic" | "cloud" | "hard_copy" | null;
   onClose: () => void;
   onAdd: () => void;
   onRemove: () => void;
   onUpdateOwned: (item: MediaDetails, isOwned: boolean, format?: "electronic" | "cloud" | "hard_copy") => void;
+  onMoveToFollowing: () => void;
+  onMoveToQueue: () => void;
 }
 
-export function DetailModal({ details, isOnWatchlist, isOwned, ownedFormat, onClose, onAdd, onRemove, onUpdateOwned }: Props) {
+function TrailerPlayer({ trailer }: { trailer: Trailer }) {
+  const [isExpanded, setIsExpanded] = useState(false);
+
+  return (
+    <div
+      className={`trailer-card ${isExpanded ? "expanded" : ""}`}
+      onClick={() => !isExpanded && setIsExpanded(true)}
+    >
+      {isExpanded ? (
+        <div className="trailer-player-wrapper">
+          <button
+            className="trailer-collapse-btn"
+            onClick={(e) => {
+              e.stopPropagation();
+              setIsExpanded(false);
+            }}
+          >
+            <svg
+              width="12"
+              height="12"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <line x1="18" y1="6" x2="6" y2="18"></line>
+              <line x1="6" y1="6" x2="18" y2="18"></line>
+            </svg>
+            Collapse
+          </button>
+          <iframe
+            src={`https://www.youtube.com/embed/${trailer.key}?autoplay=1&rel=0`}
+            title={trailer.name}
+            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+            allowFullScreen
+          />
+        </div>
+      ) : (
+        <div
+          className="trailer-thumbnail-wrapper"
+          style={{ backgroundImage: `url(https://img.youtube.com/vi/${trailer.key}/hqdefault.jpg)` }}
+        >
+          <div className="trailer-play-btn" />
+          <div className="trailer-title">{trailer.name}</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function DetailModal({
+  details,
+  isOnQueue,
+  isFollowing,
+  isOwned,
+  ownedFormat,
+  onClose,
+  onAdd,
+  onRemove,
+  onUpdateOwned,
+  onMoveToFollowing,
+  onMoveToQueue,
+}: Props) {
   const providers = details.watch_providers?.categories ?? {};
   const releaseInfo = details.release_info as Record<string, string | number | null | undefined>;
 
@@ -43,6 +111,11 @@ export function DetailModal({ details, isOnWatchlist, isOwned, ownedFormat, onCl
                     Owned
                   </span>
                 )}
+                {!isOwned && isFollowing && (
+                  <span className="badge-following" style={{ position: "static", boxShadow: "none", background: "var(--accent)", color: "#0b0d12" }}>
+                    Following
+                  </span>
+                )}
               </div>
               <h2>{details.title}</h2>
               {details.tagline ? <p>{details.tagline}</p> : null}
@@ -61,14 +134,30 @@ export function DetailModal({ details, isOnWatchlist, isOwned, ownedFormat, onCl
               </div>
               
               <div className="detail-owned-section">
-                {/* Queue buttons */}
+                {/* Queue / Following buttons */}
                 {!isOwned && (
                   <>
-                    {isOnWatchlist ? (
-                      <button className="pill-button" onClick={onRemove}>
-                        Remove from queue
-                      </button>
-                    ) : (
+                    {isOnQueue && (
+                      <>
+                        <button className="pill-button" onClick={onMoveToFollowing}>
+                          Start Watching (Following)
+                        </button>
+                        <button className="pill-button" onClick={onRemove}>
+                          Remove from queue
+                        </button>
+                      </>
+                    )}
+                    {isFollowing && (
+                      <>
+                        <button className="pill-button" onClick={onMoveToQueue}>
+                          Move to Queue
+                        </button>
+                        <button className="pill-button" onClick={onRemove}>
+                          Remove from following
+                        </button>
+                      </>
+                    )}
+                    {!isOnQueue && !isFollowing && (
                       <button className="pill-button" onClick={onAdd}>
                         Add to queue
                       </button>
@@ -119,6 +208,17 @@ export function DetailModal({ details, isOnWatchlist, isOwned, ownedFormat, onCl
 
         <div className="detail-content">
           {details.overview ? <p>{details.overview}</p> : null}
+
+          {details.trailers && details.trailers.length > 0 ? (
+            <section className="panel" style={{ padding: "20px" }}>
+              <h4 style={{ margin: "0 0 16px" }}>Official Trailer</h4>
+              <div className="trailers-container">
+                {details.trailers.map((trailer) => (
+                  <TrailerPlayer key={trailer.key} trailer={trailer} />
+                ))}
+              </div>
+            </section>
+          ) : null}
 
           <div className="detail-grid">
             <section className="panel">
