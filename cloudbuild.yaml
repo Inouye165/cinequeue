@@ -81,5 +81,5 @@ steps:
         "--max-instances=1",
         "--service-account=${_RUNTIME_SERVICE_ACCOUNT}",
         "--set-secrets=TMDB_API_KEY=${_TMDB_SECRET}:latest",
-        "--update-env-vars=WATCHLIST_BACKEND=firestore,GOOGLE_CLOUD_PROJECT=cinequeue-inouye-2026",
+        "--update-env-vars=WATCHLIST_BACKEND=firestore,GOOGLE_CLOUD_PROJECT=cinequeue-inouye-2026,FIREBASE_API_KEY=AIzaSyAOlo4dMXfvW7Su-33uHogwdu_3zz1TR9M,FIREBASE_AUTH_DOMAIN=cinequeue-inouye-2026.firebaseapp.com,FIREBASE_PROJECT_ID=cinequeue-inouye-2026,FIREBASE_MESSAGING_SENDER_ID=568212960791,FIREBASE_APP_ID=1:568212960791:web:000e9657bed24ce73e8e52",
       ]
