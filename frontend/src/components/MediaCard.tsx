@@ -6,9 +6,20 @@ interface Props {
   onAdd?: (item: MediaItem) => void;
   onRemove?: (item: MediaItem) => void;
   isOnWatchlist?: boolean;
+  isOwned?: boolean;
+  ownedFormat?: "electronic" | "cloud" | "hard_copy" | null;
 }
 
-export function MediaCard({ item, onOpen, onAdd, onRemove, isOnWatchlist }: Props) {
+function formatFormat(format?: string | null) {
+  if (format === "electronic") return "Electronic";
+  if (format === "cloud") return "Cloud";
+  if (format === "hard_copy") return "Hard Copy";
+  return "Owned";
+}
+
+export function MediaCard({ item, onOpen, onAdd, onRemove, isOnWatchlist, isOwned, ownedFormat }: Props) {
+  const showRemoveButton = isOnWatchlist || isOwned;
+
   return (
     <article className="media-card">
       <button className="card-hit" onClick={() => onOpen(item)} aria-label={`Open ${item.title}`}>
@@ -19,6 +30,11 @@ export function MediaCard({ item, onOpen, onAdd, onRemove, isOnWatchlist }: Prop
             <div className="poster-placeholder">No poster</div>
           )}
           <span className="badge">{item.media_type === "tv" ? "TV" : "Movie"}</span>
+          {isOwned && (
+            <span className="badge-owned" title={formatFormat(ownedFormat)}>
+              {formatFormat(ownedFormat)}
+            </span>
+          )}
         </div>
       </button>
       <div className="card-body">
@@ -33,7 +49,7 @@ export function MediaCard({ item, onOpen, onAdd, onRemove, isOnWatchlist }: Prop
           <button className="pill-button" onClick={() => onOpen(item)}>
             Details
           </button>
-          {isOnWatchlist ? (
+          {showRemoveButton ? (
             <button className="pill-button" onClick={() => onRemove?.(item)}>
               Remove
             </button>

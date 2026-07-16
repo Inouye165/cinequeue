@@ -69,6 +69,47 @@ export const api = {
       body: JSON.stringify({ csrf_token: csrfToken }),
     }),
 
+  // Admin endpoints
+  adminLogin: (username: string, password: string, csrfToken: string) =>
+    request<{ status: string }>("/api/admin/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password, csrf_token: csrfToken }),
+    }),
+  adminLogout: (csrfToken: string) =>
+    request<{ status: string }>("/api/admin/logout", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ csrf_token: csrfToken }),
+    }),
+  adminMe: () => request<{ username: string }>("/api/admin/me"),
+  adminRequests: () =>
+    request<{ approvals: Array<{ email: string; status: string; requested_at: string; decided_at?: string; decided_by?: string }> }>(
+      "/api/admin/requests"
+    ),
+  adminApprove: (email: string, csrfToken: string) =>
+    request<{ status: string }>("/api/admin/approve", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, csrf_token: csrfToken }),
+    }),
+  adminDeny: (email: string, csrfToken: string) =>
+    request<{ status: string }>("/api/admin/deny", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, csrf_token: csrfToken }),
+    }),
+  adminInvite: (email: string, csrfToken: string) =>
+    request<{ status: string }>("/api/admin/invite", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, csrf_token: csrfToken }),
+    }),
+  adminLoginLogs: () =>
+    request<{ logs: Array<{ id: string | number; email: string; timestamp: string; status: string; reason: string; ip_address?: string; user_agent?: string }> }>(
+      "/api/admin/login-logs"
+    ),
+
   // Watchlist & movies endpoints
   search: (q: string) => request<MediaItem[]>(`/api/search?q=${encodeURIComponent(q)}`),
   upcoming: () => request<MediaItem[]>("/api/upcoming"),
@@ -83,6 +124,12 @@ export const api = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(item),
+    }),
+  updateWatchlistItem: (mediaType: string, tmdbId: number, isOwned: boolean, ownedFormat: string | null) =>
+    request<{ status: string; is_owned: boolean; owned_format: string | null }>(`/api/watchlist/${mediaType}/${tmdbId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ is_owned: isOwned, owned_format: ownedFormat }),
     }),
   removeFromWatchlist: (mediaType: string, tmdbId: number) =>
     request<{ status: string }>(`/api/watchlist/${mediaType}/${tmdbId}`, {

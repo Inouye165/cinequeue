@@ -45,7 +45,32 @@ Create a `.env` file in the root workspace (or copy `.env.example`). Set:
 - `TMDB_API_KEY=your_tmdb_key_here`
 - `AUTH_ENABLED=false` (this enables local SQLite mock mode automatically bypasses Google sign-in and authenticates as `Local Developer` with local database storage).
 
-### 3. Backend development
+### 3. One-Command Startup (Recommended)
+
+You can start both backend and frontend servers with a single command:
+
+#### Option A: Unified Terminal (using `concurrently`)
+First, install root dependencies (if not already done):
+```bash
+npm install
+```
+Then start both servers in the same terminal:
+```bash
+npm run dev
+```
+
+#### Option B: Separate Windows (using helper scripts)
+If you prefer logs in separate terminal windows, run the batch script (on Windows):
+```cmd
+dev.bat
+```
+Or run the PowerShell script:
+```powershell
+.\dev.ps1
+```
+
+### 4. Manual Backend development
+
 
 ```bash
 cd backend
@@ -63,7 +88,7 @@ npm install
 npm run dev
 ```
 
-Open [http://localhost:5173](http://localhost:5173). The Vite dev server proxies `/api` to port 8081.
+Open [http://localhost:5180](http://localhost:5180). The Vite dev server proxies `/api` to port 8081.
 
 ### 5. Local testing
 

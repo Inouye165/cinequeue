@@ -30,6 +30,8 @@ class WatchlistRepository(ABC):
         title: str,
         poster_path: str | None,
         release_date: str | None,
+        is_owned: bool = False,
+        owned_format: str | None = None,
     ) -> dict[str, Any]:
         """Add an item to the watchlist.
 
@@ -37,6 +39,34 @@ class WatchlistRepository(ABC):
             DuplicateItemError: If the item already exists.
         """
         ...
+
+    @abstractmethod
+    def update_item(
+        self,
+        user_id: str,
+        media_type: str,
+        tmdb_id: int,
+        is_owned: bool,
+        owned_format: str | None,
+    ) -> dict[str, Any] | None:
+        """Update an item's owned status and format.
+
+        Returns:
+            The updated item dictionary, or None if not found.
+        """
+        ...
+
+    @abstractmethod
+    def update_item_cache(
+        self,
+        user_id: str,
+        media_type: str,
+        tmdb_id: int,
+        details_cached: dict[str, Any],
+    ) -> None:
+        """Update the cached details and last_updated timestamp for a watchlist item."""
+        ...
+
 
     @abstractmethod
     def remove_item(self, user_id: str, media_type: str, tmdb_id: int) -> bool:
@@ -56,3 +86,67 @@ class WatchlistRepository(ABC):
     def utc_now_iso() -> str:
         """Return the current UTC time as an ISO 8601 string."""
         return datetime.now(timezone.utc).isoformat()
+
+    @abstractmethod
+    def get_admin_user(self, username: str) -> dict[str, Any] | None:
+        """Retrieve admin user by username."""
+        ...
+
+    @abstractmethod
+    def create_admin_user(self, username: str, password_hash: str, salt: str) -> None:
+        """Create a new admin user."""
+        ...
+
+    @abstractmethod
+    def create_admin_session(self, session_id: str, username: str, expires_at: str) -> None:
+        """Store an admin session."""
+        ...
+
+    @abstractmethod
+    def get_admin_session(self, session_id: str) -> dict[str, Any] | None:
+        """Retrieve an admin session by session ID."""
+        ...
+
+    @abstractmethod
+    def delete_admin_session(self, session_id: str) -> None:
+        """Delete/invalidate an admin session."""
+        ...
+
+    @abstractmethod
+    def get_user_approval(self, email: str) -> dict[str, Any] | None:
+        """Retrieve approval status for a user email."""
+        ...
+
+    @abstractmethod
+    def create_user_approval(self, email: str, status: str, requested_at: str) -> None:
+        """Create a user approval request or pre-invite."""
+        ...
+
+    @abstractmethod
+    def update_user_approval(self, email: str, status: str, decided_at: str, decided_by: str) -> None:
+        """Approve or deny/revoke a user access request."""
+        ...
+
+    @abstractmethod
+    def list_user_approvals(self) -> list[dict[str, Any]]:
+        """List all user approvals and access requests."""
+        ...
+
+    @abstractmethod
+    def log_login_attempt(
+        self,
+        email: str,
+        status: str,
+        reason: str,
+        ip_address: str,
+        user_agent: str,
+        timestamp: str,
+    ) -> None:
+        """Audit log login attempts."""
+        ...
+
+    @abstractmethod
+    def list_login_logs(self, limit: int = 100) -> list[dict[str, Any]]:
+        """List recent login attempts."""
+        ...
+

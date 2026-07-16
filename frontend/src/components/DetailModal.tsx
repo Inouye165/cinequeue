@@ -3,14 +3,21 @@ import type { MediaDetails } from "../types";
 interface Props {
   details: MediaDetails;
   isOnWatchlist: boolean;
+  isOwned: boolean;
+  ownedFormat: "electronic" | "cloud" | "hard_copy" | null;
   onClose: () => void;
   onAdd: () => void;
   onRemove: () => void;
+  onUpdateOwned: (item: MediaDetails, isOwned: boolean, format?: "electronic" | "cloud" | "hard_copy") => void;
 }
 
-export function DetailModal({ details, isOnWatchlist, onClose, onAdd, onRemove }: Props) {
+export function DetailModal({ details, isOnWatchlist, isOwned, ownedFormat, onClose, onAdd, onRemove, onUpdateOwned }: Props) {
   const providers = details.watch_providers?.categories ?? {};
   const releaseInfo = details.release_info as Record<string, string | number | null | undefined>;
+
+  const handleFormatChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
+    onUpdateOwned(details, true, e.target.value as any);
+  };
 
   return (
     <div className="detail-overlay" onClick={onClose}>
@@ -29,7 +36,14 @@ export function DetailModal({ details, isOnWatchlist, onClose, onAdd, onRemove }
           <div className="detail-hero-content">
             {details.poster_url ? <img src={details.poster_url} alt="" /> : null}
             <div>
-              <p>{details.media_type === "tv" ? "TV Series" : "Movie"}</p>
+              <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 10 }}>
+                <p style={{ margin: 0 }}>{details.media_type === "tv" ? "TV Series" : "Movie"}</p>
+                {isOwned && (
+                  <span className="badge-owned" style={{ position: "static", boxShadow: "none" }}>
+                    Owned
+                  </span>
+                )}
+              </div>
               <h2>{details.title}</h2>
               {details.tagline ? <p>{details.tagline}</p> : null}
               <div className="meta-row">
@@ -39,22 +53,60 @@ export function DetailModal({ details, isOnWatchlist, onClose, onAdd, onRemove }
                 {details.runtime_minutes ? <span>{details.runtime_minutes} min</span> : null}
               </div>
               <div className="chip-list" style={{ marginTop: 12 }}>
-                {details.genres?.map((genre) => (
+                {details.genres?.map((genre: string) => (
                   <span className="chip" key={genre}>
                     {genre}
                   </span>
                 ))}
               </div>
-              <div style={{ marginTop: 14, display: "flex", gap: 10 }}>
-                {isOnWatchlist ? (
-                  <button className="pill-button" onClick={onRemove}>
-                    Remove from queue
-                  </button>
+              
+              <div className="detail-owned-section">
+                {/* Queue buttons */}
+                {!isOwned && (
+                  <>
+                    {isOnWatchlist ? (
+                      <button className="pill-button" onClick={onRemove}>
+                        Remove from queue
+                      </button>
+                    ) : (
+                      <button className="pill-button" onClick={onAdd}>
+                        Add to queue
+                      </button>
+                    )}
+                  </>
+                )}
+
+                {/* Library controls */}
+                {isOwned ? (
+                  <div className="owned-controls">
+                    <span style={{ fontSize: "0.85rem", color: "var(--text-muted)", fontWeight: 500 }}>Format:</span>
+                    <select
+                      value={ownedFormat || "electronic"}
+                      onChange={handleFormatChange}
+                      className="owned-select"
+                    >
+                      <option value="electronic">Electronic</option>
+                      <option value="cloud">Cloud based</option>
+                      <option value="hard_copy">Hard copy</option>
+                    </select>
+                    <button
+                      className="pill-button"
+                      style={{ border: "1px solid rgba(240, 113, 120, 0.3)", background: "rgba(240, 113, 120, 0.08)", color: "var(--danger)" }}
+                      onClick={() => onUpdateOwned(details, false)}
+                    >
+                      Remove from library
+                    </button>
+                  </div>
                 ) : (
-                  <button className="pill-button" onClick={onAdd}>
-                    Add to queue
+                  <button
+                    className="pill-button"
+                    style={{ border: "1px solid rgba(95, 211, 141, 0.4)", background: "rgba(95, 211, 141, 0.08)", color: "var(--success)" }}
+                    onClick={() => onUpdateOwned(details, true, "electronic")}
+                  >
+                    + Mark as Owned
                   </button>
                 )}
+
                 {details.homepage ? (
                   <a className="pill-button" href={details.homepage} target="_blank" rel="noreferrer">
                     Official site

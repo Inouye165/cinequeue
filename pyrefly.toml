@@ -1,0 +1,2 @@
+python_interpreter = "backend/.venv/Scripts/python.exe"
+search_path = ["backend"]

@@ -74,6 +74,9 @@ async def get_config():
 @router.get("/csrf")
 async def get_csrf(response: Response):
     """Generate and set a readable CSRF token cookie and return it."""
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
     token = generate_csrf_token()
     
     # Secure=True in production, False in dev. HttpOnly=False so JS can read it.
@@ -172,15 +175,60 @@ async def create_session(body: SessionRequest, request: Request, response: Respo
         logger.error("Session Creation Stage 6 failed: %s", e)
         raise HTTPException(status_code=401, detail="Invalid ID token or session generation failed")
 
-    # Stage 7: Email allowlist authorization
+    # Stage 7: Email DB Authorization and Logging
     try:
         email = decoded_token.get("email", "").strip().lower()
-        email_domain = email.split("@")[-1] if "@" in email else "unknown"
-        logger.info("Session Creation Stage 7: Email domain check: %s, allowlist mode: %s", email_domain, AUTH_MODE)
-        if AUTH_MODE == "allowlist":
-            if email not in AUTH_ALLOWED_EMAILS:
-                logger.warning("Session Creation Stage 7: User is not authorized under allowlist")
-                raise HTTPException(status_code=403, detail="Forbidden: User is not authorized")
+        repo = request.app.state.watchlist_repo
+        timestamp = repo.utc_now_iso()
+        ip_address = request.client.host if request.client else "unknown"
+        user_agent = request.headers.get("user-agent", "unknown")
+
+        approval = repo.get_user_approval(email)
+        if not approval:
+            # Check if this user is in the static config allowlist for backward compatibility/bootstrapping
+            if AUTH_MODE == "allowlist" and email in AUTH_ALLOWED_EMAILS:
+                repo.create_user_approval(email, "approved", timestamp)
+                repo.update_user_approval(email, "approved", timestamp, "system_allowlist")
+                approval = {"email": email, "status": "approved"}
+            else:
+                repo.create_user_approval(email, "pending", timestamp)
+                approval = {"email": email, "status": "pending"}
+
+        status = approval.get("status")
+        if status == "pending":
+            repo.log_login_attempt(
+                email=email,
+                status="failed",
+                reason="pending_approval",
+                ip_address=ip_address,
+                user_agent=user_agent,
+                timestamp=timestamp,
+            )
+            logger.warning("Session Creation Stage 7: User %s is pending approval", email)
+            raise HTTPException(status_code=403, detail="Your login request is pending admin approval.")
+        elif status == "revoked":
+            repo.log_login_attempt(
+                email=email,
+                status="failed",
+                reason="revoked_user",
+                ip_address=ip_address,
+                user_agent=user_agent,
+                timestamp=timestamp,
+            )
+            logger.warning("Session Creation Stage 7: User %s access is revoked", email)
+            raise HTTPException(status_code=403, detail="Your access has been revoked by an administrator.")
+        elif status != "approved":
+            repo.log_login_attempt(
+                email=email,
+                status="failed",
+                reason="unauthorized_user",
+                ip_address=ip_address,
+                user_agent=user_agent,
+                timestamp=timestamp,
+            )
+            logger.warning("Session Creation Stage 7: User %s is unauthorized (status=%s)", email, status)
+            raise HTTPException(status_code=403, detail="Forbidden: User is not authorized")
+
     except HTTPException:
         raise
     except Exception as e:
@@ -210,6 +258,17 @@ async def create_session(body: SessionRequest, request: Request, response: Respo
             path="/",
             max_age=max_age,
         )
+        
+        # Log successful login
+        repo.log_login_attempt(
+            email=email,
+            status="success",
+            reason="google_login",
+            ip_address=ip_address,
+            user_agent=user_agent,
+            timestamp=timestamp,
+        )
+        
         logger.info("Session Creation Stage 9: Cookie response successfully created")
         return {"status": "success"}
     except Exception as e:
@@ -217,8 +276,11 @@ async def create_session(body: SessionRequest, request: Request, response: Respo
         raise HTTPException(status_code=401, detail="Invalid ID token or session generation failed")
 
 @router.get("/me", response_model=CurrentUser)
-async def get_me(current_user: CurrentUser = Depends(get_current_user)):
+async def get_me(response: Response, current_user: CurrentUser = Depends(get_current_user)):
     """Retrieve minimal current user details if authenticated."""
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
     return current_user
 
 @router.post("/logout")

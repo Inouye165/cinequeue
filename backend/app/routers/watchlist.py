@@ -1,3 +1,6 @@
+import asyncio
+from datetime import datetime, timezone, timedelta
+import json
 import logging
 from typing import Any
 
@@ -21,28 +24,77 @@ async def list_watchlist(request: Request, current_user: CurrentUser = Depends(g
         rows = repo.list_items(current_user.uid)
 
         tmdb: TmdbClient = request.app.state.tmdb
-        items = []
-        for item in rows:
-            try:
-                details = await tmdb.get_details(item["media_type"], item["tmdb_id"])
-                item.update(
-                    {
-                        "overview": details.get("overview", ""),
-                        "vote_average": details.get("vote_average"),
-                        "status": details.get("status"),
-                        "release_date": details.get("release_date") or item.get("release_date"),
-                        "poster_url": details.get("poster_url") or poster_url(item.get("poster_path")),
-                        "days_away": details.get("days_away"),
-                        "days_label": details.get("days_label"),
-                    }
-                )
-            except Exception as e:
-                logger.warning(f"Failed to fetch details for {item['media_type']}/{item['tmdb_id']}: {e}")
-                days = days_until(item.get("release_date"))
-                item["days_away"] = days
-                item["days_label"] = days_label(days)
-                item["poster_url"] = poster_url(item.get("poster_path"))
-            items.append(item)
+
+        async def enrich_item(item: dict[str, Any]) -> dict[str, Any]:
+            enriched = dict(item)
+            details_cached = enriched.get("details_cached")
+            last_updated = enriched.get("last_updated")
+
+            cache_valid = False
+            if details_cached and last_updated:
+                try:
+                    last_updated_dt = datetime.fromisoformat(last_updated)
+                    age = datetime.now(timezone.utc) - last_updated_dt
+                    if age < timedelta(hours=24):
+                        cache_valid = True
+                except Exception:
+                    pass
+
+            details = None
+            if cache_valid:
+                try:
+                    if isinstance(details_cached, str):
+                        details = json.loads(details_cached)
+                    else:
+                        details = details_cached
+                except Exception:
+                    pass
+
+            if not details:
+                try:
+                    details = await tmdb.get_details(enriched["media_type"], enriched["tmdb_id"])
+                    repo.update_item_cache(
+                        current_user.uid,
+                        enriched["media_type"],
+                        enriched["tmdb_id"],
+                        details,
+                    )
+                except Exception as exc:
+                    logger.warning(f"Failed to fetch details for {enriched['media_type']}/{enriched['tmdb_id']}: {exc}")
+                    # Fallback to stale cache if it exists
+                    if details_cached:
+                        try:
+                            if isinstance(details_cached, str):
+                                details = json.loads(details_cached)
+                            else:
+                                details = details_cached
+                        except Exception:
+                            pass
+                    
+                    if not details:
+                        details = {}
+
+            rel_date = details.get("release_date") or enriched.get("release_date")
+            days = days_until(rel_date)
+            
+            enriched.update(
+                {
+                    "release_date": rel_date,
+                    "poster_url": details.get("poster_url") or poster_url(enriched.get("poster_path")),
+                    "days_away": days,
+                    "days_label": days_label(days),
+                }
+            )
+            if "overview" in details:
+                enriched["overview"] = details["overview"]
+            if "vote_average" in details:
+                enriched["vote_average"] = details["vote_average"]
+            if "status" in details:
+                enriched["status"] = details["status"]
+            return enriched
+
+        tasks = [enrich_item(item) for item in rows]
+        items = await asyncio.gather(*tasks)
         logger.info(f"Watchlist returned {len(items)} items")
         return items
     except Exception as e:
@@ -62,10 +114,24 @@ async def add_to_watchlist(request: Request, body: dict[str, Any], current_user:
 
     poster_path = body.get("poster_path")
     release_date = body.get("release_date")
+    is_owned = body.get("is_owned", False)
+    owned_format = body.get("owned_format", None)
+
+    if is_owned and owned_format not in {"electronic", "cloud", "hard_copy"}:
+        raise HTTPException(status_code=400, detail="Invalid owned_format. Must be 'electronic', 'cloud', or 'hard_copy'")
 
     try:
         repo = request.app.state.watchlist_repo
-        repo.add_item(current_user.uid, media_type, tmdb_id, title, poster_path, release_date)
+        added = repo.add_item(
+            current_user.uid,
+            media_type,
+            tmdb_id,
+            title,
+            poster_path,
+            release_date,
+            is_owned=is_owned,
+            owned_format=owned_format,
+        )
 
         days = days_until(release_date)
         logger.info(f"Successfully added to watchlist: {media_type}/{tmdb_id}")
@@ -77,6 +143,8 @@ async def add_to_watchlist(request: Request, body: dict[str, Any], current_user:
             "days_away": days,
             "days_label": days_label(days),
             "poster_url": poster_url(poster_path),
+            "is_owned": added.get("is_owned", False),
+            "owned_format": added.get("owned_format"),
         }
     except DuplicateItemError:
         logger.warning(f"Item already on watchlist: {media_type}/{tmdb_id}")
@@ -85,6 +153,57 @@ async def add_to_watchlist(request: Request, body: dict[str, Any], current_user:
         raise
     except Exception as e:
         logger.error(f"Add to watchlist failed: {e}")
+        raise
+
+
+@router.patch("/{media_type}/{tmdb_id}")
+async def update_watchlist_item(
+    media_type: str,
+    tmdb_id: int,
+    request: Request,
+    body: dict[str, Any],
+    current_user: CurrentUser = Depends(get_current_user),
+) -> dict[str, Any]:
+    logger.info(f"Update watchlist item request for user {current_user.uid}: {media_type}/{tmdb_id}")
+    if media_type not in {"movie", "tv"}:
+        logger.warning(f"Invalid media_type for update: {media_type}")
+        raise HTTPException(status_code=400, detail="Invalid media_type")
+
+    if "is_owned" not in body:
+        raise HTTPException(status_code=400, detail="is_owned field is required")
+
+    is_owned = body.get("is_owned")
+    owned_format = body.get("owned_format")
+
+    if is_owned and owned_format not in {"electronic", "cloud", "hard_copy"}:
+        raise HTTPException(status_code=400, detail="Invalid owned_format. Must be 'electronic', 'cloud', or 'hard_copy'")
+
+    if not is_owned:
+        owned_format = None
+
+    try:
+        repo = request.app.state.watchlist_repo
+        updated = repo.update_item(
+            current_user.uid,
+            media_type,
+            tmdb_id,
+            is_owned=is_owned,
+            owned_format=owned_format,
+        )
+        if not updated:
+            logger.warning(f"Item not found for update: {media_type}/{tmdb_id}")
+            raise HTTPException(status_code=404, detail="Not found")
+
+        logger.info(f"Successfully updated watchlist item: {media_type}/{tmdb_id}")
+        return {
+            "status": "updated",
+            "is_owned": updated.get("is_owned", False),
+            "owned_format": updated.get("owned_format"),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Update watchlist item failed: {e}")
         raise
 
 
