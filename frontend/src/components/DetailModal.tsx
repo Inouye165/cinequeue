@@ -48,10 +48,11 @@ function TrailerPlayer({ trailer }: { trailer: Trailer }) {
             Collapse
           </button>
           <iframe
-            src={`https://www.youtube.com/embed/${trailer.key}?autoplay=1&rel=0`}
-            title={trailer.name}
+            src={`https://www.youtube-nocookie.com/embed/${trailer.key}?autoplay=1&rel=0`}
+            title="Official trailer"
             allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
             allowFullScreen
+            referrerPolicy="strict-origin-when-cross-origin"
           />
         </div>
       ) : (
