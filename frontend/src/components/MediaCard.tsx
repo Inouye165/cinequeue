@@ -6,8 +6,12 @@ interface Props {
   onAdd?: (item: MediaItem) => void;
   onRemove?: (item: MediaItem) => void;
   isOnWatchlist?: boolean;
+  isOnQueue?: boolean;
+  isFollowing?: boolean;
   isOwned?: boolean;
   ownedFormat?: "electronic" | "cloud" | "hard_copy" | null;
+  onMoveToFollowing?: (item: MediaItem) => void;
+  onMoveToQueue?: (item: MediaItem) => void;
 }
 
 function formatFormat(format?: string | null) {
@@ -17,9 +21,18 @@ function formatFormat(format?: string | null) {
   return "Owned";
 }
 
-export function MediaCard({ item, onOpen, onAdd, onRemove, isOnWatchlist, isOwned, ownedFormat }: Props) {
-  const showRemoveButton = isOnWatchlist || isOwned;
-
+export function MediaCard({
+  item,
+  onOpen,
+  onAdd,
+  onRemove,
+  isOnQueue,
+  isFollowing,
+  isOwned,
+  ownedFormat,
+  onMoveToFollowing,
+  onMoveToQueue,
+}: Props) {
   return (
     <article className="media-card">
       <button className="card-hit" onClick={() => onOpen(item)} aria-label={`Open ${item.title}`}>
@@ -33,6 +46,11 @@ export function MediaCard({ item, onOpen, onAdd, onRemove, isOnWatchlist, isOwne
           {isOwned && (
             <span className="badge-owned" title={formatFormat(ownedFormat)}>
               {formatFormat(ownedFormat)}
+            </span>
+          )}
+          {!isOwned && isFollowing && (
+            <span className="badge-following" title="Following">
+              Following
             </span>
           )}
         </div>
@@ -49,10 +67,28 @@ export function MediaCard({ item, onOpen, onAdd, onRemove, isOnWatchlist, isOwne
           <button className="pill-button" onClick={() => onOpen(item)}>
             Details
           </button>
-          {showRemoveButton ? (
+          {isOwned ? (
             <button className="pill-button" onClick={() => onRemove?.(item)}>
               Remove
             </button>
+          ) : isOnQueue ? (
+            <>
+              <button className="pill-button" onClick={() => onMoveToFollowing?.(item)}>
+                Start Watching
+              </button>
+              <button className="pill-button" onClick={() => onRemove?.(item)}>
+                Remove
+              </button>
+            </>
+          ) : isFollowing ? (
+            <>
+              <button className="pill-button" onClick={() => onMoveToQueue?.(item)}>
+                Move to Queue
+              </button>
+              <button className="pill-button" onClick={() => onRemove?.(item)}>
+                Remove
+              </button>
+            </>
           ) : (
             <button className="pill-button" onClick={() => onAdd?.(item)}>
               + Queue

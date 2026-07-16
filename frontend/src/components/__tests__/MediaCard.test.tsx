@@ -73,7 +73,7 @@ describe("MediaCard", () => {
         item={mockMovie}
         onOpen={() => {}}
         onRemove={handleRemove}
-        isOnWatchlist={true}
+        isOnQueue={true}
         isOwned={false}
       />
     );

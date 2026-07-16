@@ -45,6 +45,7 @@ class FirestoreWatchlistRepository(WatchlistRepository):
             d = doc.to_dict()
             d.setdefault("is_owned", False)
             d.setdefault("owned_format", None)
+            d.setdefault("status", "queue")
             res.append(d)
         return res
 
@@ -58,6 +59,7 @@ class FirestoreWatchlistRepository(WatchlistRepository):
         release_date: str | None,
         is_owned: bool = False,
         owned_format: str | None = None,
+        status: str = "queue",
     ) -> dict[str, Any]:
         doc_id = _doc_id(media_type, tmdb_id)
         col = self._user_watchlist_col(user_id)
@@ -77,6 +79,7 @@ class FirestoreWatchlistRepository(WatchlistRepository):
             "added_at": added_at,
             "is_owned": is_owned,
             "owned_format": owned_format,
+            "status": status,
         }
         doc_ref.set(data)
         return data
@@ -86,8 +89,9 @@ class FirestoreWatchlistRepository(WatchlistRepository):
         user_id: str,
         media_type: str,
         tmdb_id: int,
-        is_owned: bool,
-        owned_format: str | None,
+        is_owned: bool | None = None,
+        owned_format: str | None = None,
+        status: str | None = None,
     ) -> dict[str, Any] | None:
         doc_id = _doc_id(media_type, tmdb_id)
         col = self._user_watchlist_col(user_id)
@@ -95,13 +99,23 @@ class FirestoreWatchlistRepository(WatchlistRepository):
         snapshot = doc_ref.get()
         if not snapshot.exists:
             return None
-        data = {
-            "is_owned": is_owned,
-            "owned_format": owned_format,
-        }
+        
+        data: dict[str, Any] = {}
+        if is_owned is not None:
+            data["is_owned"] = is_owned
+            if not is_owned:
+                data["owned_format"] = None
+            elif owned_format is not None:
+                data["owned_format"] = owned_format
+        if status is not None:
+            data["status"] = status
+
         doc_ref.update(data)
         updated = snapshot.to_dict()
         updated.update(data)
+        if "is_owned" in updated:
+            updated["is_owned"] = bool(updated["is_owned"])
+        updated.setdefault("status", "queue")
         return updated
 
     def update_item_cache(

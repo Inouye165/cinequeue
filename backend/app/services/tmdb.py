@@ -99,6 +99,27 @@ class TmdbClient:
             categories["theatres"] = [{"name": "In theatres now", "logo_url": None}]
         return {"link": link, "categories": categories}
 
+    async def get_videos(self, media_type: str, tmdb_id: int) -> list[dict[str, Any]]:
+        try:
+            data = await self._get(f"/{media_type}/{tmdb_id}/videos")
+            results = data.get("results", [])
+            official_trailers = []
+            for v in results:
+                if (
+                    v.get("site") == "YouTube"
+                    and v.get("type") == "Trailer"
+                    and v.get("official") is True
+                ):
+                    official_trailers.append(
+                        {
+                            "key": v.get("key"),
+                            "name": v.get("name"),
+                        }
+                    )
+            return official_trailers
+        except Exception:
+            return []
+
     async def _is_in_theatres(self, tmdb_id: int) -> bool:
         now_playing = await self.now_playing()
         return any(item["id"] == tmdb_id for item in now_playing)

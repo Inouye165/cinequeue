@@ -32,6 +32,7 @@ class WatchlistRepository(ABC):
         release_date: str | None,
         is_owned: bool = False,
         owned_format: str | None = None,
+        status: str = "queue",
     ) -> dict[str, Any]:
         """Add an item to the watchlist.
 
@@ -46,10 +47,11 @@ class WatchlistRepository(ABC):
         user_id: str,
         media_type: str,
         tmdb_id: int,
-        is_owned: bool,
-        owned_format: str | None,
+        is_owned: bool | None = None,
+        owned_format: str | None = None,
+        status: str | None = None,
     ) -> dict[str, Any] | None:
-        """Update an item's owned status and format.
+        """Update an item's owned status, format, or status.
 
         Returns:
             The updated item dictionary, or None if not found.

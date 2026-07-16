@@ -54,6 +54,11 @@ export interface NewsArticle {
   source?: string | null;
 }
 
+export interface Trailer {
+  key: string;
+  name: string;
+}
+
 export interface MediaDetails extends MediaItem {
   tagline?: string;
   genres?: string[];
@@ -64,4 +69,5 @@ export interface MediaDetails extends MediaItem {
   reviews: Review[];
   release_info: Record<string, unknown>;
   news: NewsArticle[];
+  trailers?: Trailer[];
 }

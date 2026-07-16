@@ -90,7 +90,7 @@ async def list_watchlist(request: Request, current_user: CurrentUser = Depends(g
             if "vote_average" in details:
                 enriched["vote_average"] = details["vote_average"]
             if "status" in details:
-                enriched["status"] = details["status"]
+                enriched["media_status"] = details["status"]
             return enriched
 
         tasks = [enrich_item(item) for item in rows]
@@ -116,9 +116,13 @@ async def add_to_watchlist(request: Request, body: dict[str, Any], current_user:
     release_date = body.get("release_date")
     is_owned = body.get("is_owned", False)
     owned_format = body.get("owned_format", None)
+    status = body.get("status", "queue")
 
     if is_owned and owned_format not in {"electronic", "cloud", "hard_copy"}:
         raise HTTPException(status_code=400, detail="Invalid owned_format. Must be 'electronic', 'cloud', or 'hard_copy'")
+
+    if status not in {"queue", "following"}:
+        raise HTTPException(status_code=400, detail="Invalid status. Must be 'queue' or 'following'")
 
     try:
         repo = request.app.state.watchlist_repo
@@ -131,6 +135,7 @@ async def add_to_watchlist(request: Request, body: dict[str, Any], current_user:
             release_date,
             is_owned=is_owned,
             owned_format=owned_format,
+            status=status,
         )
 
         days = days_until(release_date)
@@ -145,6 +150,7 @@ async def add_to_watchlist(request: Request, body: dict[str, Any], current_user:
             "poster_url": poster_url(poster_path),
             "is_owned": added.get("is_owned", False),
             "owned_format": added.get("owned_format"),
+            "status": added.get("status", "queue"),
         }
     except DuplicateItemError:
         logger.warning(f"Item already on watchlist: {media_type}/{tmdb_id}")
@@ -169,17 +175,18 @@ async def update_watchlist_item(
         logger.warning(f"Invalid media_type for update: {media_type}")
         raise HTTPException(status_code=400, detail="Invalid media_type")
 
-    if "is_owned" not in body:
-        raise HTTPException(status_code=400, detail="is_owned field is required")
-
     is_owned = body.get("is_owned")
     owned_format = body.get("owned_format")
+    status = body.get("status")
 
-    if is_owned and owned_format not in {"electronic", "cloud", "hard_copy"}:
+    if is_owned is None and status is None:
+        raise HTTPException(status_code=400, detail="is_owned or status field is required")
+
+    if is_owned is not None and is_owned and owned_format not in {"electronic", "cloud", "hard_copy"}:
         raise HTTPException(status_code=400, detail="Invalid owned_format. Must be 'electronic', 'cloud', or 'hard_copy'")
 
-    if not is_owned:
-        owned_format = None
+    if status is not None and status not in {"queue", "following"}:
+        raise HTTPException(status_code=400, detail="Invalid status. Must be 'queue' or 'following'")
 
     try:
         repo = request.app.state.watchlist_repo
@@ -189,6 +196,7 @@ async def update_watchlist_item(
             tmdb_id,
             is_owned=is_owned,
             owned_format=owned_format,
+            status=status,
         )
         if not updated:
             logger.warning(f"Item not found for update: {media_type}/{tmdb_id}")
@@ -199,6 +207,7 @@ async def update_watchlist_item(
             "status": "updated",
             "is_owned": updated.get("is_owned", False),
             "owned_format": updated.get("owned_format"),
+            "status_value": updated.get("status", "queue"),
         }
     except HTTPException:
         raise

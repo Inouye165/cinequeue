@@ -88,11 +88,12 @@ async def media_details(media_type: str, tmdb_id: int, request: Request) -> dict
         details = await tmdb.get_details(media_type, tmdb_id)
         
         # Concurrently fetch other details
-        providers, reviews, release_info, news = await asyncio.gather(
+        providers, reviews, release_info, news, trailers = await asyncio.gather(
             tmdb.get_watch_providers(media_type, tmdb_id),
             tmdb.get_reviews(media_type, tmdb_id),
             tmdb.get_release_info(media_type, tmdb_id),
             fetch_news(details["title"]),
+            tmdb.get_videos(media_type, tmdb_id),
         )
         logger.info(f"Media details retrieved successfully for {media_type}/{tmdb_id}")
         return {
@@ -101,6 +102,7 @@ async def media_details(media_type: str, tmdb_id: int, request: Request) -> dict
             "reviews": reviews,
             "release_info": release_info,
             "news": news,
+            "trailers": trailers,
         }
     except Exception as e:
         logger.error(f"Media details failed for {media_type}/{tmdb_id}: {e}")

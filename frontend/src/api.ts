@@ -125,11 +125,11 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(item),
     }),
-  updateWatchlistItem: (mediaType: string, tmdbId: number, isOwned: boolean, ownedFormat: string | null) =>
-    request<{ status: string; is_owned: boolean; owned_format: string | null }>(`/api/watchlist/${mediaType}/${tmdbId}`, {
+  updateWatchlistItem: (mediaType: string, tmdbId: number, isOwned?: boolean, ownedFormat?: string | null, status?: string) =>
+    request<{ status: string; is_owned: boolean; owned_format: string | null; status_value?: string }>(`/api/watchlist/${mediaType}/${tmdbId}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ is_owned: isOwned, owned_format: ownedFormat }),
+      body: JSON.stringify({ is_owned: isOwned, owned_format: ownedFormat, status }),
     }),
   removeFromWatchlist: (mediaType: string, tmdbId: number) =>
     request<{ status: string }>(`/api/watchlist/${mediaType}/${tmdbId}`, {

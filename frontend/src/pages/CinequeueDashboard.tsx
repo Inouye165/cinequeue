@@ -9,6 +9,7 @@ import type { MediaDetails, MediaItem, WatchlistItem } from "../types";
 
 const TABS: { id: TabType; label: string }[] = [
   { id: "watchlist", label: "My Queue" },
+  { id: "following", label: "Following" },
   { id: "library", label: "My Library" },
   { id: "upcoming", label: "Upcoming" },
   { id: "theatres", label: "In Theatres" },
@@ -28,7 +29,12 @@ export function CinequeueDashboard() {
   const [error, setError] = useState<string | null>(null);
 
   const queueKeys = useMemo(
-    () => new Set(watchlist.filter((item) => !item.is_owned).map((item) => `${item.media_type}:${item.tmdb_id ?? item.id}`)),
+    () => new Set(watchlist.filter((item) => !item.is_owned && (item.status === "queue" || !item.status)).map((item) => `${item.media_type}:${item.tmdb_id ?? item.id}`)),
+    [watchlist],
+  );
+
+  const followingKeys = useMemo(
+    () => new Set(watchlist.filter((item) => !item.is_owned && item.status === "following").map((item) => `${item.media_type}:${item.tmdb_id ?? item.id}`)),
     [watchlist],
   );
 
@@ -56,7 +62,28 @@ export function CinequeueDashboard() {
     try {
       if (activeTab === "watchlist") {
         const data = await loadWatchlist();
-        setItems(data.filter((item) => !item.is_owned));
+        const queueItems = data.filter((item) => !item.is_owned && (item.status === "queue" || !item.status));
+        queueItems.sort((a, b) => {
+          const dateA = a.release_date || "";
+          const dateB = b.release_date || "";
+          if (!dateA && !dateB) return 0;
+          if (!dateA) return 1;
+          if (!dateB) return -1;
+          return dateA.localeCompare(dateB);
+        });
+        setItems(queueItems);
+      } else if (activeTab === "following") {
+        const data = await loadWatchlist();
+        const followingItems = data.filter((item) => !item.is_owned && item.status === "following");
+        followingItems.sort((a, b) => {
+          const dateA = a.release_date || "";
+          const dateB = b.release_date || "";
+          if (!dateA && !dateB) return 0;
+          if (!dateA) return 1;
+          if (!dateB) return -1;
+          return dateA.localeCompare(dateB);
+        });
+        setItems(followingItems);
       } else if (activeTab === "library") {
         const data = await loadWatchlist();
         setItems(data.filter((item) => item.is_owned));
@@ -134,7 +161,29 @@ export function CinequeueDashboard() {
         setSelected(null);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not remove from queue");
+      setError(err instanceof Error ? err.message : "Could not remove from watchlist");
+    }
+  };
+
+  const moveToFollowing = async (item: MediaItem) => {
+    const tmdbId = "tmdb_id" in item ? (item as WatchlistItem).tmdb_id : item.id;
+    try {
+      await api.updateWatchlistItem(item.media_type, tmdbId, undefined, undefined, "following");
+      await loadWatchlist();
+      await loadTab(tab);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not move to following");
+    }
+  };
+
+  const moveToQueue = async (item: MediaItem) => {
+    const tmdbId = "tmdb_id" in item ? (item as WatchlistItem).tmdb_id : item.id;
+    try {
+      await api.updateWatchlistItem(item.media_type, tmdbId, undefined, undefined, "queue");
+      await loadWatchlist();
+      await loadTab(tab);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not move to queue");
     }
   };
 
@@ -218,6 +267,8 @@ export function CinequeueDashboard() {
           {items.map((item) => {
             const key = `${item.media_type}:${"tmdb_id" in item ? (item as WatchlistItem).tmdb_id : item.id}`;
             const isOwned = libraryKeys.has(key);
+            const isOnQueue = queueKeys.has(key);
+            const isFollowing = followingKeys.has(key);
             const ownedFormat = watchlist.find((i) => `${i.media_type}:${i.tmdb_id ?? i.id}` === key)?.owned_format || null;
             return (
               <MediaCard
@@ -226,9 +277,13 @@ export function CinequeueDashboard() {
                 onOpen={openDetails}
                 onAdd={addToWatchlist}
                 onRemove={removeFromWatchlist}
-                isOnWatchlist={queueKeys.has(key)}
+                isOnWatchlist={isOnQueue || isFollowing}
+                isOnQueue={isOnQueue}
+                isFollowing={isFollowing}
                 isOwned={isOwned}
                 ownedFormat={ownedFormat}
+                onMoveToFollowing={moveToFollowing}
+                onMoveToQueue={moveToQueue}
               />
             );
           })}
@@ -237,6 +292,8 @@ export function CinequeueDashboard() {
         <div className="empty-state">
           {tab === "watchlist"
             ? "Your queue is empty. Search for something to add."
+            : tab === "following"
+            ? "You are not following any shows or movies. Move them from your queue here once you start watching."
             : tab === "library"
             ? "Your library is empty. Search for something or mark items as owned."
             : "Nothing to show right now."}
@@ -246,13 +303,16 @@ export function CinequeueDashboard() {
       {selected ? (
         <DetailModal
           details={selected}
-          isOnWatchlist={queueKeys.has(`${selected.media_type}:${selected.id}`)}
+          isOnQueue={queueKeys.has(`${selected.media_type}:${selected.id}`)}
+          isFollowing={followingKeys.has(`${selected.media_type}:${selected.id}`)}
           isOwned={libraryKeys.has(`${selected.media_type}:${selected.id}`)}
           ownedFormat={watchlist.find((i) => `${i.media_type}:${i.tmdb_id ?? i.id}` === `${selected.media_type}:${selected.id}`)?.owned_format || null}
           onClose={() => setSelected(null)}
           onAdd={() => void addToWatchlist(selected)}
           onRemove={() => void removeFromWatchlist(selected)}
           onUpdateOwned={handleUpdateOwned}
+          onMoveToFollowing={() => void moveToFollowing(selected)}
+          onMoveToQueue={() => void moveToQueue(selected)}
         />
       ) : null}
     </div>
