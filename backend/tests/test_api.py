@@ -464,3 +464,25 @@ def test_watchlist_patch_status(client, app_with_mock):
     assert data["status_value"] == "following"
 
 
+def test_security_headers_csp(client):
+    """Test that Content-Security-Policy header contains required YouTube origins."""
+    response = client.get("/api/health")
+    assert response.status_code == 200
+    assert "Content-Security-Policy" in response.headers
+    csp = response.headers["Content-Security-Policy"]
+    
+    # Assert standard origins are preserved
+    assert "default-src 'self'" in csp
+    assert "https://image.tmdb.org" in csp
+    assert "https://*.googleusercontent.com" in csp
+    assert "https://cinequeue-inouye-2026.firebaseapp.com" in csp
+    assert "https://*.firebaseapp.com" in csp
+    
+    # Assert new YouTube origins are present
+    assert "https://img.youtube.com" in csp
+    assert "https://i.ytimg.com" in csp
+    assert "https://www.youtube.com" in csp
+    assert "https://www.youtube-nocookie.com" in csp
+
+
+
