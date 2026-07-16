@@ -145,8 +145,9 @@ class FirestoreWatchlistRepository(WatchlistRepository):
         snapshot = doc_ref.get()
         if snapshot.exists:
             res = snapshot.to_dict()
-            res["username"] = username
-            return res
+            if res is not None:
+                res["username"] = username
+                return res
         return None
 
     def create_admin_user(self, username: str, password_hash: str, salt: str) -> None:
@@ -170,8 +171,9 @@ class FirestoreWatchlistRepository(WatchlistRepository):
         snapshot = doc_ref.get()
         if snapshot.exists:
             res = snapshot.to_dict()
-            res["session_id"] = session_id
-            return res
+            if res is not None:
+                res["session_id"] = session_id
+                return res
         return None
 
     def delete_admin_session(self, session_id: str) -> None:
@@ -183,8 +185,9 @@ class FirestoreWatchlistRepository(WatchlistRepository):
         snapshot = doc_ref.get()
         if snapshot.exists:
             res = snapshot.to_dict()
-            res["email"] = email
-            return res
+            if res is not None:
+                res["email"] = email
+                return res
         return None
 
     def create_user_approval(self, email: str, status: str, requested_at: str) -> None:
@@ -214,8 +217,9 @@ class FirestoreWatchlistRepository(WatchlistRepository):
         res = []
         for doc in docs:
             d = doc.to_dict()
-            d["email"] = doc.id
-            res.append(d)
+            if d is not None:
+                d["email"] = doc.id
+                res.append(d)
         return res
 
     def log_login_attempt(
@@ -247,7 +251,8 @@ class FirestoreWatchlistRepository(WatchlistRepository):
         res = []
         for doc in docs:
             d = doc.to_dict()
-            d["id"] = doc.id
-            res.append(d)
+            if d is not None:
+                d["id"] = doc.id
+                res.append(d)
         return res
 

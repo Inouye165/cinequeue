@@ -151,9 +151,12 @@ async def create_session(body: SessionRequest, request: Request, response: Respo
     # Stage 5: auth_time freshness validation
     try:
         auth_time = decoded_token.get("auth_time")
-        age = time.time() - auth_time if auth_time else None
+        if not auth_time:
+            logger.warning("Session Creation Stage 5: ID token auth_time is missing")
+            raise HTTPException(status_code=401, detail="Authentication time is too old")
+        age = time.time() - auth_time
         logger.info("Session Creation Stage 5: auth_time age calculation: %s seconds", age)
-        if not auth_time or age > 5 * 60:
+        if age > 5 * 60:
             logger.warning("Session Creation Stage 5: ID token auth_time is too old: %s", auth_time)
             raise HTTPException(status_code=401, detail="Authentication time is too old")
     except HTTPException:
