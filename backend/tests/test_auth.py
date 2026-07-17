@@ -536,7 +536,6 @@ def test_firebase_auth_proxy_headers_rewriting(mock_request, client_with_auth):
         # Domain should be removed entirely
         assert "domain=" not in response.headers["set-cookie"].lower()
 
-
 @patch("httpx.AsyncClient.request")
 def test_firebase_auth_proxy_csp_bypass_no_upstream(mock_request, client_with_auth):
     """If Firebase returns no CSP, do not add Cinequeue's CSP to that proxied response."""
@@ -600,6 +599,3 @@ def test_normal_route_retains_strict_csp(client_with_auth):
     script_src = [d for d in directives if d.startswith("script-src")]
     assert len(script_src) == 1
     assert "'unsafe-inline'" not in script_src[0]
-
-
-
