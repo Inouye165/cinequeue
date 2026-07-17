@@ -115,23 +115,35 @@ app.add_middleware(
 @app.middleware("http")
 async def add_security_headers(request, call_next):
     response = await call_next(request)
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
     
-    csp = (
-        "default-src 'self'; "
-        "script-src 'self' https://apis.google.com https://www.gstatic.com; "
-        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
-        "font-src 'self' https://fonts.gstatic.com; "
-        "img-src 'self' data: https://image.tmdb.org https://*.googleusercontent.com https://img.youtube.com https://i.ytimg.com; "
-        "frame-src 'self' https://cinequeue-inouye-2026.firebaseapp.com https://*.firebaseapp.com https://www.youtube.com https://www.youtube-nocookie.com; "
-        "connect-src 'self' https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://*.googleapis.com;"
-    )
-    response.headers["Content-Security-Policy"] = csp
+    is_auth_proxy = request.url.path.startswith("/__/auth/")
     
+    if not is_auth_proxy:
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+        
+        csp = (
+            "default-src 'self'; "
+            "script-src 'self' https://apis.google.com https://www.gstatic.com; "
+            "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+            "font-src 'self' https://fonts.gstatic.com; "
+            "img-src 'self' data: https://image.tmdb.org https://*.googleusercontent.com https://img.youtube.com https://i.ytimg.com; "
+            "frame-src 'self' https://cinequeue-inouye-2026.firebaseapp.com https://*.firebaseapp.com https://www.youtube.com https://www.youtube-nocookie.com; "
+            "connect-src 'self' https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://*.googleapis.com;"
+        )
+        response.headers["Content-Security-Policy"] = csp
+    else:
+        if "X-Content-Type-Options" not in response.headers:
+            response.headers["X-Content-Type-Options"] = "nosniff"
+        if "Referrer-Policy" not in response.headers:
+            response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        if "Permissions-Policy" not in response.headers:
+            response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+            
     if ENVIRONMENT == "production":
-        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains; preload"
+        if not is_auth_proxy or "Strict-Transport-Security" not in response.headers:
+            response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains; preload"
         
     return response
 
