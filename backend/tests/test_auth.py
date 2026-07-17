@@ -379,3 +379,161 @@ def test_production_fails_closed_if_config_missing():
             import importlib
             import app.config
             importlib.reload(app.config)
+
+
+def test_config_auth_domain_local(client_with_auth):
+    """Config endpoint returns FIREBASE_AUTH_DOMAIN when PUBLIC_AUTH_DOMAIN is not configured."""
+    with patch("app.routers.auth.PUBLIC_AUTH_DOMAIN", ""):
+        response = client_with_auth.get("/api/auth/config")
+        assert response.status_code == 200
+        assert response.json()["authDomain"] == "cinequeue-inouye-2026.firebaseapp.com"
+
+
+def test_config_auth_domain_production(client_with_auth):
+    """Config endpoint returns PUBLIC_AUTH_DOMAIN when configured."""
+    with patch("app.routers.auth.PUBLIC_AUTH_DOMAIN", "cinequeue-568212960791.us-west1.run.app"):
+        response = client_with_auth.get("/api/auth/config")
+        assert response.status_code == 200
+        assert response.json()["authDomain"] == "cinequeue-568212960791.us-west1.run.app"
+
+
+@patch("httpx.AsyncClient.request")
+def test_firebase_auth_proxy_get(mock_request, client_with_auth):
+    """Proxy forwards GET requests transparently, stripping Host, Cookie, and Authorization."""
+    import httpx
+    mock_resp = AsyncMock()
+    mock_resp.status_code = 200
+    mock_resp.content = b"mocked-redirect-iframe-payload"
+    mock_resp.headers = {
+        "content-type": "text/html",
+        "cache-control": "no-cache",
+        "location": "https://google.com/oauth",
+        "set-cookie": "state=123"
+    }
+    mock_request.return_value = mock_resp
+
+    # Make request to proxy with query params and sensitive headers
+    response = client_with_auth.get(
+        "/__/auth/handler?apiKey=123&state=abc",
+        headers={
+            "Cookie": "__Host-cinequeue_session=token; cinequeue_csrf=token",
+            "Authorization": "Bearer token",
+            "X-Custom-Header": "custom-val"
+        }
+    )
+
+    assert response.status_code == 200
+    assert response.content == b"mocked-redirect-iframe-payload"
+    assert response.headers["content-type"].startswith("text/html")
+    assert response.headers["cache-control"] == "no-cache"
+    assert response.headers["location"] == "https://google.com/oauth"
+    assert response.headers["set-cookie"] == "state=123"
+
+    # Assert request call details
+    mock_request.assert_called_once()
+    called_args, called_kwargs = mock_request.call_args
+    assert called_kwargs["method"] == "GET"
+    assert called_kwargs["url"] == "https://cinequeue-inouye-2026.firebaseapp.com/__/auth/handler?apiKey=123&state=abc"
+    # Ensure Host, Cookie, and Authorization are NOT forwarded
+    assert "host" not in called_kwargs["headers"]
+    assert "cookie" not in called_kwargs["headers"]
+    assert "authorization" not in called_kwargs["headers"]
+    # Verify custom headers ARE forwarded
+    assert called_kwargs["headers"]["x-custom-header"] == "custom-val"
+
+
+@patch("httpx.AsyncClient.request")
+def test_firebase_auth_proxy_post(mock_request, client_with_auth):
+    """Proxy forwards POST requests transparently preserving the body."""
+    mock_resp = AsyncMock()
+    mock_resp.status_code = 200
+    mock_resp.content = b"success"
+    mock_resp.headers = {"content-type": "application/json"}
+    mock_request.return_value = mock_resp
+
+    response = client_with_auth.post(
+        "/__/auth/handler",
+        content=b"post-body-content",
+        headers={"Content-Type": "application/octet-stream"}
+    )
+
+    assert response.status_code == 200
+    assert response.content == b"success"
+    called_args, called_kwargs = mock_request.call_args
+    assert called_kwargs["method"] == "POST"
+    assert called_kwargs["content"] == b"post-body-content"
+    assert called_kwargs["headers"]["content-type"] == "application/octet-stream"
+
+
+def test_firebase_auth_proxy_method_not_allowed(client_with_auth):
+    """Proxy rejects non-GET/POST methods with 405 Method Not Allowed."""
+    response = client_with_auth.delete("/__/auth/handler")
+    assert response.status_code == 405
+
+
+@patch("httpx.AsyncClient.request")
+def test_firebase_auth_proxy_upstream_failure(mock_request, client_with_auth):
+    """Proxy handles upstream failures by returning 502 Bad Gateway."""
+    import httpx
+    mock_request.side_effect = httpx.RequestError("DNS resolution failed")
+    response = client_with_auth.get("/__/auth/handler")
+    assert response.status_code == 502
+
+
+@patch("httpx.AsyncClient.request")
+def test_firebase_auth_proxy_cookie_filtering(mock_request, client_with_auth):
+    """Proxy filters out Cinequeue cookies but preserves and forwards other cookies."""
+    mock_resp = AsyncMock()
+    mock_resp.status_code = 200
+    mock_resp.content = b"cookie-ok"
+    mock_resp.headers = {"content-type": "text/html"}
+    mock_request.return_value = mock_resp
+
+    response = client_with_auth.get(
+        "/__/auth/handler",
+        headers={
+            "Cookie": "__Host-cinequeue_session=val; gaps=123; cinequeue_csrf=val2; custom_cookie=abc"
+        }
+    )
+
+    assert response.status_code == 200
+    called_args, called_kwargs = mock_request.call_args
+    # Verify only gaps=123 and custom_cookie=abc are forwarded
+    forwarded_cookie = called_kwargs["headers"]["cookie"]
+    assert "gaps=123" in forwarded_cookie
+    assert "custom_cookie=abc" in forwarded_cookie
+    assert "__Host-cinequeue_session" not in forwarded_cookie
+    assert "cinequeue_csrf" not in forwarded_cookie
+
+
+@patch("httpx.AsyncClient.request")
+def test_firebase_auth_proxy_headers_rewriting(mock_request, client_with_auth):
+    """Proxy rewrites upstream Location and Set-Cookie Domain attributes."""
+    mock_resp = AsyncMock()
+    mock_resp.status_code = 302
+    mock_resp.content = b""
+    mock_resp.headers = {
+        "location": "https://cinequeue-inouye-2026.firebaseapp.com/__/auth/handler?state=abc",
+        "set-cookie": "GAPS=xyz; Domain=cinequeue-inouye-2026.firebaseapp.com; Path=/; Secure"
+    }
+    mock_request.return_value = mock_resp
+
+    # Scenario A: PUBLIC_AUTH_DOMAIN is configured (Production)
+    with patch("app.main.PUBLIC_AUTH_DOMAIN", "cinequeue-568212960791.us-west1.run.app"):
+        response = client_with_auth.get("/__/auth/handler", follow_redirects=False)
+        assert response.status_code == 302
+        assert response.headers["location"] == "https://cinequeue-568212960791.us-west1.run.app/__/auth/handler?state=abc"
+        # Domain should be replaced with PUBLIC_AUTH_DOMAIN
+        assert "domain=cinequeue-568212960791.us-west1.run.app" in response.headers["set-cookie"].lower()
+        assert "cinequeue-inouye-2026.firebaseapp.com" not in response.headers["set-cookie"].lower()
+
+    # Scenario B: PUBLIC_AUTH_DOMAIN is empty (Local dev / fallback)
+    with patch("app.main.PUBLIC_AUTH_DOMAIN", ""):
+        response = client_with_auth.get("/__/auth/handler", follow_redirects=False)
+        assert response.status_code == 302
+        # Location should fallback to request netloc (testserver)
+        assert response.headers["location"] == "https://testserver/__/auth/handler?state=abc"
+        # Domain should be removed entirely
+        assert "domain=" not in response.headers["set-cookie"].lower()
+
+
