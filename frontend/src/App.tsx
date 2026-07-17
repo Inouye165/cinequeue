@@ -5,11 +5,25 @@ import { AdminDashboard } from "./pages/AdminDashboard";
 import { AdminLogin } from "./pages/AdminLogin";
 import { UserLogin } from "./pages/UserLogin";
 import { CinequeueDashboard } from "./pages/CinequeueDashboard";
+import { AuthDiagnosticsPanel } from "./components/AuthDiagnosticsPanel";
+import { recordEvent } from "./utils/authPerformanceMonitor";
 
 function CinequeueApp() {
-  const { user, loading: authLoading, error: authError, loginWithGoogle } = useAuth();
+  const {
+    user,
+    isAdmin: contextIsAdmin,
+    authInitialized,
+    loading: authLoading,
+    error: authError,
+    loginWithGoogle,
+    logout,
+    authorizationReady,
+    profile,
+    sessionReady,
+    idToken
+  } = useAuth();
 
-  // Admin Portal state variables
+  // Admin Portal state variables (for traditional cookie login fallback)
   const [adminUsername, setAdminUsername] = useState<string | null>(null);
   const [showAdminLogin, setShowAdminLogin] = useState(false);
   const [adminError, setAdminError] = useState<string | null>(null);
@@ -19,35 +33,54 @@ function CinequeueApp() {
   const [approvals, setApprovals] = useState<any[]>([]);
   const [loginLogs, setLoginLogs] = useState<any[]>([]);
 
-  const loadAdminData = useCallback(async () => {
+  const activeAdminName = adminUsername || (contextIsAdmin && (profile?.email || user?.email) ? (profile?.email || user?.email) : null);
+
+  const loadAdminData = useCallback(async (signal?: AbortSignal) => {
+    recordEvent("admin_requests_started", "start");
     try {
-      const reqs = await api.adminRequests();
+      const reqs = await api.adminRequests(idToken || undefined, signal);
+      if (signal?.aborted) return;
       setApprovals(reqs.approvals);
-      const logs = await api.adminLoginLogs();
+      const logs = await api.adminLoginLogs(idToken || undefined, signal);
+      if (signal?.aborted) return;
       setLoginLogs(logs.logs);
-    } catch (err) {
+      recordEvent("admin_requests_completed", "success");
+    } catch (err: any) {
+      if (err.name === "AbortError" || signal?.aborted) {
+        return;
+      }
+      recordEvent("admin_requests_completed", "failure", { error: err.message });
       console.error("Failed to load admin data:", err);
     }
-  }, []);
+  }, [idToken]);
 
-  // Restore Admin session if active on mount
   useEffect(() => {
-    const checkAdmin = async () => {
-      try {
-        const data = await api.adminMe();
-        setAdminUsername(data.username);
-      } catch (err) {
-        // No active admin session
+    const isGoogleAdmin = authInitialized && sessionReady && authorizationReady && contextIsAdmin;
+    const isTraditionalAdmin = !!adminUsername;
+    const hasAdminSession = isTraditionalAdmin || isGoogleAdmin;
+
+    if (!hasAdminSession) {
+      setApprovals([]);
+      setLoginLogs([]);
+      if (activeAdminName) {
+        recordEvent("admin_requests_skipped", "skipped", {
+          reason: "not_fully_authorized",
+          authInitialized,
+          sessionReady,
+          authorizationReady,
+          contextIsAdmin
+        });
       }
-    };
-    void checkAdmin();
-  }, []);
-
-  useEffect(() => {
-    if (adminUsername) {
-      void loadAdminData();
+      return;
     }
-  }, [adminUsername, loadAdminData]);
+
+    const controller = new AbortController();
+    void loadAdminData(controller.signal);
+
+    return () => {
+      controller.abort();
+    };
+  }, [adminUsername, authInitialized, sessionReady, authorizationReady, contextIsAdmin, activeAdminName, loadAdminData]);
 
   // Admin action handlers
   const handleAdminLogin = async (usernameInput: string, passwordInput: string) => {
@@ -69,6 +102,7 @@ function CinequeueApp() {
     try {
       const csrfRes = await api.csrf();
       await api.adminLogout(csrfRes.csrf_token);
+      await logout();
     } catch (err) {
       console.error("Logout failed:", err);
     } finally {
@@ -79,7 +113,7 @@ function CinequeueApp() {
   const handleApprove = async (email: string) => {
     try {
       const csrfRes = await api.csrf();
-      await api.adminApprove(email, csrfRes.csrf_token);
+      await api.adminApprove(email, csrfRes.csrf_token, idToken || undefined);
       await loadAdminData();
     } catch (err) {
       alert(err instanceof Error ? err.message : "Failed to approve user.");
@@ -89,7 +123,7 @@ function CinequeueApp() {
   const handleDeny = async (email: string) => {
     try {
       const csrfRes = await api.csrf();
-      await api.adminDeny(email, csrfRes.csrf_token);
+      await api.adminDeny(email, csrfRes.csrf_token, idToken || undefined);
       await loadAdminData();
     } catch (err) {
       alert(err instanceof Error ? err.message : "Failed to revoke/deny user.");
@@ -99,7 +133,7 @@ function CinequeueApp() {
   const handleInvite = async (email: string) => {
     try {
       const csrfRes = await api.csrf();
-      await api.adminInvite(email, csrfRes.csrf_token);
+      await api.adminInvite(email, csrfRes.csrf_token, idToken || undefined);
       await loadAdminData();
     } catch (err) {
       alert(err instanceof Error ? err.message : "Failed to invite user.");
@@ -107,7 +141,7 @@ function CinequeueApp() {
     }
   };
 
-  if (authLoading) {
+  if (!authInitialized || authLoading || (user && !authorizationReady)) {
     return (
       <div className="auth-loading">
         <div className="spinner"></div>
@@ -117,10 +151,10 @@ function CinequeueApp() {
   }
 
   // 1. Render Admin Dashboard if Admin is logged in
-  if (adminUsername) {
+  if (activeAdminName) {
     return (
       <AdminDashboard
-        adminUsername={adminUsername}
+        adminUsername={activeAdminName}
         approvals={approvals}
         loginLogs={loginLogs}
         onLogout={handleAdminLogout}
@@ -167,6 +201,7 @@ export default function App() {
   return (
     <AuthProvider>
       <CinequeueApp />
+      <AuthDiagnosticsPanel />
     </AuthProvider>
   );
 }

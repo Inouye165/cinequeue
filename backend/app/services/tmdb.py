@@ -1,10 +1,18 @@
+from datetime import date
+import asyncio
+import logging
+import re
 from typing import Any
+
 
 import feedparser
 import httpx
 
 from app.config import TMDB_API_KEY, TMDB_BASE_URL, TMDB_IMAGE_BASE
 from app.models import days_label, days_until, enrich_media_item, poster_url
+
+logger = logging.getLogger(__name__)
+
 
 
 class TmdbClient:
@@ -83,21 +91,171 @@ class TmdbClient:
             "runtime_minutes": runtime,
             "status": data.get("status"),
             "homepage": data.get("homepage"),
+            "seasons": data.get("seasons") if media_type == "tv" else None,
         }
+
+    def get_next_season(self, seasons: list[dict[str, Any]]) -> dict[str, Any] | None:
+        if not seasons:
+            return None
+        valid_seasons = [
+            s for s in seasons
+            if s.get("season_number", 0) > 0 and s.get("air_date")
+        ]
+        if not valid_seasons:
+            return None
+
+        # Sort by air_date to find chronological order
+        valid_seasons.sort(key=lambda s: s["air_date"])
+
+        today_str = date.today().isoformat()
+        upcoming = [s for s in valid_seasons if s["air_date"] >= today_str]
+        if upcoming:
+            target_season = upcoming[0]
+        else:
+            # If no upcoming season, use the latest season by season number
+            valid_seasons.sort(key=lambda s: s["season_number"])
+            target_season = valid_seasons[-1] if len(valid_seasons) > 1 else None
+
+        if not target_season:
+            return None
+
+        s_air_date = target_season.get("air_date")
+        days = days_until(s_air_date)
+        return {
+            "name": target_season.get("name"),
+            "season_number": target_season.get("season_number"),
+            "air_date": s_air_date,
+            "days_away": days,
+            "days_label": days_label(days),
+        }
+
+    async def get_season_cast_changes(
+        self, series_id: int, next_season_number: int
+    ) -> dict[str, Any] | None:
+        if next_season_number <= 1:
+            return None
+
+        prev_season_number = next_season_number - 1
+
+        try:
+            prev_credits, next_credits = await asyncio.gather(
+                self._get(f"/tv/{series_id}/season/{prev_season_number}/credits"),
+                self._get(f"/tv/{series_id}/season/{next_season_number}/credits")
+            )
+        except Exception as e:
+            logger.warning(f"Failed to fetch credits for comparison: {e}")
+            return None
+
+        prev_cast = prev_credits.get("cast", [])
+        next_cast = next_credits.get("cast", [])
+
+        def normalize_char(name: str) -> str:
+            if not name:
+                return ""
+            name = re.sub(r'\(.*?\)', '', name)
+            name = re.sub(r'[^a-zA-Z0-9\s]', '', name)
+            return name.lower().strip()
+
+        main_prev_cast = [c for c in prev_cast if c.get("order", 99) < 15]
+
+        returning_with_new_actors = []
+        written_out = []
+
+        next_cast_map = {}
+        for c in next_cast:
+            char_norm = normalize_char(c.get("character", ""))
+            if char_norm:
+                if char_norm not in next_cast_map or c.get("order", 99) < next_cast_map[char_norm].get("order", 99):
+                    next_cast_map[char_norm] = c
+
+        for member in main_prev_cast:
+            char_name = member.get("character", "")
+            actor_name = member.get("name", "")
+            actor_id = member.get("id")
+
+            char_norm = normalize_char(char_name)
+            if not char_norm:
+                continue
+
+            if char_norm in next_cast_map:
+                next_member = next_cast_map[char_norm]
+                next_actor_id = next_member.get("id")
+                next_actor_name = next_member.get("name", "")
+                if next_actor_id != actor_id:
+                    returning_with_new_actors.append({
+                        "character": char_name,
+                        "old_actor": actor_name,
+                        "new_actor": next_actor_name
+                    })
+            else:
+                written_out.append({
+                    "character": char_name,
+                    "actor": actor_name
+                })
+
+        return {
+            "prev_season": prev_season_number,
+            "next_season": next_season_number,
+            "returning_with_new_actors": returning_with_new_actors,
+            "written_out": written_out
+        }
+
 
     async def get_watch_providers(self, media_type: str, tmdb_id: int) -> dict[str, Any]:
         data = await self._get(f"/{media_type}/{tmdb_id}/watch/providers")
         us = data.get("results", {}).get("US", {})
+        free_list = us.get("free", []) + us.get("ads", [])
+        
         categories = {
             "streaming": _format_providers(us.get("flatrate", [])),
+            "free": _format_providers(free_list),
             "rent": _format_providers(us.get("rent", [])),
             "buy": _format_providers(us.get("buy", [])),
         }
+        
+        # Calculate flags
+        is_free_streaming = len(categories["streaming"]) > 0 or len(categories["free"]) > 0
+        
+        # Simulated buy pricing
+        has_buy_options = len(categories["buy"]) > 0
+        is_sale = False
+        original_price = 0.0
+        current_price = 0.0
+        
+        if has_buy_options:
+            # Deterministic pricing based on tmdb_id
+            state = (tmdb_id * 31) % 100
+            is_sale = state < 35  # 35% chance of being on sale
+            original_price = 14.99 if state % 2 == 0 else 19.99
+            if is_sale:
+                current_price = 4.99 if state % 3 == 0 else 7.99 if state % 3 == 1 else 9.99
+            else:
+                current_price = original_price
+            
+            # Enrich buy providers with prices
+            enriched_buy = []
+            for provider in categories["buy"]:
+                enriched_buy.append({
+                    **provider,
+                    "current_price": f"${current_price:.2f}",
+                    "original_price": f"${original_price:.2f}",
+                    "is_on_sale": is_sale,
+                })
+            categories["buy"] = enriched_buy
+            
         link = us.get("link")
         in_theatres = media_type == "movie" and await self._is_in_theatres(tmdb_id)
         if in_theatres:
             categories["theatres"] = [{"name": "In theatres now", "logo_url": None}]
-        return {"link": link, "categories": categories}
+            
+        return {
+            "link": link,
+            "categories": categories,
+            "is_free_streaming": is_free_streaming,
+            "is_on_sale": has_buy_options and is_sale,
+            "buy_original_price": f"${original_price:.2f}" if has_buy_options else None,
+            "buy_current_price": f"${current_price:.2f}" if has_buy_options else None,
+        }
 
     async def get_videos(self, media_type: str, tmdb_id: int) -> list[dict[str, Any]]:
         try:

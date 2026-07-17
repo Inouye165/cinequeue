@@ -46,6 +46,8 @@ class FirestoreWatchlistRepository(WatchlistRepository):
             d.setdefault("is_owned", False)
             d.setdefault("owned_format", None)
             d.setdefault("status", "queue")
+            d.setdefault("watch_free_streaming", False)
+            d.setdefault("watch_on_sale_buy", False)
             res.append(d)
         return res
 
@@ -60,6 +62,8 @@ class FirestoreWatchlistRepository(WatchlistRepository):
         is_owned: bool = False,
         owned_format: str | None = None,
         status: str = "queue",
+        watch_free_streaming: bool = False,
+        watch_on_sale_buy: bool = False,
     ) -> dict[str, Any]:
         doc_id = _doc_id(media_type, tmdb_id)
         col = self._user_watchlist_col(user_id)
@@ -80,6 +84,8 @@ class FirestoreWatchlistRepository(WatchlistRepository):
             "is_owned": is_owned,
             "owned_format": owned_format,
             "status": status,
+            "watch_free_streaming": watch_free_streaming,
+            "watch_on_sale_buy": watch_on_sale_buy,
         }
         doc_ref.set(data)
         return data
@@ -92,6 +98,8 @@ class FirestoreWatchlistRepository(WatchlistRepository):
         is_owned: bool | None = None,
         owned_format: str | None = None,
         status: str | None = None,
+        watch_free_streaming: bool | None = None,
+        watch_on_sale_buy: bool | None = None,
     ) -> dict[str, Any] | None:
         doc_id = _doc_id(media_type, tmdb_id)
         col = self._user_watchlist_col(user_id)
@@ -109,6 +117,10 @@ class FirestoreWatchlistRepository(WatchlistRepository):
                 data["owned_format"] = owned_format
         if status is not None:
             data["status"] = status
+        if watch_free_streaming is not None:
+            data["watch_free_streaming"] = watch_free_streaming
+        if watch_on_sale_buy is not None:
+            data["watch_on_sale_buy"] = watch_on_sale_buy
 
         doc_ref.update(data)
         updated = snapshot.to_dict()
@@ -116,6 +128,8 @@ class FirestoreWatchlistRepository(WatchlistRepository):
         if "is_owned" in updated:
             updated["is_owned"] = bool(updated["is_owned"])
         updated.setdefault("status", "queue")
+        updated.setdefault("watch_free_streaming", False)
+        updated.setdefault("watch_on_sale_buy", False)
         return updated
 
     def update_item_cache(
@@ -155,21 +169,39 @@ class FirestoreWatchlistRepository(WatchlistRepository):
     # -- Admin & Auth Methods -------------------------------------------------
 
     def get_admin_user(self, username: str) -> dict[str, Any] | None:
-        doc_ref = self._db.collection("admin_users").document(username)
+        username_normalized = username.strip().lower()
+        doc_ref = self._db.collection("admin_users").document(username_normalized)
         snapshot = doc_ref.get()
         if snapshot.exists:
             res = snapshot.to_dict()
             if res is not None:
-                res["username"] = username
+                res["username"] = username_normalized
                 return res
         return None
 
     def create_admin_user(self, username: str, password_hash: str, salt: str) -> None:
-        doc_ref = self._db.collection("admin_users").document(username)
+        username_normalized = username.strip().lower()
+        doc_ref = self._db.collection("admin_users").document(username_normalized)
         doc_ref.set({
             "password_hash": password_hash,
             "salt": salt
         })
+
+    def list_admin_users(self) -> list[str]:
+        docs = self._db.collection("admin_users").stream()
+        return [doc.id for doc in docs]
+
+    def delete_admin_user(self, username: str) -> bool:
+        username_normalized = username.strip().lower()
+        doc_ref = self._db.collection("admin_users").document(username_normalized)
+        if not doc_ref.get().exists:
+            return False
+        doc_ref.delete()
+        # Clean up any active sessions for this admin user
+        sessions = self._db.collection("admin_sessions").where("username", "==", username_normalized).stream()
+        for sess in sessions:
+            sess.reference.delete()
+        return True
 
     def create_admin_session(self, session_id: str, username: str, expires_at: str) -> None:
         created_at = self.utc_now_iso()

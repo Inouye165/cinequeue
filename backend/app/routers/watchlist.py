@@ -4,7 +4,7 @@ import json
 import logging
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request, Depends
+from fastapi import APIRouter, HTTPException, Request, Depends, BackgroundTasks
 
 from app.auth import get_current_user, CurrentUser
 from app.models import days_label, days_until, poster_url
@@ -16,8 +16,26 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/watchlist", tags=["watchlist"], dependencies=[Depends(get_current_user)])
 
 
+async def refresh_cache_in_background(repo, user_id: str, media_type: str, tmdb_id: int, tmdb: TmdbClient):
+    try:
+        details = await tmdb.get_details(media_type, tmdb_id)
+        try:
+            providers = await tmdb.get_watch_providers(media_type, tmdb_id)
+            details["watch_providers"] = providers
+        except Exception as exc:
+            logger.warning(f"Failed to fetch watch providers for {media_type}/{tmdb_id} in background: {exc}")
+        repo.update_item_cache(user_id, media_type, tmdb_id, details)
+        logger.info(f"Background cache refresh succeeded for {media_type}/{tmdb_id}")
+    except Exception as exc:
+        logger.warning(f"Background cache refresh failed for {media_type}/{tmdb_id}: {exc}")
+
+
 @router.get("")
-async def list_watchlist(request: Request, current_user: CurrentUser = Depends(get_current_user)) -> list[dict[str, Any]]:
+async def list_watchlist(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    current_user: CurrentUser = Depends(get_current_user),
+) -> list[dict[str, Any]]:
     logger.info("List watchlist request for user: %s", current_user.uid)
     try:
         repo = request.app.state.watchlist_repo
@@ -51,38 +69,75 @@ async def list_watchlist(request: Request, current_user: CurrentUser = Depends(g
                     pass
 
             if not details:
-                try:
-                    details = await tmdb.get_details(enriched["media_type"], enriched["tmdb_id"])
-                    repo.update_item_cache(
+                # If cache is stale but present, use it immediately and queue background update
+                if details_cached:
+                    try:
+                        if isinstance(details_cached, str):
+                            details = json.loads(details_cached)
+                        else:
+                            details = details_cached
+                    except Exception:
+                        pass
+
+                if details:
+                    # Stale cache is available, schedule background task
+                    background_tasks.add_task(
+                        refresh_cache_in_background,
+                        repo,
                         current_user.uid,
                         enriched["media_type"],
                         enriched["tmdb_id"],
-                        details,
+                        tmdb,
                     )
-                except Exception as exc:
-                    logger.warning(f"Failed to fetch details for {enriched['media_type']}/{enriched['tmdb_id']}: {exc}")
-                    # Fallback to stale cache if it exists
-                    if details_cached:
+                else:
+                    # No cache available, fetch synchronously
+                    try:
+                        details = await tmdb.get_details(enriched["media_type"], enriched["tmdb_id"])
                         try:
-                            if isinstance(details_cached, str):
-                                details = json.loads(details_cached)
-                            else:
-                                details = details_cached
+                            providers = await tmdb.get_watch_providers(enriched["media_type"], enriched["tmdb_id"])
+                            details["watch_providers"] = providers
                         except Exception:
                             pass
-                    
-                    if not details:
+                        repo.update_item_cache(
+                            current_user.uid,
+                            enriched["media_type"],
+                            enriched["tmdb_id"],
+                            details,
+                        )
+                    except Exception as exc:
+                        logger.warning(f"Failed to fetch details for {enriched['media_type']}/{enriched['tmdb_id']}: {exc}")
                         details = {}
 
             rel_date = details.get("release_date") or enriched.get("release_date")
             days = days_until(rel_date)
             
+            # Check alerts
+            providers = details.get("watch_providers", {})
+            is_free_streaming_alert = False
+            is_on_sale_alert = False
+
+            if enriched.get("watch_free_streaming") and providers.get("is_free_streaming"):
+                is_free_streaming_alert = True
+            if enriched.get("watch_on_sale_buy") and providers.get("is_on_sale"):
+                is_on_sale_alert = True
+
+            next_season = None
+            if enriched["media_type"] == "tv" and details.get("seasons"):
+                next_season = tmdb.get_next_season(details["seasons"])
+
             enriched.update(
                 {
                     "release_date": rel_date,
                     "poster_url": details.get("poster_url") or poster_url(enriched.get("poster_path")),
                     "days_away": days,
                     "days_label": days_label(days),
+                    "watch_free_streaming": bool(enriched.get("watch_free_streaming")),
+                    "watch_on_sale_buy": bool(enriched.get("watch_on_sale_buy")),
+                    "is_free_streaming_alert": is_free_streaming_alert,
+                    "is_on_sale_alert": is_on_sale_alert,
+                    "buy_original_price": providers.get("buy_original_price"),
+                    "buy_current_price": providers.get("buy_current_price"),
+                    "next_season": next_season,
                 }
             )
             if "overview" in details:
@@ -117,6 +172,8 @@ async def add_to_watchlist(request: Request, body: dict[str, Any], current_user:
     is_owned = body.get("is_owned", False)
     owned_format = body.get("owned_format", None)
     status = body.get("status", "queue")
+    watch_free_streaming = body.get("watch_free_streaming", False)
+    watch_on_sale_buy = body.get("watch_on_sale_buy", False)
 
     if is_owned and owned_format not in {"electronic", "cloud", "hard_copy"}:
         raise HTTPException(status_code=400, detail="Invalid owned_format. Must be 'electronic', 'cloud', or 'hard_copy'")
@@ -136,6 +193,8 @@ async def add_to_watchlist(request: Request, body: dict[str, Any], current_user:
             is_owned=is_owned,
             owned_format=owned_format,
             status=status,
+            watch_free_streaming=watch_free_streaming,
+            watch_on_sale_buy=watch_on_sale_buy,
         )
 
         days = days_until(release_date)
@@ -151,6 +210,8 @@ async def add_to_watchlist(request: Request, body: dict[str, Any], current_user:
             "is_owned": added.get("is_owned", False),
             "owned_format": added.get("owned_format"),
             "status": added.get("status", "queue"),
+            "watch_free_streaming": added.get("watch_free_streaming", False),
+            "watch_on_sale_buy": added.get("watch_on_sale_buy", False),
         }
     except DuplicateItemError:
         logger.warning(f"Item already on watchlist: {media_type}/{tmdb_id}")
@@ -178,9 +239,11 @@ async def update_watchlist_item(
     is_owned = body.get("is_owned")
     owned_format = body.get("owned_format")
     status = body.get("status")
+    watch_free_streaming = body.get("watch_free_streaming")
+    watch_on_sale_buy = body.get("watch_on_sale_buy")
 
-    if is_owned is None and status is None:
-        raise HTTPException(status_code=400, detail="is_owned or status field is required")
+    if is_owned is None and status is None and watch_free_streaming is None and watch_on_sale_buy is None:
+        raise HTTPException(status_code=400, detail="At least one field to update is required")
 
     if is_owned is not None and is_owned and owned_format not in {"electronic", "cloud", "hard_copy"}:
         raise HTTPException(status_code=400, detail="Invalid owned_format. Must be 'electronic', 'cloud', or 'hard_copy'")
@@ -197,6 +260,8 @@ async def update_watchlist_item(
             is_owned=is_owned,
             owned_format=owned_format,
             status=status,
+            watch_free_streaming=watch_free_streaming,
+            watch_on_sale_buy=watch_on_sale_buy,
         )
         if not updated:
             logger.warning(f"Item not found for update: {media_type}/{tmdb_id}")
@@ -208,6 +273,8 @@ async def update_watchlist_item(
             "is_owned": updated.get("is_owned", False),
             "owned_format": updated.get("owned_format"),
             "status_value": updated.get("status", "queue"),
+            "watch_free_streaming": updated.get("watch_free_streaming", False),
+            "watch_on_sale_buy": updated.get("watch_on_sale_buy", False),
         }
     except HTTPException:
         raise

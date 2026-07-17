@@ -33,6 +33,8 @@ class WatchlistRepository(ABC):
         is_owned: bool = False,
         owned_format: str | None = None,
         status: str = "queue",
+        watch_free_streaming: bool = False,
+        watch_on_sale_buy: bool = False,
     ) -> dict[str, Any]:
         """Add an item to the watchlist.
 
@@ -50,8 +52,10 @@ class WatchlistRepository(ABC):
         is_owned: bool | None = None,
         owned_format: str | None = None,
         status: str | None = None,
+        watch_free_streaming: bool | None = None,
+        watch_on_sale_buy: bool | None = None,
     ) -> dict[str, Any] | None:
-        """Update an item's owned status, format, or status.
+        """Update an item's owned status, format, status, or watch alert preferences.
 
         Returns:
             The updated item dictionary, or None if not found.
@@ -97,6 +101,16 @@ class WatchlistRepository(ABC):
     @abstractmethod
     def create_admin_user(self, username: str, password_hash: str, salt: str) -> None:
         """Create a new admin user."""
+        ...
+
+    @abstractmethod
+    def list_admin_users(self) -> list[str]:
+        """List all admin usernames."""
+        ...
+
+    @abstractmethod
+    def delete_admin_user(self, username: str) -> bool:
+        """Delete/revoke an admin user."""
         ...
 
     @abstractmethod

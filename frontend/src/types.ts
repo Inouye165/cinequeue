@@ -1,5 +1,27 @@
 export type MediaType = "movie" | "tv";
 
+export interface NextSeasonInfo {
+  name: string;
+  season_number: number;
+  air_date?: string | null;
+  days_away?: number | null;
+  days_label?: string;
+}
+
+export interface CastChangeItem {
+  character: string;
+  actor?: string;
+  old_actor?: string;
+  new_actor?: string;
+}
+
+export interface CastChanges {
+  prev_season: number;
+  next_season: number;
+  returning_with_new_actors: CastChangeItem[];
+  written_out: CastChangeItem[];
+}
+
 export interface MediaItem {
   id: number;
   media_type: MediaType;
@@ -13,6 +35,7 @@ export interface MediaItem {
   vote_average?: number;
   vote_count?: number;
   popularity?: number;
+  next_season?: NextSeasonInfo | null;
 }
 
 export interface WatchlistItem extends MediaItem {
@@ -22,21 +45,35 @@ export interface WatchlistItem extends MediaItem {
   status?: string;
   is_owned?: boolean;
   owned_format?: "electronic" | "cloud" | "hard_copy" | null;
+  watch_free_streaming?: boolean;
+  watch_on_sale_buy?: boolean;
+  is_free_streaming_alert?: boolean;
+  is_on_sale_alert?: boolean;
+  buy_original_price?: string | null;
+  buy_current_price?: string | null;
 }
 
 export interface Provider {
   name: string;
   logo_url?: string | null;
+  current_price?: string;
+  original_price?: string;
+  is_on_sale?: boolean;
 }
 
 export interface WatchProviders {
   link?: string;
   categories: {
     streaming?: Provider[];
+    free?: Provider[];
     rent?: Provider[];
     buy?: Provider[];
     theatres?: Provider[];
   };
+  is_free_streaming?: boolean;
+  is_on_sale?: boolean;
+  buy_original_price?: string | null;
+  buy_current_price?: string | null;
 }
 
 export interface Review {
@@ -70,4 +107,5 @@ export interface MediaDetails extends MediaItem {
   release_info: Record<string, unknown>;
   news: NewsArticle[];
   trailers?: Trailer[];
+  cast_changes?: CastChanges | null;
 }

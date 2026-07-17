@@ -301,3 +301,157 @@ def test_login_attempts_logged(client_with_admin_auth):
     assert logs[0]["status"] == "success"
     assert logs[1]["email"] == "admin"
     assert logs[1]["status"] == "failed"
+
+
+@patch("firebase_admin.auth.verify_id_token")
+def test_admin_bearer_token_success(mock_verify_token, client_with_admin_auth):
+    """Valid authenticated administrator receives 200."""
+    mock_verify_token.return_value = {
+        "uid": "admin_uid_123",
+        "email": "admin@example.com",
+    }
+    
+    # We temporarily patch ADMIN_USERNAME in config to admin@example.com for matching
+    with patch("app.services.admin_auth.ADMIN_USERNAME", "admin@example.com"):
+        response = client_with_admin_auth.get(
+            "/api/admin/me",
+            headers={"Authorization": "Bearer admin-test-token"}
+        )
+        assert response.status_code == 200
+        assert response.json()["username"] == "admin@example.com"
+
+
+@patch("firebase_admin.auth.verify_id_token")
+def test_admin_bearer_token_forbidden(mock_verify_token, client_with_admin_auth):
+    """Valid authenticated non-administrator receives 403."""
+    mock_verify_token.return_value = {
+        "uid": "nonadmin_uid_456",
+        "email": "user@example.com",
+    }
+    
+    response = client_with_admin_auth.get(
+        "/api/admin/me",
+        headers={"Authorization": "Bearer user-test-token"}
+    )
+    assert response.status_code == 403
+    assert "Not authorized as an administrator" in response.json()["detail"]
+
+
+@patch("firebase_admin.auth.verify_id_token")
+def test_admin_bearer_token_invalid_or_missing(mock_verify_token, client_with_admin_auth):
+    """Missing or invalid token receives 401."""
+    # 1. Missing token
+    response = client_with_admin_auth.get("/api/admin/me")
+    assert response.status_code == 401
+
+    # 2. Invalid token
+    mock_verify_token.side_effect = ValueError("Invalid token")
+    response = client_with_admin_auth.get(
+        "/api/admin/me",
+        headers={"Authorization": "Bearer invalid-token"}
+    )
+    assert response.status_code == 401
+
+
+@patch("firebase_admin.auth.verify_id_token")
+def test_admin_bearer_token_normalization(mock_verify_token, client_with_admin_auth):
+    """Email comparisons are normalized safely (case-insensitive and trimmed)."""
+    mock_verify_token.return_value = {
+        "uid": "admin_uid_123",
+        "email": "  Admin@Example.Com  ",
+    }
+    
+    with patch("app.services.admin_auth.ADMIN_USERNAME", "admin@example.com"):
+        response = client_with_admin_auth.get(
+            "/api/admin/me",
+            headers={"Authorization": "Bearer admin-test-token"}
+        )
+        assert response.status_code == 200
+        assert response.json()["username"] == "admin@example.com"
+
+
+@patch("firebase_admin.auth.verify_id_token")
+def test_admin_bearer_token_no_raw_token_logged(mock_verify_token, client_with_admin_auth, caplog):
+    """No raw token is written to logs."""
+    import logging
+    caplog.set_level(logging.INFO)
+    
+    raw_token = "my-super-secret-token-12345"
+    mock_verify_token.return_value = {
+        "uid": "admin_uid_123",
+        "email": "admin@example.com",
+    }
+    
+    with patch("app.services.admin_auth.ADMIN_USERNAME", "admin@example.com"):
+        response = client_with_admin_auth.get(
+            "/api/admin/me",
+            headers={"Authorization": f"Bearer {raw_token}"}
+        )
+        assert response.status_code == 200
+        
+        # Verify raw token is not in any of the log records
+        for record in caplog.records:
+            assert raw_token not in record.message
+
+
+def test_admin_session_revocation(client_with_admin_auth):
+    """Removing an admin user immediately revokes/invalidates their active sessions."""
+    # 1. Log in to create an admin session cookie
+    csrf_res = client_with_admin_auth.get("/api/auth/csrf")
+    csrf_token = csrf_res.cookies.get("cinequeue_csrf")
+    
+    from app.services.admin_auth import hash_password, generate_salt
+    salt = generate_salt()
+    pwd_hash = hash_password("secretpass123", salt)
+    
+    repo = client_with_admin_auth.app.state.watchlist_repo
+    repo.create_admin_user("revokeme", pwd_hash, salt)
+    
+    login_res = client_with_admin_auth.post(
+        "/api/admin/login",
+        json={"username": "revokeme", "password": "secretpass123", "csrf_token": csrf_token}
+    )
+    assert login_res.status_code == 200
+    
+    # 2. Verify admin endpoints return 200 using the session cookie
+    me_res = client_with_admin_auth.get("/api/admin/me")
+    assert me_res.status_code == 200
+    
+    # 3. Delete/revoke the administrator from the database
+    repo.delete_admin_user("revokeme")
+    
+    # 4. Request /api/admin/me again using the same session cookie, it must be rejected with 401
+    me_res_revoked = client_with_admin_auth.get("/api/admin/me")
+    assert me_res_revoked.status_code == 401
+    assert any(word in me_res_revoked.json()["detail"].lower() for word in ("revoked", "invalid admin session"))
+
+
+def test_repository_normalization_consistency(client_with_admin_auth):
+    """Test that SQLite normalization behavior is consistent."""
+    repo = client_with_admin_auth.app.state.watchlist_repo
+    
+    # Setup username with spaces and capital letters
+    username_raw = "  AdminTestUser  "
+    username_norm = "admintestuser"
+    
+    from app.services.admin_auth import hash_password, generate_salt
+    salt = generate_salt()
+    pwd_hash = hash_password("somepass", salt)
+    
+    repo.create_admin_user(username_raw, pwd_hash, salt)
+    
+    # get_admin_user should normalize correctly and find the user
+    user = repo.get_admin_user(username_raw)
+    assert user is not None
+    assert user["username"] == username_norm
+    
+    user_lowercase = repo.get_admin_user("admintestuser")
+    assert user_lowercase is not None
+    
+    user_uppercase = repo.get_admin_user("ADMINTESTUSER")
+    assert user_uppercase is not None
+    
+    # Cleanup
+    repo.delete_admin_user(username_raw)
+    assert repo.get_admin_user(username_raw) is None
+

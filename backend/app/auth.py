@@ -5,6 +5,7 @@ import secrets
 import hmac
 import re
 import time
+import asyncio
 from typing import Optional
 from fastapi import HTTPException, Depends
 from fastapi.security import APIKeyCookie
@@ -84,9 +85,8 @@ async def get_current_user(
     try:
         try:
             # Verify the session cookie, checking for revoked or disabled sessions.
-            # This will query the Identity Platform backend and respects the
-            # roles/firebaseauth.viewer permission.
-            decoded_claims = auth.verify_session_cookie(session_cookie, check_revoked=True)
+            # Local verification is used (check_revoked=False) to avoid network overhead.
+            decoded_claims = auth.verify_session_cookie(session_cookie, check_revoked=False)
         except Exception as e:  # pylint: disable=broad-exception-caught
             if "Token used too early" in str(e):
                 match = re.search(r"Token used too early,\s*(\d+)\s*<\s*(\d+)", str(e))
@@ -104,8 +104,8 @@ async def get_current_user(
                     "Retrying in %s seconds...",
                     drift_val, sleep_time
                 )
-                time.sleep(sleep_time)
-                decoded_claims = auth.verify_session_cookie(session_cookie, check_revoked=True)
+                await asyncio.sleep(sleep_time)
+                decoded_claims = auth.verify_session_cookie(session_cookie, check_revoked=False)
             else:
                 raise
 

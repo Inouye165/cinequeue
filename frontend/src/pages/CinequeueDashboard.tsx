@@ -9,7 +9,7 @@ import type { MediaDetails, MediaItem, WatchlistItem } from "../types";
 
 const TABS: { id: TabType; label: string }[] = [
   { id: "watchlist", label: "My Queue" },
-  { id: "following", label: "Following" },
+  { id: "following", label: "Monitoring" },
   { id: "library", label: "My Library" },
   { id: "upcoming", label: "Upcoming" },
   { id: "theatres", label: "In Theatres" },
@@ -22,7 +22,7 @@ export function CinequeueDashboard() {
 
   const [tab, setTab] = useState<TabType>("watchlist");
   const [query, setQuery] = useState("");
-  const [items, setItems] = useState<MediaItem[]>([]);
+  const [remoteItems, setRemoteItems] = useState<MediaItem[]>([]);
   const [watchlist, setWatchlist] = useState<WatchlistItem[]>([]);
   const [selected, setSelected] = useState<MediaDetails | null>(null);
   const [loading, setLoading] = useState(true);
@@ -55,73 +55,69 @@ export function CinequeueDashboard() {
     }
   }, [user]);
 
-  const loadTab = useCallback(async (activeTab: TabType, searchQuery = "") => {
-    if (!user) return;
-    setLoading(true);
-    setError(null);
-    try {
-      if (activeTab === "watchlist") {
-        const data = await loadWatchlist();
-        const queueItems = data.filter((item) => !item.is_owned && (item.status === "queue" || !item.status));
-        queueItems.sort((a, b) => {
-          const dateA = a.release_date || "";
-          const dateB = b.release_date || "";
-          if (!dateA && !dateB) return 0;
-          if (!dateA) return 1;
-          if (!dateB) return -1;
-          return dateA.localeCompare(dateB);
-        });
-        setItems(queueItems);
-      } else if (activeTab === "following") {
-        const data = await loadWatchlist();
-        const followingItems = data.filter((item) => !item.is_owned && item.status === "following");
-        followingItems.sort((a, b) => {
-          const dateA = a.release_date || "";
-          const dateB = b.release_date || "";
-          if (!dateA && !dateB) return 0;
-          if (!dateA) return 1;
-          if (!dateB) return -1;
-          return dateA.localeCompare(dateB);
-        });
-        setItems(followingItems);
-      } else if (activeTab === "library") {
-        const data = await loadWatchlist();
-        setItems(data.filter((item) => item.is_owned));
-      } else if (activeTab === "search") {
-        if (!searchQuery.trim()) {
-          setItems([]);
-          return;
-        }
-        const data = await api.search(searchQuery);
-        setItems(data);
-      } else if (activeTab === "upcoming") {
-        setItems(await api.upcoming());
-      } else if (activeTab === "theatres") {
-        setItems(await api.nowPlaying());
-      } else if (activeTab === "trending") {
-        setItems(await api.trending());
-      } else if (activeTab === "on-air") {
-        setItems(await api.onAir());
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Something went wrong");
-      setItems([]);
-    } finally {
-      setLoading(false);
-    }
-  }, [loadWatchlist, user]);
-
+  // Initial watchlist fetch on mount or user change
   useEffect(() => {
     if (user) {
-      void loadTab(tab);
+      setLoading(true);
+      loadWatchlist().finally(() => {
+        setLoading(false);
+      });
     }
-  }, [tab, loadTab, user]);
+  }, [user, loadWatchlist]);
+
+  // Handle remote data fetching when tab is a remote tab
+  useEffect(() => {
+    if (!user) return;
+    const isRemoteTab = ["search", "upcoming", "theatres", "on-air", "trending"].includes(tab);
+    if (!isRemoteTab) return;
+
+    let active = true;
+    const fetchRemoteData = async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        let data: MediaItem[] = [];
+        if (tab === "upcoming") {
+          data = await api.upcoming();
+        } else if (tab === "theatres") {
+          data = await api.nowPlaying();
+        } else if (tab === "trending") {
+          data = await api.trending();
+        } else if (tab === "on-air") {
+          data = await api.onAir();
+        } else if (tab === "search") {
+          if (query.trim()) {
+            data = await api.search(query.trim());
+          } else {
+            data = [];
+          }
+        }
+        if (active) {
+          setRemoteItems(data);
+        }
+      } catch (err) {
+        if (active) {
+          setError(err instanceof Error ? err.message : "Something went wrong");
+          setRemoteItems([]);
+        }
+      } finally {
+        if (active) {
+          setLoading(false);
+        }
+      }
+    };
+
+    void fetchRemoteData();
+
+    return () => {
+      active = false;
+    };
+  }, [tab, user, query]);
 
   const handleSearch = (event: FormEvent) => {
     event.preventDefault();
     if (!query.trim()) return;
     setTab("search");
-    void loadTab("search", query.trim());
   };
 
   const openDetails = async (item: MediaItem) => {
@@ -145,7 +141,9 @@ export function CinequeueDashboard() {
         release_date: item.release_date ?? undefined,
       });
       await loadWatchlist();
-      await loadTab(tab);
+      setQuery("");
+      setTab("watchlist");
+      setSelected(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not add to queue");
     }
@@ -156,7 +154,6 @@ export function CinequeueDashboard() {
     try {
       await api.removeFromWatchlist(item.media_type, tmdbId);
       await loadWatchlist();
-      await loadTab(tab);
       if (selected && selected.id === item.id) {
         setSelected(null);
       }
@@ -170,7 +167,6 @@ export function CinequeueDashboard() {
     try {
       await api.updateWatchlistItem(item.media_type, tmdbId, undefined, undefined, "following");
       await loadWatchlist();
-      await loadTab(tab);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not move to following");
     }
@@ -181,7 +177,6 @@ export function CinequeueDashboard() {
     try {
       await api.updateWatchlistItem(item.media_type, tmdbId, undefined, undefined, "queue");
       await loadWatchlist();
-      await loadTab(tab);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not move to queue");
     }
@@ -220,11 +215,77 @@ export function CinequeueDashboard() {
         }
       }
       await loadWatchlist();
-      await loadTab(tab);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not update library status");
     }
   };
+
+  const handleUpdateWatchOptions = async (
+    watchFreeStreaming: boolean,
+    watchOnSaleBuy: boolean
+  ) => {
+    if (!selected) return;
+    try {
+      await api.updateWatchlistItem(
+        selected.media_type,
+        selected.id,
+        undefined,
+        undefined,
+        undefined,
+        watchFreeStreaming,
+        watchOnSaleBuy
+      );
+      await loadWatchlist();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not update watch options");
+    }
+  };
+
+  const localItems = useMemo(() => {
+    if (tab === "watchlist") {
+      const queueItems = watchlist.filter((item) => {
+        if (item.is_owned) return false;
+        if (item.status === "queue" || !item.status) return true;
+        if (item.status === "following") {
+          return (
+            item.media_type === "tv" &&
+            item.next_season &&
+            item.next_season.days_away !== undefined &&
+            item.next_season.days_away !== null &&
+            item.next_season.days_away >= 0 &&
+            item.next_season.days_away <= 30
+          );
+        }
+        return false;
+      });
+      return [...queueItems].sort((a, b) => {
+        const dateA = (a.media_type === "tv" && a.next_season?.air_date) ? a.next_season.air_date : (a.release_date || "");
+        const dateB = (b.media_type === "tv" && b.next_season?.air_date) ? b.next_season.air_date : (b.release_date || "");
+        if (!dateA && !dateB) return 0;
+        if (!dateA) return 1;
+        if (!dateB) return -1;
+        return dateA.localeCompare(dateB);
+      });
+    }
+    if (tab === "following") {
+      const followingItems = watchlist.filter((item) => !item.is_owned && item.status === "following");
+      return [...followingItems].sort((a, b) => {
+        const dateA = (a.media_type === "tv" && a.next_season?.air_date) ? a.next_season.air_date : (a.release_date || "");
+        const dateB = (b.media_type === "tv" && b.next_season?.air_date) ? b.next_season.air_date : (b.release_date || "");
+        if (!dateA && !dateB) return 0;
+        if (!dateA) return 1;
+        if (!dateB) return -1;
+        return dateA.localeCompare(dateB);
+      });
+    }
+    if (tab === "library") {
+      return watchlist.filter((item) => item.is_owned);
+    }
+    return [];
+  }, [watchlist, tab]);
+
+  const isLocalTab = ["watchlist", "following", "library"].includes(tab);
+  const items = isLocalTab ? localItems : remoteItems;
 
   const sectionTitle =
     tab === "search"
@@ -293,7 +354,7 @@ export function CinequeueDashboard() {
           {tab === "watchlist"
             ? "Your queue is empty. Search for something to add."
             : tab === "following"
-            ? "You are not following any shows or movies. Move them from your queue here once you start watching."
+            ? "You are not monitoring any shows or movies. Move them from your Queue here to start tracking prices, streaming availability, and alerts."
             : tab === "library"
             ? "Your library is empty. Search for something or mark items as owned."
             : "Nothing to show right now."}
@@ -301,19 +362,28 @@ export function CinequeueDashboard() {
       )}
 
       {selected ? (
-        <DetailModal
-          details={selected}
-          isOnQueue={queueKeys.has(`${selected.media_type}:${selected.id}`)}
-          isFollowing={followingKeys.has(`${selected.media_type}:${selected.id}`)}
-          isOwned={libraryKeys.has(`${selected.media_type}:${selected.id}`)}
-          ownedFormat={watchlist.find((i) => `${i.media_type}:${i.tmdb_id ?? i.id}` === `${selected.media_type}:${selected.id}`)?.owned_format || null}
-          onClose={() => setSelected(null)}
-          onAdd={() => void addToWatchlist(selected)}
-          onRemove={() => void removeFromWatchlist(selected)}
-          onUpdateOwned={handleUpdateOwned}
-          onMoveToFollowing={() => void moveToFollowing(selected)}
-          onMoveToQueue={() => void moveToQueue(selected)}
-        />
+        (() => {
+          const watchKey = `${selected.media_type}:${selected.id}`;
+          const watchItem = watchlist.find((i) => `${i.media_type}:${i.tmdb_id ?? i.id}` === watchKey);
+          return (
+            <DetailModal
+              details={selected}
+              isOnQueue={queueKeys.has(watchKey)}
+              isFollowing={followingKeys.has(watchKey)}
+              isOwned={libraryKeys.has(watchKey)}
+              ownedFormat={watchItem?.owned_format || null}
+              watchFreeStreaming={watchItem?.watch_free_streaming || false}
+              watchOnSaleBuy={watchItem?.watch_on_sale_buy || false}
+              onClose={() => setSelected(null)}
+              onAdd={() => void addToWatchlist(selected)}
+              onRemove={() => void removeFromWatchlist(selected)}
+              onUpdateOwned={handleUpdateOwned}
+              onMoveToFollowing={() => void moveToFollowing(selected)}
+              onMoveToQueue={() => void moveToQueue(selected)}
+              onUpdateWatchOptions={handleUpdateWatchOptions}
+            />
+          );
+        })()
       ) : null}
     </div>
   );
