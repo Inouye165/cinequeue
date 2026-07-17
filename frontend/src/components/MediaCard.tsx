@@ -1,4 +1,4 @@
-import type { MediaItem } from "../types";
+import type { MediaItem, WatchlistItem } from "../types";
 
 interface Props {
   item: MediaItem;
@@ -33,8 +33,15 @@ export function MediaCard({
   onMoveToFollowing,
   onMoveToQueue,
 }: Props) {
+  const watchItem = item as WatchlistItem;
+  const isFreeAlert = !isOwned && watchItem.is_free_streaming_alert;
+  const isOnSaleAlert = !isOwned && watchItem.is_on_sale_alert;
+  const buyPrice = watchItem.buy_current_price;
+
+  const hasAlert = isFreeAlert || isOnSaleAlert;
+
   return (
-    <article className="media-card">
+    <article className={`media-card ${hasAlert ? "alert-active" : ""}`}>
       <button className="card-hit" onClick={() => onOpen(item)} aria-label={`Open ${item.title}`}>
         <div className="poster-wrap">
           {item.poster_url ? (
@@ -49,17 +56,50 @@ export function MediaCard({
             </span>
           )}
           {!isOwned && isFollowing && (
-            <span className="badge-following" title="Following">
-              Following
+            <span className="badge-monitoring" title="Monitoring">
+              Monitoring
             </span>
+          )}
+          
+          {(isFreeAlert || isOnSaleAlert) && (
+            <div className="card-alerts">
+              {isFreeAlert && (
+                <span className="card-alert-badge free-streaming">
+                  🎉 Now Streaming Free
+                </span>
+              )}
+              {isOnSaleAlert && (
+                <span className="card-alert-badge buy-sale">
+                  🔥 Price Drop: {buyPrice}
+                </span>
+              )}
+            </div>
           )}
         </div>
       </button>
       <div className="card-body">
         <h3>{item.title}</h3>
         <div className="meta-row">
-          {item.days_label && <span className="countdown">{item.days_label}</span>}
-          {item.release_date && <span>{item.release_date}</span>}
+          {item.media_type === "tv" && item.next_season ? (
+            <div className="tv-seasons-info">
+              <span className="first-episode-date">
+                First Episode: {item.release_date}
+              </span>
+              <span className="next-season-date">
+                Next Season: {item.next_season.name} ({item.next_season.air_date})
+                {item.next_season.days_label && (
+                  <span className="countdown" style={{ marginLeft: "6px" }}>
+                    {item.next_season.days_label}
+                  </span>
+                )}
+              </span>
+            </div>
+          ) : (
+            <>
+              {item.days_label && <span className="countdown">{item.days_label}</span>}
+              {item.release_date && <span>{item.release_date}</span>}
+            </>
+          )}
           {item.vote_average ? <span className="rating">★ {item.vote_average.toFixed(1)}</span> : null}
         </div>
         {item.overview ? <p>{item.overview.slice(0, 110)}{item.overview.length > 110 ? "…" : ""}</p> : null}
@@ -74,7 +114,7 @@ export function MediaCard({
           ) : isOnQueue ? (
             <>
               <button className="pill-button" onClick={() => onMoveToFollowing?.(item)}>
-                Start Watching
+                Monitor Alerts
               </button>
               <button className="pill-button" onClick={() => onRemove?.(item)}>
                 Remove

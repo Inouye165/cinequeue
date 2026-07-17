@@ -1,4 +1,12 @@
 import type { MediaDetails, MediaItem, WatchlistItem } from "./types";
+import { getApps } from "firebase/app";
+import { getAuth } from "firebase/auth";
+import {
+  getActiveTrace,
+  recordEvent,
+  detectDuplicateMeRequest,
+  detectPrematureMeRequest,
+} from "./utils/authPerformanceMonitor";
 
 export interface FirebaseConfig {
   apiKey: string;
@@ -26,6 +34,8 @@ function getCookie(name: string): string | null {
   return null;
 }
 
+let adminMeRequestCount = 0;
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const reqInit = { ...init };
   reqInit.credentials = "include"; // Ensure cookies are sent
@@ -40,15 +50,103 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     }
   }
 
-  const response = await fetch(path, reqInit);
+  // Append X-Auth-Trace-Id if trace is active
+  const activeTrace = getActiveTrace();
+  if (activeTrace) {
+    const headers = { ...(reqInit.headers as Record<string, string>) };
+    headers["X-Auth-Trace-Id"] = activeTrace.traceId;
+    reqInit.headers = headers;
+  }
+
+  const isAdminMe = path === "/api/admin/me";
+  let requestStartTime = 0;
+  let headersArrivedTime = 0;
+  let jsonParsedTime = 0;
+
+  if (isAdminMe) {
+    adminMeRequestCount++;
+    detectDuplicateMeRequest();
+    
+    let firebaseUserExists = false;
+    let authInitializationComplete = false;
+    try {
+      if (getApps().length > 0) {
+        const auth = getAuth();
+        firebaseUserExists = !!auth.currentUser;
+        authInitializationComplete = true;
+      }
+    } catch (e) {}
+
+    detectPrematureMeRequest({
+      firebaseUserExists,
+      tokenExists: firebaseUserExists,
+      authInitializationComplete,
+      requestSequence: adminMeRequestCount,
+    });
+
+    recordEvent("admin_me_request_started", "start", {
+      sequenceNumber: adminMeRequestCount,
+      authAttached: !!reqInit.headers && ("Authorization" in reqInit.headers || "X-CSRF-Token" in reqInit.headers),
+    });
+    requestStartTime = performance.now();
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(path, reqInit);
+    if (isAdminMe) {
+      headersArrivedTime = performance.now();
+    }
+  } catch (err: any) {
+    if (isAdminMe) {
+      recordEvent("admin_me_request_failed", "failure", {
+        error: err.message,
+        aborted: err.name === "AbortError",
+        durationMs: performance.now() - requestStartTime,
+      });
+    }
+    throw err;
+  }
+
+  if (isAdminMe) {
+    // Extract backend perf timings from headers
+    const tvMs = response.headers.get("X-Auth-Perf-Token-Verification-Ms");
+    const alMs = response.headers.get("X-Auth-Perf-Admin-Lookup-Ms");
+    if (activeTrace) {
+      activeTrace.backendTimings = {
+        tokenVerificationMs: tvMs ? parseFloat(tvMs) : undefined,
+        adminLookupMs: alMs ? parseFloat(alMs) : undefined,
+        totalBackendMs: (tvMs ? parseFloat(tvMs) : 0) + (alMs ? parseFloat(alMs) : 0),
+      };
+    }
+  }
+
   if (!response.ok) {
     if (response.status === 401) {
       window.dispatchEvent(new CustomEvent("cinequeue-unauthorized"));
     }
     const error = await response.json().catch(() => ({ detail: response.statusText }));
+    if (isAdminMe) {
+      recordEvent("admin_me_request_failed", "failure", {
+        status: response.status,
+        detail: error.detail,
+        durationMs: performance.now() - requestStartTime,
+      });
+    }
     throw new Error(error.detail || "Request failed");
   }
-  return response.json();
+
+  const data = await response.json();
+  if (isAdminMe) {
+    jsonParsedTime = performance.now();
+    recordEvent("admin_me_response_received", "success", {
+      status: response.status,
+      fetchDurationMs: headersArrivedTime - requestStartTime,
+      jsonParseDurationMs: jsonParsedTime - headersArrivedTime,
+      totalDurationMs: jsonParsedTime - requestStartTime,
+    });
+  }
+  return data;
 }
 
 export const api = {
@@ -82,33 +180,69 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ csrf_token: csrfToken }),
     }),
-  adminMe: () => request<{ username: string }>("/api/admin/me"),
-  adminRequests: () =>
-    request<{ approvals: Array<{ email: string; status: string; requested_at: string; decided_at?: string; decided_by?: string }> }>(
-      "/api/admin/requests"
-    ),
-  adminApprove: (email: string, csrfToken: string) =>
-    request<{ status: string }>("/api/admin/approve", {
+  adminMe: (token: string) => {
+    if (!token) {
+      throw new Error("[AuthPerformance] /api/admin/me called without a token");
+    }
+    return request<{ username: string }>("/api/admin/me", {
+      headers: {
+        Authorization: `Bearer ${token}`
+      }
+    });
+  },
+  adminRequests: (token?: string, signal?: AbortSignal) => {
+    const headers: Record<string, string> = {};
+    if (token) {
+      headers["Authorization"] = `Bearer ${token}`;
+    }
+    return request<{ approvals: Array<{ email: string; status: string; requested_at: string; decided_at?: string; decided_by?: string }> }>(
+      "/api/admin/requests",
+      { headers, signal }
+    );
+  },
+  adminApprove: (email: string, csrfToken: string, token?: string) => {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (token) {
+      headers["Authorization"] = `Bearer ${token}`;
+    }
+    return request<{ status: string }>("/api/admin/approve", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify({ email, csrf_token: csrfToken }),
-    }),
-  adminDeny: (email: string, csrfToken: string) =>
-    request<{ status: string }>("/api/admin/deny", {
+    });
+  },
+  adminDeny: (email: string, csrfToken: string, token?: string) => {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (token) {
+      headers["Authorization"] = `Bearer ${token}`;
+    }
+    return request<{ status: string }>("/api/admin/deny", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify({ email, csrf_token: csrfToken }),
-    }),
-  adminInvite: (email: string, csrfToken: string) =>
-    request<{ status: string }>("/api/admin/invite", {
+    });
+  },
+  adminInvite: (email: string, csrfToken: string, token?: string) => {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (token) {
+      headers["Authorization"] = `Bearer ${token}`;
+    }
+    return request<{ status: string }>("/api/admin/invite", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify({ email, csrf_token: csrfToken }),
-    }),
-  adminLoginLogs: () =>
-    request<{ logs: Array<{ id: string | number; email: string; timestamp: string; status: string; reason: string; ip_address?: string; user_agent?: string }> }>(
-      "/api/admin/login-logs"
-    ),
+    });
+  },
+  adminLoginLogs: (token?: string, signal?: AbortSignal) => {
+    const headers: Record<string, string> = {};
+    if (token) {
+      headers["Authorization"] = `Bearer ${token}`;
+    }
+    return request<{ logs: Array<{ id: string | number; email: string; timestamp: string; status: string; reason: string; ip_address?: string; user_agent?: string }> }>(
+      "/api/admin/login-logs",
+      { headers, signal }
+    );
+  },
 
   // Watchlist & movies endpoints
   search: (q: string) => request<MediaItem[]>(`/api/search?q=${encodeURIComponent(q)}`),
@@ -125,11 +259,32 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(item),
     }),
-  updateWatchlistItem: (mediaType: string, tmdbId: number, isOwned?: boolean, ownedFormat?: string | null, status?: string) =>
-    request<{ status: string; is_owned: boolean; owned_format: string | null; status_value?: string }>(`/api/watchlist/${mediaType}/${tmdbId}`, {
+  updateWatchlistItem: (
+    mediaType: string,
+    tmdbId: number,
+    isOwned?: boolean,
+    ownedFormat?: string | null,
+    status?: string,
+    watchFreeStreaming?: boolean,
+    watchOnSaleBuy?: boolean
+  ) =>
+    request<{
+      status: string;
+      is_owned: boolean;
+      owned_format: string | null;
+      status_value?: string;
+      watch_free_streaming?: boolean;
+      watch_on_sale_buy?: boolean;
+    }>(`/api/watchlist/${mediaType}/${tmdbId}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ is_owned: isOwned, owned_format: ownedFormat, status }),
+      body: JSON.stringify({
+        is_owned: isOwned,
+        owned_format: ownedFormat,
+        status,
+        watch_free_streaming: watchFreeStreaming,
+        watch_on_sale_buy: watchOnSaleBuy,
+      }),
     }),
   removeFromWatchlist: (mediaType: string, tmdbId: number) =>
     request<{ status: string }>(`/api/watchlist/${mediaType}/${tmdbId}`, {

@@ -2,6 +2,7 @@ import datetime
 import logging
 import time
 import re
+import asyncio
 from typing import Optional
 from fastapi import APIRouter, HTTPException, Request, Response, Depends
 from pydantic import BaseModel
@@ -134,7 +135,7 @@ async def create_session(body: SessionRequest, request: Request, response: Respo
                 "Retrying in %s seconds...",
                 drift_val, sleep_time
             )
-            time.sleep(sleep_time)
+            await asyncio.sleep(sleep_time)
             try:
                 decoded_token = firebase_auth.verify_id_token(body.id_token)
                 logger.info("Session Creation Stage 4: Firebase ID-token verification succeeded after retry")

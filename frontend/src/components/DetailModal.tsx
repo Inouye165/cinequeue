@@ -7,12 +7,15 @@ interface Props {
   isFollowing: boolean;
   isOwned: boolean;
   ownedFormat: "electronic" | "cloud" | "hard_copy" | null;
+  watchFreeStreaming: boolean;
+  watchOnSaleBuy: boolean;
   onClose: () => void;
   onAdd: () => void;
   onRemove: () => void;
   onUpdateOwned: (item: MediaDetails, isOwned: boolean, format?: "electronic" | "cloud" | "hard_copy") => void;
   onMoveToFollowing: () => void;
   onMoveToQueue: () => void;
+  onUpdateWatchOptions: (watchFreeStreaming: boolean, watchOnSaleBuy: boolean) => void;
 }
 
 function TrailerPlayer({ trailer }: { trailer: Trailer }) {
@@ -74,12 +77,15 @@ export function DetailModal({
   isFollowing,
   isOwned,
   ownedFormat,
+  watchFreeStreaming,
+  watchOnSaleBuy,
   onClose,
   onAdd,
   onRemove,
   onUpdateOwned,
   onMoveToFollowing,
   onMoveToQueue,
+  onUpdateWatchOptions,
 }: Props) {
   const providers = details.watch_providers?.categories ?? {};
   const releaseInfo = details.release_info as Record<string, string | number | null | undefined>;
@@ -113,16 +119,42 @@ export function DetailModal({
                   </span>
                 )}
                 {!isOwned && isFollowing && (
-                  <span className="badge-following" style={{ position: "static", boxShadow: "none", background: "var(--accent)", color: "#0b0d12" }}>
-                    Following
+                  <span className="badge-monitoring" style={{ position: "static", boxShadow: "none", background: "var(--accent)", color: "#0b0d12" }}>
+                    Monitoring
+                  </span>
+                )}
+                {!isOwned && (isOnQueue || isFollowing) && watchFreeStreaming && details.watch_providers?.is_free_streaming && (
+                  <span className="badge-alert-active free-streaming" style={{ position: "static", boxShadow: "none", background: "var(--success)", color: "#0b0d12", padding: "4px 8px", borderRadius: "4px", fontSize: "0.75rem", fontWeight: "bold" }}>
+                    🎉 Free to Stream
+                  </span>
+                )}
+                {!isOwned && (isOnQueue || isFollowing) && watchOnSaleBuy && details.watch_providers?.is_on_sale && (
+                  <span className="badge-alert-active buy-sale" style={{ position: "static", boxShadow: "none", background: "var(--danger)", color: "#fff", padding: "4px 8px", borderRadius: "4px", fontSize: "0.75rem", fontWeight: "bold" }}>
+                    🔥 On Sale: {details.watch_providers.buy_current_price}
                   </span>
                 )}
               </div>
               <h2>{details.title}</h2>
               {details.tagline ? <p>{details.tagline}</p> : null}
               <div className="meta-row">
-                <span className="countdown">{details.days_label}</span>
-                {details.release_date ? <span>{details.release_date}</span> : null}
+                {details.media_type === "tv" && details.next_season ? (
+                  <div className="tv-seasons-info">
+                    <span className="first-episode-date">First Episode: {details.release_date}</span>
+                    <span className="next-season-date">
+                      Next Season: {details.next_season.name} ({details.next_season.air_date})
+                      {details.next_season.days_label && (
+                        <span className="countdown" style={{ marginLeft: "6px" }}>
+                          {details.next_season.days_label}
+                        </span>
+                      )}
+                    </span>
+                  </div>
+                ) : (
+                  <>
+                    <span className="countdown">{details.days_label}</span>
+                    {details.release_date ? <span>{details.release_date}</span> : null}
+                  </>
+                )}
                 {details.vote_average ? <span className="rating">★ {details.vote_average.toFixed(1)}</span> : null}
                 {details.runtime_minutes ? <span>{details.runtime_minutes} min</span> : null}
               </div>
@@ -141,7 +173,7 @@ export function DetailModal({
                     {isOnQueue && (
                       <>
                         <button className="pill-button" onClick={onMoveToFollowing}>
-                          Start Watching (Following)
+                          Monitor Alerts
                         </button>
                         <button className="pill-button" onClick={onRemove}>
                           Remove from queue
@@ -154,7 +186,7 @@ export function DetailModal({
                           Move to Queue
                         </button>
                         <button className="pill-button" onClick={onRemove}>
-                          Remove from following
+                          Remove from monitoring
                         </button>
                       </>
                     )}
@@ -203,12 +235,77 @@ export function DetailModal({
                   </a>
                 ) : null}
               </div>
+              
+              {!isOwned && (isOnQueue || isFollowing) && (
+                <div className="watch-alerts-container" style={{ marginTop: 20, padding: "12px 16px", background: "var(--bg-elevated)", borderRadius: "var(--radius)", border: "1px solid var(--border)" }}>
+                  <span style={{ fontSize: "0.85rem", color: "var(--text-muted)", fontWeight: 600, display: "block", marginBottom: 8, textTransform: "uppercase", letterSpacing: "0.5px" }}>
+                    Watch Alerts
+                  </span>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 16 }}>
+                    <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: "0.9rem", userSelect: "none" }}>
+                      <input
+                        type="checkbox"
+                        checked={watchFreeStreaming}
+                        onChange={(e) => onUpdateWatchOptions(e.target.checked, watchOnSaleBuy)}
+                        style={{ cursor: "pointer" }}
+                      />
+                      Watch for free streaming
+                    </label>
+                    <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: "0.9rem", userSelect: "none" }}>
+                      <input
+                        type="checkbox"
+                        checked={watchOnSaleBuy}
+                        onChange={(e) => onUpdateWatchOptions(watchFreeStreaming, e.target.checked)}
+                        style={{ cursor: "pointer" }}
+                      />
+                      Watch for buy sales
+                    </label>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         </div>
 
         <div className="detail-content">
           {details.overview ? <p>{details.overview}</p> : null}
+
+          {details.cast_changes && (
+            (details.cast_changes.written_out?.length > 0 || details.cast_changes.returning_with_new_actors?.length > 0)
+          ) ? (
+            <section className="panel" style={{ padding: "20px" }}>
+              <h4 className="cast-changes-title">Season {details.cast_changes.next_season} Cast Changes</h4>
+              <p className="cast-changes-subtitle">
+                Comparing to Season {details.cast_changes.prev_season} main cast
+              </p>
+              
+              {details.cast_changes.returning_with_new_actors?.length > 0 && (
+                <div className="cast-changes-group">
+                  <h5 className="cast-changes-group-title recast">Main Characters Returning with New Actors</h5>
+                  <ul className="cast-changes-list">
+                    {details.cast_changes.returning_with_new_actors.map((change, idx) => (
+                      <li key={idx}>
+                        <strong>{change.character}</strong>: formerly played by {change.old_actor}, now played by <strong>{change.new_actor}</strong>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {details.cast_changes.written_out?.length > 0 && (
+                <div className="cast-changes-group">
+                  <h5 className="cast-changes-group-title written-out">Main Characters Written Out of the Show</h5>
+                  <ul className="cast-changes-list">
+                    {details.cast_changes.written_out.map((change, idx) => (
+                      <li key={idx}>
+                        <strong>{change.character}</strong> (played by {change.actor})
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </section>
+          ) : null}
 
           {details.trailers && details.trailers.length > 0 ? (
             <section className="panel" style={{ padding: "20px" }}>
@@ -236,19 +333,43 @@ export function DetailModal({
                   </div>
                 </>
               ) : null}
-              {providers.streaming?.length ? (
+              {providers.streaming?.length || providers.free?.length ? (
+                <>
+                  {providers.streaming?.length ? (
+                    <>
+                      <strong>Streaming (Subscription)</strong>
+                      <div className="provider-list">
+                        {providers.streaming.map((p) => (
+                          <span className="provider" key={p.name}>
+                            {p.logo_url ? <img src={p.logo_url} alt="" /> : null}
+                            {p.name}
+                          </span>
+                        ))}
+                      </div>
+                    </>
+                  ) : null}
+                  {providers.free?.length ? (
+                    <>
+                      <strong>Streaming (Free / Ads)</strong>
+                      <div className="provider-list">
+                        {providers.free.map((p) => (
+                          <span className="provider" key={p.name}>
+                            {p.logo_url ? <img src={p.logo_url} alt="" /> : null}
+                            {p.name}
+                          </span>
+                        ))}
+                      </div>
+                    </>
+                  ) : null}
+                </>
+              ) : (
                 <>
                   <strong>Streaming</strong>
-                  <div className="provider-list">
-                    {providers.streaming.map((p) => (
-                      <span className="provider" key={p.name}>
-                        {p.logo_url ? <img src={p.logo_url} alt="" /> : null}
-                        {p.name}
-                      </span>
-                    ))}
-                  </div>
+                  <p style={{ color: "var(--text-muted)", fontSize: "0.9rem", margin: "4px 0 12px" }}>
+                    No subscription or free streaming options found in the US.
+                  </p>
                 </>
-              ) : null}
+              )}
               {providers.rent?.length ? (
                 <>
                   <strong>Rent</strong>
@@ -270,12 +391,19 @@ export function DetailModal({
                       <span className="provider" key={p.name}>
                         {p.logo_url ? <img src={p.logo_url} alt="" /> : null}
                         {p.name}
+                        {p.current_price ? (
+                          <span style={{ fontSize: "0.8rem", marginLeft: "4px", color: p.is_on_sale ? "var(--danger)" : "var(--text-muted)", fontWeight: p.is_on_sale ? "bold" : "normal" }}>
+                            ({p.is_on_sale ? <span style={{ textDecoration: "line-through", marginRight: "4px", color: "var(--text-muted)", fontWeight: "normal" }}>{p.original_price}</span> : null}
+                            {p.current_price})
+                          </span>
+                        ) : null}
                       </span>
                     ))}
                   </div>
                 </>
               ) : null}
               {!providers.streaming?.length &&
+              !providers.free?.length &&
               !providers.rent?.length &&
               !providers.buy?.length &&
               !providers.theatres?.length ? (

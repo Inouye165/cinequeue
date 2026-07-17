@@ -34,6 +34,8 @@ class SqliteWatchlistRepository(WatchlistRepository):
                     details_cached TEXT,
                     last_updated TEXT,
                     status TEXT DEFAULT 'queue',
+                    watch_free_streaming INTEGER DEFAULT 0,
+                    watch_on_sale_buy INTEGER DEFAULT 0,
                     UNIQUE(user_id, media_type, tmdb_id)
                 )
                 """
@@ -106,6 +108,14 @@ class SqliteWatchlistRepository(WatchlistRepository):
                 conn.execute("ALTER TABLE watchlist ADD COLUMN status TEXT DEFAULT 'queue'")
             except sqlite3.OperationalError:
                 pass
+            try:
+                conn.execute("ALTER TABLE watchlist ADD COLUMN watch_free_streaming INTEGER DEFAULT 0")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                conn.execute("ALTER TABLE watchlist ADD COLUMN watch_on_sale_buy INTEGER DEFAULT 0")
+            except sqlite3.OperationalError:
+                pass
 
     @contextmanager
     def _connection(self):
@@ -131,6 +141,8 @@ class SqliteWatchlistRepository(WatchlistRepository):
             d = dict(row)
             d["is_owned"] = bool(d.get("is_owned"))
             d["status"] = d.get("status") or "queue"
+            d["watch_free_streaming"] = bool(d.get("watch_free_streaming"))
+            d["watch_on_sale_buy"] = bool(d.get("watch_on_sale_buy"))
             items.append(d)
         return items
 
@@ -145,16 +157,18 @@ class SqliteWatchlistRepository(WatchlistRepository):
         is_owned: bool = False,
         owned_format: str | None = None,
         status: str = "queue",
+        watch_free_streaming: bool = False,
+        watch_on_sale_buy: bool = False,
     ) -> dict[str, Any]:
         added_at = self.utc_now_iso()
         try:
             with self._connection() as conn:
                 conn.execute(
                     """
-                    INSERT INTO watchlist (user_id, media_type, tmdb_id, title, poster_path, release_date, added_at, is_owned, owned_format, status)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO watchlist (user_id, media_type, tmdb_id, title, poster_path, release_date, added_at, is_owned, owned_format, status, watch_free_streaming, watch_on_sale_buy)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (user_id, media_type, tmdb_id, title, poster_path, release_date, added_at, 1 if is_owned else 0, owned_format, status),
+                    (user_id, media_type, tmdb_id, title, poster_path, release_date, added_at, 1 if is_owned else 0, owned_format, status, 1 if watch_free_streaming else 0, 1 if watch_on_sale_buy else 0),
                 )
         except sqlite3.IntegrityError as exc:
             raise DuplicateItemError(
@@ -171,6 +185,8 @@ class SqliteWatchlistRepository(WatchlistRepository):
             "is_owned": is_owned,
             "owned_format": owned_format,
             "status": status,
+            "watch_free_streaming": watch_free_streaming,
+            "watch_on_sale_buy": watch_on_sale_buy,
         }
 
     def update_item(
@@ -181,6 +197,8 @@ class SqliteWatchlistRepository(WatchlistRepository):
         is_owned: bool | None = None,
         owned_format: str | None = None,
         status: str | None = None,
+        watch_free_streaming: bool | None = None,
+        watch_on_sale_buy: bool | None = None,
     ) -> dict[str, Any] | None:
         with self._connection() as conn:
             # First check if item exists
@@ -196,14 +214,16 @@ class SqliteWatchlistRepository(WatchlistRepository):
             if current_is_owned is False:
                 current_owned_format = None
             current_status = row["status"] if status is None else status
+            current_watch_free = bool(row["watch_free_streaming"]) if watch_free_streaming is None else watch_free_streaming
+            current_watch_sale = bool(row["watch_on_sale_buy"]) if watch_on_sale_buy is None else watch_on_sale_buy
 
             conn.execute(
                 """
                 UPDATE watchlist
-                SET is_owned = ?, owned_format = ?, status = ?
+                SET is_owned = ?, owned_format = ?, status = ?, watch_free_streaming = ?, watch_on_sale_buy = ?
                 WHERE user_id = ? AND media_type = ? AND tmdb_id = ?
                 """,
-                (1 if current_is_owned else 0, current_owned_format, current_status, user_id, media_type, tmdb_id),
+                (1 if current_is_owned else 0, current_owned_format, current_status, 1 if current_watch_free else 0, 1 if current_watch_sale else 0, user_id, media_type, tmdb_id),
             )
             
             # Fetch updated item
@@ -216,6 +236,8 @@ class SqliteWatchlistRepository(WatchlistRepository):
             d = dict(updated_row)
             d["is_owned"] = bool(d.get("is_owned"))
             d["status"] = d.get("status") or "queue"
+            d["watch_free_streaming"] = bool(d.get("watch_free_streaming"))
+            d["watch_on_sale_buy"] = bool(d.get("watch_on_sale_buy"))
             return d
         return None
 
@@ -254,21 +276,35 @@ class SqliteWatchlistRepository(WatchlistRepository):
     # -- Admin & Auth Methods -------------------------------------------------
 
     def get_admin_user(self, username: str) -> dict[str, Any] | None:
+        username_normalized = username.strip().lower()
         with self._connection() as conn:
             row = conn.execute(
-                "SELECT * FROM admin_users WHERE username = ?", (username,)
+                "SELECT * FROM admin_users WHERE LOWER(username) = ?", (username_normalized,)
             ).fetchone()
         return dict(row) if row else None
 
     def create_admin_user(self, username: str, password_hash: str, salt: str) -> None:
+        username_normalized = username.strip().lower()
         with self._connection() as conn:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO admin_users (username, password_hash, salt)
                 VALUES (?, ?, ?)
                 """,
-                (username, password_hash, salt),
+                (username_normalized, password_hash, salt),
             )
+
+    def list_admin_users(self) -> list[str]:
+        with self._connection() as conn:
+            rows = conn.execute("SELECT username FROM admin_users ORDER BY username").fetchall()
+        return [row["username"] for row in rows]
+
+    def delete_admin_user(self, username: str) -> bool:
+        username_normalized = username.strip().lower()
+        with self._connection() as conn:
+            conn.execute("DELETE FROM admin_sessions WHERE LOWER(username) = ?", (username_normalized,))
+            result = conn.execute("DELETE FROM admin_users WHERE LOWER(username) = ?", (username_normalized,))
+            return result.rowcount > 0
 
     def create_admin_session(self, session_id: str, username: str, expires_at: str) -> None:
         created_at = self.utc_now_iso()

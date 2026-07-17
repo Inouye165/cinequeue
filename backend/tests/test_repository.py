@@ -125,6 +125,33 @@ class TestSqliteRepository:
         item_601 = next(i for i in items if i["tmdb_id"] == 601)
         assert item_601["status"] == "following"
 
+    def test_watch_options_support(self):
+        # Default watch options are False
+        self.repo.add_item("local_test_user", "movie", 701, "Movie 701", None, None)
+        items = self.repo.list_items("local_test_user")
+        assert items[0]["watch_free_streaming"] is False
+        assert items[0]["watch_on_sale_buy"] is False
+
+        # Explicit watch options on add
+        self.repo.add_item("local_test_user", "movie", 702, "Movie 702", None, None, watch_free_streaming=True, watch_on_sale_buy=True)
+        items = self.repo.list_items("local_test_user")
+        item_702 = next(i for i in items if i["tmdb_id"] == 702)
+        assert item_702["watch_free_streaming"] is True
+        assert item_702["watch_on_sale_buy"] is True
+
+        # Update watch options
+        self.repo.update_item("local_test_user", "movie", 701, watch_free_streaming=True)
+        items = self.repo.list_items("local_test_user")
+        item_701 = next(i for i in items if i["tmdb_id"] == 701)
+        assert item_701["watch_free_streaming"] is True
+        assert item_701["watch_on_sale_buy"] is False
+
+        self.repo.update_item("local_test_user", "movie", 701, watch_on_sale_buy=True)
+        items = self.repo.list_items("local_test_user")
+        item_701 = next(i for i in items if i["tmdb_id"] == 701)
+        assert item_701["watch_free_streaming"] is True
+        assert item_701["watch_on_sale_buy"] is True
+
 
 # ---------------------------------------------------------------------------
 # Firestore repository tests (mocked — no production access)
@@ -274,6 +301,22 @@ class TestFirestoreRepository:
         mock_doc_ref.update.assert_called_with({"status": "following"})
         assert result is not None
         assert result["status"] == "following"
+
+    def test_watch_options_support(self):
+        mock_doc_ref = MagicMock()
+        mock_snapshot = MagicMock()
+        mock_snapshot.exists = True
+        mock_snapshot.to_dict.return_value = {"media_type": "movie", "tmdb_id": 12345, "title": "Test Movie"}
+        mock_doc_ref.get.return_value = mock_snapshot
+        self.mock_collection.document.return_value = mock_doc_ref
+
+        # Update watch options
+        result = self.repo.update_item("user123", "movie", 12345, watch_free_streaming=True, watch_on_sale_buy=True)
+        self.mock_collection.document.assert_called_with("movie_12345")
+        mock_doc_ref.update.assert_called_with({"watch_free_streaming": True, "watch_on_sale_buy": True})
+        assert result is not None
+        assert result["watch_free_streaming"] is True
+        assert result["watch_on_sale_buy"] is True
 
 
 # ---------------------------------------------------------------------------

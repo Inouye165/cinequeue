@@ -40,6 +40,7 @@ async def lifespan(app: FastAPI):
         logger.info("SESSION_COOKIE_SECURE: %s", SESSION_COOKIE_SECURE)
         logger.info("SESSION_COOKIE_NAME: %s", SESSION_COOKIE_NAME)
         logger.info("WATCHLIST_BACKEND: %s", WATCHLIST_BACKEND)
+        logger.info("Cross-Origin-Opener-Policy (COOP): Not explicitly configured in backend middleware")
         logger.info("====================================")
 
     # -- Watchlist repository --------------------------------------------------
@@ -86,7 +87,11 @@ async def lifespan(app: FastAPI):
     logger.info("Application lifespan ended")
 
 
+from app.auth_perf import AuthPerfMiddleware
+
 app = FastAPI(title="Cinequeue", lifespan=lifespan)
+
+app.add_middleware(AuthPerfMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
@@ -94,6 +99,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Auth-Trace-Id", "X-Auth-Perf-Token-Verification-Ms", "X-Auth-Perf-Admin-Lookup-Ms"],
 )
 
 
