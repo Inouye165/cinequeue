@@ -16,6 +16,7 @@ from app.config import (
     FIREBASE_PROJECT_ID,
     FIREBASE_API_KEY,
     FIREBASE_AUTH_DOMAIN,
+    PUBLIC_AUTH_DOMAIN,
     FIREBASE_APP_ID,
     FIREBASE_MESSAGING_SENDER_ID,
     SESSION_COOKIE_DAYS,
@@ -66,7 +67,7 @@ async def get_config():
     """Return only public Firebase configuration."""
     return {
         "apiKey": FIREBASE_API_KEY,
-        "authDomain": FIREBASE_AUTH_DOMAIN,
+        "authDomain": PUBLIC_AUTH_DOMAIN or FIREBASE_AUTH_DOMAIN,
         "projectId": FIREBASE_PROJECT_ID,
         "appId": FIREBASE_APP_ID,
         "messagingSenderId": FIREBASE_MESSAGING_SENDER_ID,

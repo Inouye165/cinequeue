@@ -2,12 +2,21 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+import httpx
+from fastapi import FastAPI, Response, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.config import TMDB_API_KEY, WATCHLIST_BACKEND, GOOGLE_CLOUD_PROJECT, AUTH_ALLOWED_ORIGINS, ENVIRONMENT
+from app.config import (
+    TMDB_API_KEY,
+    WATCHLIST_BACKEND,
+    GOOGLE_CLOUD_PROJECT,
+    AUTH_ALLOWED_ORIGINS,
+    ENVIRONMENT,
+    FIREBASE_AUTH_DOMAIN,
+    PUBLIC_AUTH_DOMAIN,
+)
 from app.logging_config import setup_logging
 from app.routers import movies, watchlist, auth, admin
 from app.services.tmdb import TmdbClient
@@ -147,6 +156,113 @@ async def check_tmdb_key(request, call_next):
 @app.get("/api/health")
 async def health():
     return {"status": "ok", "tmdb_configured": bool(TMDB_API_KEY)}
+
+
+@app.api_route("/__/auth/{path:path}", methods=["GET", "POST"])
+async def firebase_auth_proxy(path: str, request: Request):
+    import re
+    # Security: Limit request methods strictly to GET and POST
+    if request.method not in ("GET", "POST"):
+        return Response(status_code=405, content="Method Not Allowed")
+
+    # Security: Limit request size to 10 MB
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > 10 * 1024 * 1024:
+                return Response(status_code=413, content="Request Entity Too Large")
+        except ValueError:
+            return Response(status_code=400, content="Invalid Content-Length")
+
+    # Read request body safely up to 10 MB
+    body = b""
+    if request.method == "POST":
+        body = await request.body()
+        if len(body) > 10 * 1024 * 1024:
+            return Response(status_code=413, content="Request Entity Too Large")
+
+    # Upstream URL Construction: Proxy only the /__/auth/ namespace to the fixed Firebase Auth Domain
+    query_string = request.url.query
+    query_suffix = f"?{query_string}" if query_string else ""
+    target_url = f"https://{FIREBASE_AUTH_DOMAIN}/__/auth/{path}{query_suffix}"
+
+    # Prepare headers to forward (Do not forward Host, or Authorization)
+    # Filter Cookie header selectively to drop Cinequeue cookies but keep others
+    headers_to_forward = {}
+    for key, value in request.headers.items():
+        key_lower = key.lower()
+        if key_lower in ("host", "authorization", "content-length"):
+            continue
+        if key_lower == "cookie":
+            filtered_cookies = []
+            for pair in value.split(";"):
+                pair = pair.strip()
+                if not pair:
+                    continue
+                if "=" in pair:
+                    cname, _ = pair.split("=", 1)
+                    if cname.strip() not in ("__Host-cinequeue_session", "cinequeue_session", "cinequeue_csrf"):
+                        filtered_cookies.append(pair)
+                else:
+                    filtered_cookies.append(pair)
+            if filtered_cookies:
+                headers_to_forward["cookie"] = "; ".join(filtered_cookies)
+        else:
+            headers_to_forward[key] = value
+
+    try:
+        async with httpx.AsyncClient() as client:
+            upstream_resp = await client.request(
+                method=request.method,
+                url=target_url,
+                headers=headers_to_forward,
+                content=body,
+                follow_redirects=False,
+                timeout=(5.0, 15.0)
+            )
+
+        response = Response(
+            content=upstream_resp.content,
+            status_code=upstream_resp.status_code,
+            media_type=upstream_resp.headers.get("content-type")
+        )
+
+        headers_items = (
+            upstream_resp.headers.multi_items()
+            if hasattr(upstream_resp.headers, "multi_items")
+            else upstream_resp.headers.items()
+        )
+        for key, value in headers_items:
+            key_lower = key.lower()
+            if key_lower in ("content-length", "transfer-encoding", "content-encoding", "content-type"):
+                continue
+
+            # Upstream Location Rewrite logic
+            if key_lower == "location":
+                legacy_prefix = f"https://{FIREBASE_AUTH_DOMAIN}/__/auth/"
+                if value.startswith(legacy_prefix):
+                    new_host = PUBLIC_AUTH_DOMAIN or request.url.netloc
+                    value = value.replace(legacy_prefix, f"https://{new_host}/__/auth/")
+                response.headers.append(key, value)
+
+            # Upstream Set-Cookie Rewrite logic (strip or replace Domain= attribute)
+            elif key_lower == "set-cookie":
+                domain_pattern = re.compile(rf';?\s*domain={re.escape(FIREBASE_AUTH_DOMAIN)}', re.IGNORECASE)
+                if PUBLIC_AUTH_DOMAIN:
+                    cleaned_cookie = domain_pattern.sub(f"; domain={PUBLIC_AUTH_DOMAIN}", value)
+                else:
+                    cleaned_cookie = domain_pattern.sub("", value)
+                response.headers.append(key, cleaned_cookie)
+            else:
+                response.headers.append(key, value)
+
+        return response
+    except httpx.RequestError as e:
+        logger.error("Firebase auth proxy connectivity error: %s", e)
+        return Response(status_code=502, content="Bad Gateway: Failed to connect to identity provider")
+    except Exception as e:
+        logger.error("Firebase auth proxy unexpected error: %s", e)
+        return Response(status_code=500, content="Internal Server Error")
 
 
 app.include_router(auth.router)
