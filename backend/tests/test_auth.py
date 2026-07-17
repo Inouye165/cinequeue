@@ -536,4 +536,66 @@ def test_firebase_auth_proxy_headers_rewriting(mock_request, client_with_auth):
         # Domain should be removed entirely
         assert "domain=" not in response.headers["set-cookie"].lower()
 
+@patch("httpx.AsyncClient.request")
+def test_firebase_auth_proxy_csp_bypass_no_upstream(mock_request, client_with_auth):
+    """If Firebase returns no CSP, do not add Cinequeue's CSP to that proxied response."""
+    mock_resp = AsyncMock()
+    mock_resp.status_code = 200
+    mock_resp.content = b"firebase-auth-page"
+    mock_resp.headers = {"content-type": "text/html"}
+    mock_request.return_value = mock_resp
 
+    response = client_with_auth.get("/__/auth/handler")
+    assert response.status_code == 200
+    assert "Content-Security-Policy" not in response.headers
+    assert "Content-Security-Policy-Report-Only" not in response.headers
+
+
+@patch("httpx.AsyncClient.request")
+def test_firebase_auth_proxy_csp_bypass_with_upstream(mock_request, client_with_auth):
+    """Preserve and return Firebase's upstream Content-Security-Policy header if one is present."""
+    mock_resp = AsyncMock()
+    mock_resp.status_code = 200
+    mock_resp.content = b"firebase-auth-page"
+    mock_resp.headers = {
+        "content-type": "text/html",
+        "Content-Security-Policy": "default-src 'none'; script-src 'unsafe-inline';"
+    }
+    mock_request.return_value = mock_resp
+
+    response = client_with_auth.get("/__/auth/handler")
+    assert response.status_code == 200
+    assert response.headers["Content-Security-Policy"] == "default-src 'none'; script-src 'unsafe-inline';"
+
+
+@patch("httpx.AsyncClient.request")
+def test_firebase_auth_proxy_csp_bypass_with_report_only(mock_request, client_with_auth):
+    """Also preserve Content-Security-Policy-Report-Only if returned upstream."""
+    mock_resp = AsyncMock()
+    mock_resp.status_code = 200
+    mock_resp.content = b"firebase-auth-page"
+    mock_resp.headers = {
+        "content-type": "text/html",
+        "Content-Security-Policy-Report-Only": "default-src 'none'; report-uri /csp-violation"
+    }
+    mock_request.return_value = mock_resp
+
+    response = client_with_auth.get("/__/auth/handler")
+    assert response.status_code == 200
+    assert response.headers["Content-Security-Policy-Report-Only"] == "default-src 'none'; report-uri /csp-violation"
+    assert "Content-Security-Policy" not in response.headers
+
+
+def test_normal_route_retains_strict_csp(client_with_auth):
+    """Normal Cinequeue routes retain the existing strict CSP."""
+    response = client_with_auth.get("/api/health")
+    assert response.status_code == 200
+    assert "Content-Security-Policy" in response.headers
+    csp = response.headers["Content-Security-Policy"]
+    assert "default-src 'self'" in csp
+    assert "script-src 'self' https://apis.google.com https://www.gstatic.com" in csp
+    # Ensure no global 'unsafe-inline' policy is introduced in script-src.
+    directives = [d.strip() for d in csp.split(";")]
+    script_src = [d for d in directives if d.startswith("script-src")]
+    assert len(script_src) == 1
+    assert "'unsafe-inline'" not in script_src[0]
