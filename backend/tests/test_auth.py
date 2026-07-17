@@ -614,6 +614,7 @@ def test_origin_validation_policy(mock_create_cookie, mock_verify_token):
         with patch.dict("os.environ", {
             "AUTH_ENABLED": "true",
             "ENVIRONMENT": "production",
+            "AUTH_ALLOWED_EMAILS": "inouye165@gmail.com",
             "AUTH_ALLOWED_ORIGINS": "https://cinequeue-568212960791.us-west1.run.app,http://localhost:5180,http://127.0.0.1:5180",
             "FIREBASE_API_KEY": "mock_firebase_api_key",
             "ADMIN_PASSWORD": "mock_admin_password_2026",
