@@ -599,3 +599,85 @@ def test_normal_route_retains_strict_csp(client_with_auth):
     script_src = [d for d in directives if d.startswith("script-src")]
     assert len(script_src) == 1
     assert "'unsafe-inline'" not in script_src[0]
+
+
+@patch("app.routers.auth.firebase_auth.verify_id_token")
+@patch("app.routers.auth.firebase_auth.create_session_cookie")
+def test_origin_validation_policy(mock_create_cookie, mock_verify_token):
+    """Test all origin validation scenarios for /api/auth/session."""
+    import importlib
+    import app.config
+    import app.routers.auth
+    import app.main
+
+    try:
+        with patch.dict("os.environ", {
+            "AUTH_ENABLED": "true",
+            "ENVIRONMENT": "production",
+            "AUTH_ALLOWED_EMAILS": "inouye165@gmail.com",
+            "AUTH_ALLOWED_ORIGINS": "https://cinequeue-568212960791.us-west1.run.app,http://localhost:5180,http://127.0.0.1:5180",
+            "FIREBASE_API_KEY": "mock_firebase_api_key",
+            "ADMIN_PASSWORD": "mock_admin_password_2026",
+        }):
+            importlib.reload(app.config)
+            importlib.reload(app.routers.auth)
+            importlib.reload(app.main)
+
+            from fastapi.testclient import TestClient
+            with TestClient(app.main.app, base_url="https://testserver") as client:
+                mock_verify_token.return_value = {
+                    "uid": "user_abc",
+                    "email": "inouye165@gmail.com",
+                    "email_verified": True,
+                    "auth_time": time.time(),
+                }
+                mock_create_cookie.return_value = "mock_session_cookie"
+
+                csrf_res = client.get("/api/auth/csrf")
+                csrf_token = csrf_res.json()["csrf_token"]
+
+                # 1. Cloud Run production origin is accepted
+                mock_verify_token.reset_mock()
+                res = client.post(
+                    "/api/auth/session",
+                    json={"id_token": "dummy_id_prod", "csrf_token": csrf_token},
+                    headers={"Origin": "https://cinequeue-568212960791.us-west1.run.app"}
+                )
+                assert res.status_code == 200
+                mock_verify_token.assert_called_once_with("dummy_id_prod")
+
+                # 2. localhost remains accepted where intended
+                mock_verify_token.reset_mock()
+                res = client.post(
+                    "/api/auth/session",
+                    json={"id_token": "dummy_id_local", "csrf_token": csrf_token},
+                    headers={"Origin": "http://localhost:5180"}
+                )
+                assert res.status_code == 200
+                mock_verify_token.assert_called_once_with("dummy_id_local")
+
+                # 3. an unknown origin is rejected
+                mock_verify_token.reset_mock()
+                res = client.post(
+                    "/api/auth/session",
+                    json={"id_token": "dummy_id_unknown", "csrf_token": csrf_token},
+                    headers={"Origin": "https://unknown-domain.com"}
+                )
+                assert res.status_code == 401
+                assert res.json()["detail"] == "Origin not allowed"
+                mock_verify_token.assert_not_called()
+
+                # 4. a missing origin is handled according to the existing policy
+                mock_verify_token.reset_mock()
+                res = client.post(
+                    "/api/auth/session",
+                    json={"id_token": "dummy_id_missing", "csrf_token": csrf_token}
+                )
+                assert res.status_code == 401
+                assert res.json()["detail"] == "Missing Origin header"
+                mock_verify_token.assert_not_called()
+    finally:
+        # Restore environment settings by reloading after patch is gone
+        importlib.reload(app.config)
+        importlib.reload(app.routers.auth)
+        importlib.reload(app.main)

@@ -40,6 +40,7 @@ AUTH_ALLOWED_ORIGINS = [o.strip() for o in _raw_origins.split(",") if o.strip()]
     "http://127.0.0.1:5180",
     "http://localhost:8080",
     "http://127.0.0.1:8080",
+    "https://cinequeue-568212960791.us-west1.run.app",
 ]
 
 FIREBASE_PROJECT_ID = os.getenv("FIREBASE_PROJECT_ID", GOOGLE_CLOUD_PROJECT or "cinequeue-inouye-2026").strip()
