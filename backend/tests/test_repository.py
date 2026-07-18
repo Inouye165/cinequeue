@@ -357,3 +357,52 @@ class TestBackendConfiguration:
             importlib.reload(app.config)
             # Should not raise; WATCHLIST_BACKEND should still work
             assert app.config.WATCHLIST_BACKEND == "sqlite"
+
+    def test_cloudrun_env_yaml_validation(self):
+        """Confirm that cloudrun-env.yaml contains required variables and the production origin."""
+        from pathlib import Path
+        
+        # Resolve path to cloudrun-env.yaml (located at the workspace root)
+        test_dir = Path(__file__).resolve().parent
+        workspace_root = test_dir.parents[1]
+        env_yaml_path = workspace_root / "cloudrun-env.yaml"
+        
+        assert env_yaml_path.exists(), f"cloudrun-env.yaml not found at {env_yaml_path}"
+        
+        # Simple parser for the flat YAML file
+        env_vars = {}
+        with open(env_yaml_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if ":" in line:
+                    key, val = line.split(":", 1)
+                    key = key.strip()
+                    val = val.strip().strip('"').strip("'")
+                    env_vars[key] = val
+                    
+        # Check required variables
+        required_keys = [
+            "AUTH_ENABLED",
+            "AUTH_ALLOWED_EMAILS",
+            "WATCHLIST_BACKEND",
+            "GOOGLE_CLOUD_PROJECT",
+            "FIREBASE_API_KEY",
+            "FIREBASE_AUTH_DOMAIN",
+            "FIREBASE_PROJECT_ID",
+            "FIREBASE_MESSAGING_SENDER_ID",
+            "FIREBASE_APP_ID",
+            "PUBLIC_AUTH_DOMAIN",
+            "AUTH_ALLOWED_ORIGINS"
+        ]
+        
+        for key in required_keys:
+            assert key in env_vars, f"Required environment variable '{key}' is missing from cloudrun-env.yaml"
+            assert env_vars[key], f"Environment variable '{key}' is empty in cloudrun-env.yaml"
+            
+        # Verify the production origin is present in AUTH_ALLOWED_ORIGINS
+        allowed_origins = [o.strip() for o in env_vars["AUTH_ALLOWED_ORIGINS"].split(",") if o.strip()]
+        production_origin = "https://cinequeue-568212960791.us-west1.run.app"
+        assert production_origin in allowed_origins, f"Production origin '{production_origin}' is missing from AUTH_ALLOWED_ORIGINS: {allowed_origins}"
+
