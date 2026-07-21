@@ -418,20 +418,6 @@ class AiAgentService:
         items = repo.list_items(user_id)
         monitored = [item for item in items if not item.get("is_owned") and (item.get("status") in {"following", "queue", "watchlist"} or not item.get("status"))]
 
-        # Query about monitored shows or updates
-        if any(w in msg_lower for w in ["update", "monitored", "show", "queue", "watchlist", "list", "following", "monitoring", "upcoming", "recent", "new"]):
-            briefing_res = await AiAgentService.evaluate_monitored_updates(user_id, repo, tmdb)
-            if briefing_res.get("updates"):
-                bullet_lines = "\n".join([f"• {u['message']}" for u in briefing_res["updates"]])
-                return f"Here are all current updates for your monitored shows:\n{bullet_lines}"
-            elif monitored:
-                titles_str = ", ".join([f"'{i['title']}'" for i in monitored[:5]])
-                more_count = len(monitored) - 5
-                more_str = f" and {more_count} more" if more_count > 0 else ""
-                return f"You currently have {len(monitored)} monitored title(s): {titles_str}{more_str}. No urgent release alerts in the next 14 days!"
-            else:
-                return "You don't have any monitored shows in your list yet! Ask me to monitor a title like 'I'm waiting for Severance' or add items from search."
-
         # 1. Extract potential title from query first (e.g. "any update on what dreams may come" -> "what dreams may come")
         title_query = None
         patterns = [
