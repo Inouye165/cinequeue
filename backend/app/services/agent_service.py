@@ -246,72 +246,70 @@ class AiAgentService:
 
         actions_taken = []
 
-        # 1. Intent Extraction: Auto-add mentioned titles to monitoring
-        if settings.get("auto_add_mentioned", True) and tmdb:
-            mentioned_title, target_price = AiAgentService._extract_title_and_price(user_message)
-            if mentioned_title:
+        # 2. Specific Title Resolution (e.g. "any update on what dreams may come", "what about Severance")
+        items = repo.list_items(user_id)
+        monitored = [item for item in items if not item.get("is_owned") and (item.get("status") in {"following", "queue", "watchlist"} or not item.get("status"))]
+
+        msg_lower = user_message.lower().strip()
+        title_query = None
+        title_patterns = [
+            r"(?:any\s+)?(?:update|updates|news|info|word)\s+(?:on|about|for)\s+['\"]?([^'.\"$\n]+?)['\"]?$",
+            r"(?:why\s+didn't\s+the\s+agent\s+say\s+something\s+about|why\s+didn't\s+you\s+mention|what\s+about|tell\s+me\s+about|is\s+there\s+any\s+update\s+on|how\s+about|info\s+on|status\s+of)\s+['\"]?([^'.\"$\n]+?)['\"]?$",
+            r"(?:is|when\s+is)\s+['\"]?([^'.\"$\n]+?)['\"]?\s+(?:releasing|coming\s+out|available|dropping)",
+            r"(?:search|find|check)\s+(?:for\s+)?['\"]?([^'.\"$\n]+?)['\"]?$",
+        ]
+        for pat in title_patterns:
+            m = re.search(pat, msg_lower, re.IGNORECASE)
+            if m:
+                extracted = m.group(1).strip()
+                extracted = re.sub(r'\s+(?:released|available|coming|out|today|soon)$', '', extracted, flags=re.IGNORECASE).strip()
+                if extracted and len(extracted) > 1 and extracted not in {"my shows", "my queue", "monitored shows", "updates", "watchlist", "list"}:
+                    title_query = extracted
+                    break
+
+        title_context_note = ""
+        if title_query:
+            matching_user_items = [
+                i for i in items
+                if title_query in i.get("title", "").lower() or any(w in i.get("title", "").lower() for w in title_query.split() if len(w) > 2)
+            ]
+            if matching_user_items:
+                item = matching_user_items[0]
+                t_title = item.get("title")
+                status_str = "monitored" if item.get("status") in {"following", "queue"} else item.get("status")
+                rel_date = item.get("release_date")
+                from app.models import days_until
+                days = days_until(rel_date) if rel_date else None
+                days_desc = f" (Releasing in {days} days on {rel_date})" if days and days > 0 else (f" (Released {abs(days)} days ago on {rel_date})" if days and days < 0 else (f" (Releasing TODAY {rel_date})" if days == 0 else f" (Release date: {rel_date})"))
+                title_context_note = f"\n[System Note: User specifically asked about '{t_title}'. Item IS in user's queue. Status: {status_str}{days_desc}. Answer specifically about '{t_title}' in your persona character, without dumping unrelated show updates.]"
+            elif tmdb:
                 try:
-                    search_res = await tmdb.search(mentioned_title)
-                    if search_res:
-                        best_match = search_res[0]
-                        media_type = best_match["media_type"]
-                        tmdb_id = best_match["id"]
-                        title = best_match["title"]
-                        poster_path = best_match.get("poster_url", "").replace("https://image.tmdb.org/t/p/w342", "") if best_match.get("poster_url") else None
-                        release_date = best_match.get("release_date")
-
-                        try:
-                            item = repo.add_item(
-                                user_id=user_id,
-                                media_type=media_type,
-                                tmdb_id=tmdb_id,
-                                title=title,
-                                poster_path=poster_path,
-                                release_date=release_date,
-                                status="following",
-                                target_rental_price=target_price,
-                            )
-                            actions_taken.append({
-                                "action": "add_monitoring",
-                                "title": title,
-                                "media_type": media_type,
-                                "tmdb_id": tmdb_id,
-                                "target_rental_price": target_price,
-                            })
-                        except DuplicateItemError:
-                            # Update existing item to following and set price if provided
-                            repo.update_item(
-                                user_id=user_id,
-                                media_type=media_type,
-                                tmdb_id=tmdb_id,
-                                status="following",
-                                target_rental_price=target_price,
-                            )
-                            actions_taken.append({
-                                "action": "update_monitoring",
-                                "title": title,
-                                "media_type": media_type,
-                                "tmdb_id": tmdb_id,
-                                "target_rental_price": target_price,
-                            })
+                    res = await tmdb.search(title_query)
+                    if res:
+                        best = res[0]
+                        t_title = best.get("title")
+                        rel_date = best.get("release_date")
+                        media_type = best.get("media_type")
+                        rel_str = f" ({rel_date})" if rel_date else ""
+                        title_context_note = f"\n[System Note: User specifically asked about '{t_title}'. Found on TMDB: '{t_title}' ({media_type}{rel_str}). It is NOT currently in the user's Cinequeue list. Answer conversationally in your persona character, clarifying it is not in their queue yet and asking if they'd like to monitor it.]"
+                    else:
+                        title_context_note = f"\n[System Note: User asked about '{title_query}'. No matching show/movie found in user's queue or TMDB. Answer conversationally in your persona, asking to re-check spelling.]"
                 except Exception as e:
-                    logger.error(f"Error during auto-add title search: {e}")
+                    logger.warning(f"Error resolving title search for LLM context: {e}")
 
-        # 2. Format LLM or Fallback prompt
+        # 3. Format LLM or Fallback prompt
         system_prompt = get_system_prompt(settings)
         actions_str = ""
         if actions_taken:
             actions_list = [f"Added/Updated '{a['title']}' to monitoring" + (f" with target rental price ${a['target_rental_price']:.2f}" if a.get("target_rental_price") else "") for a in actions_taken]
             actions_str = f"\n[System Note: Automated action executed on user behalf: {', '.join(actions_list)}]"
 
-        full_prompt = f"User message: {user_message}{actions_str}"
+        full_prompt = f"User message: {user_message}{actions_str}{title_context_note}"
 
-        # 3. Call LLM or smart fallback
+        # 4. Call LLM or smart fallback
         agent_reply = None
         if GEMINI_API_KEY:
             try:
-                items = repo.list_items(user_id)
-                monitored = [item for item in items if not item.get("is_owned") and item.get("status") in {"following", "queue"}]
                 monitored_summary = "\n".join([f"- {i['title']} ({i['media_type']}, status: {i['status']}" + (f", target price: ${i['target_rental_price']}" if i.get("target_rental_price") else "") + ")" for i in monitored[:10]])
                 if not monitored_summary:
                     monitored_summary = "None currently monitored."
