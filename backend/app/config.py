@@ -13,6 +13,8 @@ if TMDB_API_KEY in {"", "your_tmdb_api_key_here"}:
 TMDB_BASE_URL = "https://api.themoviedb.org/3"
 TMDB_IMAGE_BASE = "https://image.tmdb.org/t/p"
 
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+
 DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
 DB_PATH = DATA_DIR / "watchlist.db"
 # NOTE: SQLite data is temporary on Cloud Run (containers are ephemeral)

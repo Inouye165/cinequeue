@@ -48,6 +48,7 @@ class FirestoreWatchlistRepository(WatchlistRepository):
             d.setdefault("status", "queue")
             d.setdefault("watch_free_streaming", False)
             d.setdefault("watch_on_sale_buy", False)
+            d.setdefault("target_rental_price", None)
             res.append(d)
         return res
 
@@ -64,6 +65,7 @@ class FirestoreWatchlistRepository(WatchlistRepository):
         status: str = "queue",
         watch_free_streaming: bool = False,
         watch_on_sale_buy: bool = False,
+        target_rental_price: float | None = None,
     ) -> dict[str, Any]:
         doc_id = _doc_id(media_type, tmdb_id)
         col = self._user_watchlist_col(user_id)
@@ -86,6 +88,7 @@ class FirestoreWatchlistRepository(WatchlistRepository):
             "status": status,
             "watch_free_streaming": watch_free_streaming,
             "watch_on_sale_buy": watch_on_sale_buy,
+            "target_rental_price": target_rental_price,
         }
         doc_ref.set(data)
         return data
@@ -100,6 +103,7 @@ class FirestoreWatchlistRepository(WatchlistRepository):
         status: str | None = None,
         watch_free_streaming: bool | None = None,
         watch_on_sale_buy: bool | None = None,
+        target_rental_price: float | None = None,
     ) -> dict[str, Any] | None:
         doc_id = _doc_id(media_type, tmdb_id)
         col = self._user_watchlist_col(user_id)
@@ -121,6 +125,8 @@ class FirestoreWatchlistRepository(WatchlistRepository):
             data["watch_free_streaming"] = watch_free_streaming
         if watch_on_sale_buy is not None:
             data["watch_on_sale_buy"] = watch_on_sale_buy
+        if target_rental_price is not None:
+            data["target_rental_price"] = target_rental_price
 
         doc_ref.update(data)
         updated = snapshot.to_dict()
@@ -130,7 +136,9 @@ class FirestoreWatchlistRepository(WatchlistRepository):
         updated.setdefault("status", "queue")
         updated.setdefault("watch_free_streaming", False)
         updated.setdefault("watch_on_sale_buy", False)
+        updated.setdefault("target_rental_price", None)
         return updated
+
 
     def update_item_cache(
         self,
@@ -301,4 +309,88 @@ class FirestoreWatchlistRepository(WatchlistRepository):
                 d["id"] = doc.id
                 res.append(d)
         return res
+
+    def get_agent_settings(self, user_id: str) -> dict[str, Any]:
+        doc_ref = self._db.collection("users").document(user_id).collection("agent").document("settings")
+        doc = doc_ref.get()
+        if not doc.exists:
+            return {
+                "user_id": user_id,
+                "personality_preset": "cinephile",
+                "custom_prompt": "",
+                "notify_on_login": True,
+                "auto_add_mentioned": True,
+                "track_price_drops": True,
+                "updated_at": self.utc_now_iso(),
+            }
+        d = doc.to_dict() or {}
+        d.setdefault("user_id", user_id)
+        d.setdefault("personality_preset", "cinephile")
+        d.setdefault("custom_prompt", "")
+        d.setdefault("notify_on_login", True)
+        d.setdefault("auto_add_mentioned", True)
+        d.setdefault("track_price_drops", True)
+        return d
+
+    def save_agent_settings(self, user_id: str, settings: dict[str, Any]) -> dict[str, Any]:
+        doc_ref = self._db.collection("users").document(user_id).collection("agent").document("settings")
+        now = self.utc_now_iso()
+        data = {
+            "user_id": user_id,
+            "personality_preset": settings.get("personality_preset", "cinephile"),
+            "custom_prompt": settings.get("custom_prompt", ""),
+            "notify_on_login": bool(settings.get("notify_on_login", True)),
+            "auto_add_mentioned": bool(settings.get("auto_add_mentioned", True)),
+            "track_price_drops": bool(settings.get("track_price_drops", True)),
+            "updated_at": now,
+        }
+        doc_ref.set(data, merge=True)
+        return data
+
+    def update_agent_last_login(self, user_id: str, timestamp: str) -> None:
+        doc_ref = self._db.collection("users").document(user_id).collection("agent").document("settings")
+        doc_ref.set({"updated_at": timestamp}, merge=True)
+
+    def list_chat_messages(self, user_id: str, limit: int = 50) -> list[dict[str, Any]]:
+        col = self._db.collection("users").document(user_id).collection("agent_conversations")
+        docs = (
+            col
+            .order_by("created_at", direction=firestore.Query.ASCENDING)
+            .limit(limit)
+            .stream()
+        )
+        res = []
+        for doc in docs:
+            d = doc.to_dict()
+            if d is not None:
+                d["id"] = doc.id
+                d.setdefault("actions", [])
+                res.append(d)
+        return res
+
+    def add_chat_message(
+        self,
+        user_id: str,
+        role: str,
+        content: str,
+        actions: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        col = self._db.collection("users").document(user_id).collection("agent_conversations")
+        now = self.utc_now_iso()
+        data = {
+            "user_id": user_id,
+            "role": role,
+            "content": content,
+            "actions": actions or [],
+            "created_at": now,
+        }
+        _, doc_ref = col.add(data)
+        data["id"] = doc_ref.id
+        return data
+
+    def clear_chat_messages(self, user_id: str) -> None:
+        col = self._db.collection("users").document(user_id).collection("agent_conversations")
+        docs = col.stream()
+        for doc in docs:
+            doc.reference.delete()
 

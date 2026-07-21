@@ -35,6 +35,7 @@ class WatchlistRepository(ABC):
         status: str = "queue",
         watch_free_streaming: bool = False,
         watch_on_sale_buy: bool = False,
+        target_rental_price: float | None = None,
     ) -> dict[str, Any]:
         """Add an item to the watchlist.
 
@@ -54,8 +55,9 @@ class WatchlistRepository(ABC):
         status: str | None = None,
         watch_free_streaming: bool | None = None,
         watch_on_sale_buy: bool | None = None,
+        target_rental_price: float | None = None,
     ) -> dict[str, Any] | None:
-        """Update an item's owned status, format, status, or watch alert preferences.
+        """Update an item's owned status, format, status, watch alert preferences, or target rental price.
 
         Returns:
             The updated item dictionary, or None if not found.
@@ -164,5 +166,41 @@ class WatchlistRepository(ABC):
     @abstractmethod
     def list_login_logs(self, limit: int = 100) -> list[dict[str, Any]]:
         """List recent login attempts."""
+        ...
+
+    @abstractmethod
+    def get_agent_settings(self, user_id: str) -> dict[str, Any]:
+        """Get AI agent personality and feature settings for user."""
+        ...
+
+    @abstractmethod
+    def save_agent_settings(self, user_id: str, settings: dict[str, Any]) -> dict[str, Any]:
+        """Save or update AI agent settings for user."""
+        ...
+
+    @abstractmethod
+    def update_agent_last_login(self, user_id: str, timestamp: str) -> None:
+        """Update last login/briefing evaluation timestamp for user."""
+        ...
+
+    @abstractmethod
+    def list_chat_messages(self, user_id: str, limit: int = 50) -> list[dict[str, Any]]:
+        """List conversation history for AI agent."""
+        ...
+
+    @abstractmethod
+    def add_chat_message(
+        self,
+        user_id: str,
+        role: str,
+        content: str,
+        actions: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Store a chat message in history."""
+        ...
+
+    @abstractmethod
+    def clear_chat_messages(self, user_id: str) -> None:
+        """Clear user conversation history with AI agent."""
         ...
 
