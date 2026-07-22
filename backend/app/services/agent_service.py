@@ -636,10 +636,12 @@ class AiAgentService:
 
         if title_query:
             # Check user watchlist first
-            matching_user_items = [
+            exact_matches = [i for i in items if title_query.lower() in i.get("title", "").lower()]
+            partial_matches = [
                 i for i in items
-                if title_query.lower() in i.get("title", "").lower() or any(w in i.get("title", "").lower() for w in title_query.split() if len(w) > 2)
+                if any(w in i.get("title", "").lower() for w in title_query.split() if len(w) > 3 and w.lower() not in {"title", "movie", "show", "season"})
             ]
+            matching_user_items = exact_matches or partial_matches
             rec_str = ""
             if matching_user_items:
                 item = matching_user_items[0]
