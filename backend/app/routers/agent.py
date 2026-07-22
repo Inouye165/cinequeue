@@ -15,24 +15,30 @@ router = APIRouter(prefix="/api/agent", tags=["agent"], dependencies=[Depends(ge
 class AgentSettingsPayload(BaseModel):
     personality_preset: str = "cinephile"
     custom_prompt: str = ""
+    location: str = ""
     notify_on_login: bool = True
     auto_add_mentioned: bool = True
     track_price_drops: bool = True
+
 
 
 class ChatMessagePayload(BaseModel):
     message: str
 
 
+from app.services.briefing_service import BriefingService
+
+
 @router.get("/briefing")
 async def get_agent_briefing(
     request: Request,
+    session_id: str | None = None,
     current_user: CurrentUser = Depends(get_current_user),
 ) -> dict[str, Any]:
-    logger.info("Fetching agent briefing for user: %s", current_user.uid)
+    logger.info("Fetching agent briefing for user: %s (session_id=%s)", current_user.uid, session_id)
     repo = request.app.state.watchlist_repo
     tmdb = getattr(request.app.state, "tmdb", None)
-    return await AiAgentService.evaluate_monitored_updates(current_user.uid, repo, tmdb)
+    return await BriefingService.evaluate_startup_briefing(current_user.uid, repo, tmdb, session_id=session_id)
 
 
 @router.get("/settings")

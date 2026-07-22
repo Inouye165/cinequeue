@@ -226,4 +226,25 @@ class WatchlistRepository(ABC):
         """Remove a query memory record."""
         ...
 
+    @abstractmethod
+    def record_briefing_presentations(self, user_id: str, items: list[dict[str, Any]]) -> None:
+        """Record or update presented briefing items for novelty tracking."""
+        ...
+
+    @abstractmethod
+    def get_presented_briefing_keys(self, user_id: str) -> dict[str, dict[str, Any]]:
+        """Retrieve mapping of item_key to presentation metadata for a user."""
+        ...
+
+    @abstractmethod
+    def get_agent_session(self, user_id: str, session_id: str) -> dict[str, Any] | None:
+        """Get agent briefing session record."""
+        ...
+
+    @abstractmethod
+    def save_agent_session(self, user_id: str, session_id: str, briefing_data: dict[str, Any]) -> dict[str, Any]:
+        """Save or cache briefing output for a session ID."""
+        ...
+
+
 

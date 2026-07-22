@@ -301,7 +301,10 @@ export const api = {
     }),
 
   // AI Agent Endpoints
-  agentBriefing: () => request<import("./types").AgentBriefing>("/api/agent/briefing"),
+  agentBriefing: (sessionId?: string) =>
+    request<import("./types").AgentBriefing>(
+      `/api/agent/briefing${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`
+    ),
   agentSettings: () => request<import("./types").AgentSettings>("/api/agent/settings"),
   saveAgentSettings: (settings: Partial<import("./types").AgentSettings>) =>
     request<import("./types").AgentSettings>("/api/agent/settings", {

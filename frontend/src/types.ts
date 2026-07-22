@@ -60,6 +60,7 @@ export interface AgentSettings {
   user_id?: string;
   personality_preset: PersonalityPreset;
   custom_prompt?: string;
+  location?: string;
   notify_on_login: boolean;
   auto_add_mentioned: boolean;
   track_price_drops: boolean;

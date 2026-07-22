@@ -296,6 +296,28 @@ export function AgentModal({ isOpen, onClose, onWatchlistUpdated, initialTab = "
                 </div>
               ) : null}
 
+              <div className="custom-prompt-group">
+                <label>📍 User Location (City or Zip Code)</label>
+                <input
+                  type="text"
+                  placeholder="e.g., New York, NY or 10001"
+                  value={settings.location || ""}
+                  onChange={(e) => setSettings((prev) => ({ ...prev, location: e.target.value }))}
+                  style={{
+                    width: "100%",
+                    background: "rgba(0, 0, 0, 0.2)",
+                    border: "1px solid var(--border)",
+                    borderRadius: "8px",
+                    padding: "10px",
+                    color: "var(--text)",
+                    fontSize: "0.88rem",
+                  }}
+                />
+                <span className="toggle-sub" style={{ marginTop: "4px", display: "block" }}>
+                  Used to fetch real-time local weather reports to influence your AI agent's mood and recommendations.
+                </span>
+              </div>
+
               <hr className="settings-divider" />
 
               <h4>Agent Automation & Capabilities</h4>

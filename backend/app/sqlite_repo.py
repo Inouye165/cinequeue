@@ -127,6 +127,7 @@ class SqliteWatchlistRepository(WatchlistRepository):
                     user_id TEXT PRIMARY KEY,
                     personality_preset TEXT NOT NULL DEFAULT 'cinephile',
                     custom_prompt TEXT,
+                    location TEXT DEFAULT '',
                     notify_on_login INTEGER DEFAULT 1,
                     auto_add_mentioned INTEGER DEFAULT 1,
                     track_price_drops INTEGER DEFAULT 1,
@@ -134,6 +135,11 @@ class SqliteWatchlistRepository(WatchlistRepository):
                 )
                 """
             )
+            try:
+                conn.execute("ALTER TABLE agent_settings ADD COLUMN location TEXT DEFAULT ''")
+            except sqlite3.OperationalError:
+                pass
+
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS agent_conversations (
@@ -152,11 +158,41 @@ class SqliteWatchlistRepository(WatchlistRepository):
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_id TEXT NOT NULL,
                     query_text TEXT NOT NULL,
-                    title TEXT,
+                    title TEXT NOT NULL,
                     media_type TEXT,
                     tmdb_id INTEGER,
                     asked_at TEXT NOT NULL,
                     UNIQUE(user_id, title)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS briefing_presentations (
+                    user_id TEXT NOT NULL,
+                    item_key TEXT NOT NULL,
+                    item_type TEXT NOT NULL,
+                    title_id TEXT,
+                    source_id TEXT,
+                    content_fingerprint TEXT NOT NULL,
+                    first_discovered_at TEXT NOT NULL,
+                    last_updated_at TEXT NOT NULL,
+                    first_presented_at TEXT NOT NULL,
+                    last_presented_at TEXT NOT NULL,
+                    presentation_count INTEGER DEFAULT 1,
+                    importance INTEGER DEFAULT 3,
+                    PRIMARY KEY (user_id, item_key)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS agent_sessions (
+                    user_id TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    briefing_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (user_id, session_id)
                 )
                 """
             )
@@ -449,15 +485,18 @@ class SqliteWatchlistRepository(WatchlistRepository):
                 "user_id": user_id,
                 "personality_preset": "cinephile",
                 "custom_prompt": "",
+                "location": "",
                 "notify_on_login": True,
                 "auto_add_mentioned": True,
                 "track_price_drops": True,
                 "updated_at": self.utc_now_iso(),
             }
+        keys = row.keys()
         return {
             "user_id": row["user_id"],
             "personality_preset": row["personality_preset"],
             "custom_prompt": row["custom_prompt"] or "",
+            "location": row["location"] if ("location" in keys and row["location"]) else "",
             "notify_on_login": bool(row["notify_on_login"]),
             "auto_add_mentioned": bool(row["auto_add_mentioned"]),
             "track_price_drops": bool(row["track_price_drops"]),
@@ -468,6 +507,7 @@ class SqliteWatchlistRepository(WatchlistRepository):
         now = self.utc_now_iso()
         preset = settings.get("personality_preset", "cinephile")
         custom_prompt = settings.get("custom_prompt", "")
+        location = settings.get("location", "").strip()
         notify_on_login = 1 if settings.get("notify_on_login", True) else 0
         auto_add_mentioned = 1 if settings.get("auto_add_mentioned", True) else 0
         track_price_drops = 1 if settings.get("track_price_drops", True) else 0
@@ -475,17 +515,18 @@ class SqliteWatchlistRepository(WatchlistRepository):
         with self._connection() as conn:
             conn.execute(
                 """
-                INSERT INTO agent_settings (user_id, personality_preset, custom_prompt, notify_on_login, auto_add_mentioned, track_price_drops, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO agent_settings (user_id, personality_preset, custom_prompt, location, notify_on_login, auto_add_mentioned, track_price_drops, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(user_id) DO UPDATE SET
                     personality_preset = excluded.personality_preset,
                     custom_prompt = excluded.custom_prompt,
+                    location = excluded.location,
                     notify_on_login = excluded.notify_on_login,
                     auto_add_mentioned = excluded.auto_add_mentioned,
                     track_price_drops = excluded.track_price_drops,
                     updated_at = excluded.updated_at
                 """,
-                (user_id, preset, custom_prompt, notify_on_login, auto_add_mentioned, track_price_drops, now),
+                (user_id, preset, custom_prompt, location, notify_on_login, auto_add_mentioned, track_price_drops, now),
             )
         return self.get_agent_settings(user_id)
 
@@ -606,5 +647,75 @@ class SqliteWatchlistRepository(WatchlistRepository):
                 (user_id, memory_id, str(memory_id)),
             )
             return cursor.rowcount > 0
+
+    def record_briefing_presentations(self, user_id: str, items: list[dict[str, Any]]) -> None:
+        now = self.utc_now_iso()
+        with self._connection() as conn:
+            for item in items:
+                item_key = item["item_key"]
+                item_type = item.get("type", "unknown")
+                title_id = str(item.get("title_id") or "")
+                source_id = str(item.get("source_id") or "")
+                content_fp = str(item.get("content_fingerprint") or "")
+                importance = int(item.get("urgency", 3))
+
+                conn.execute(
+                    """
+                    INSERT INTO briefing_presentations (
+                        user_id, item_key, item_type, title_id, source_id,
+                        content_fingerprint, first_discovered_at, last_updated_at,
+                        first_presented_at, last_presented_at, presentation_count, importance
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+                    ON CONFLICT(user_id, item_key) DO UPDATE SET
+                        content_fingerprint = excluded.content_fingerprint,
+                        last_updated_at = excluded.last_updated_at,
+                        last_presented_at = excluded.last_presented_at,
+                        presentation_count = briefing_presentations.presentation_count + 1,
+                        importance = excluded.importance
+                    """,
+                    (
+                        user_id, item_key, item_type, title_id, source_id,
+                        content_fp, now, now, now, now, importance
+                    ),
+                )
+
+    def get_presented_briefing_keys(self, user_id: str) -> dict[str, dict[str, Any]]:
+        with self._connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM briefing_presentations WHERE user_id = ?",
+                (user_id,),
+            ).fetchall()
+        return {r["item_key"]: dict(r) for r in rows}
+
+    def get_agent_session(self, user_id: str, session_id: str) -> dict[str, Any] | None:
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT briefing_json FROM agent_sessions WHERE user_id = ? AND session_id = ?",
+                (user_id, session_id),
+            ).fetchone()
+        if row and row["briefing_json"]:
+            try:
+                return json.loads(row["briefing_json"])
+            except Exception:
+                pass
+        return None
+
+    def save_agent_session(self, user_id: str, session_id: str, briefing_data: dict[str, Any]) -> dict[str, Any]:
+        now = self.utc_now_iso()
+        briefing_json = json.dumps(briefing_data)
+        with self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO agent_sessions (user_id, session_id, briefing_json, created_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(user_id, session_id) DO UPDATE SET
+                    briefing_json = excluded.briefing_json,
+                    created_at = excluded.created_at
+                """,
+                (user_id, session_id, briefing_json, now),
+            )
+        return briefing_data
+
 
 
