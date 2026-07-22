@@ -255,5 +255,86 @@ async def test_persistent_query_memory_briefing_recall(repo):
     assert any("MEMORY RECALL" in msg and "What Dreams May Come" in msg for msg in messages)
 
 
+def test_extract_rating_and_delete_actions():
+    title1, rating1 = AiAgentService._extract_rating_action("Add Braveheart to my watched list with a 4 star rating")
+    assert title1 and title1.lower() == "braveheart"
+    assert rating1 == 4
+
+    title2, rating2 = AiAgentService._extract_rating_action("I watched Inception and rate it 5 stars")
+    assert title2 and title2.lower() == "inception"
+    assert rating2 == 5
+
+    title3, rating3 = AiAgentService._extract_rating_action("Log a 3-star rating for Gladiator")
+    assert title3 and title3.lower() == "gladiator"
+    assert rating3 == 3
+
+    title4, rating4 = AiAgentService._extract_rating_action("Add Titanic to my rated movies")
+    assert title4 and title4.lower() == "titanic"
+    assert rating4 == 5
+
+    del_t1, del_type1 = AiAgentService._extract_delete_action("Remove Braveheart from my watched list")
+    assert del_t1 and del_t1.lower() == "braveheart"
+    assert del_type1 == "rating"
+
+    del_t2, del_type2 = AiAgentService._extract_delete_action("Delete rating for Inception")
+    assert del_t2 and del_t2.lower() == "inception"
+    assert del_type2 == "rating"
+
+    del_t3, del_type3 = AiAgentService._extract_delete_action("Remove Gladiator from my queue")
+    assert del_t3 and del_t3.lower() == "gladiator"
+    assert del_type3 == "watchlist"
+
+
+@pytest.mark.asyncio
+async def test_agent_process_chat_rating_and_deletion(repo):
+    user_id = "test_user_rate_chat"
+
+    class DummyTmdb:
+        async def search(self, title):
+            if "braveheart" in title.lower():
+                return [{
+                    "id": 19995,
+                    "title": "Braveheart",
+                    "media_type": "movie",
+                    "release_date": "1995-05-24",
+                    "poster_path": "/braveheart.jpg",
+                }]
+            return []
+
+    res = await AiAgentService.process_chat(
+        user_id=user_id,
+        user_message="Add Braveheart to my watched list with a 4 star rating",
+        repo=repo,
+        tmdb=DummyTmdb(),
+    )
+
+    actions = res["actions_taken"]
+    assert len(actions) == 1
+    assert actions[0]["action"] == "rate_movie"
+    assert actions[0]["title"] == "Braveheart"
+    assert actions[0]["rating"] == 4
+
+    rated = repo.list_rated_movies(user_id)
+    assert len(rated) == 1
+    assert rated[0]["title"] == "Braveheart"
+    assert rated[0]["rating"] == 4
+
+    res_del = await AiAgentService.process_chat(
+        user_id=user_id,
+        user_message="Delete rating for Braveheart",
+        repo=repo,
+        tmdb=DummyTmdb(),
+    )
+
+    del_actions = res_del["actions_taken"]
+    assert len(del_actions) == 1
+    assert del_actions[0]["action"] == "delete_rating"
+    assert del_actions[0]["title"] == "Braveheart"
+
+    rated_after = repo.list_rated_movies(user_id)
+    assert len(rated_after) == 0
+
+
+
 
 

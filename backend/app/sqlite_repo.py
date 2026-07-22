@@ -243,6 +243,24 @@ class SqliteWatchlistRepository(WatchlistRepository):
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS rated_movies (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id TEXT NOT NULL DEFAULT 'local_test_user',
+                    media_type TEXT NOT NULL CHECK(media_type IN ('movie', 'tv')),
+                    tmdb_id INTEGER NOT NULL,
+                    title TEXT NOT NULL,
+                    poster_path TEXT,
+                    release_date TEXT,
+                    rating INTEGER NOT NULL CHECK(rating >= 1 AND rating <= 5),
+                    rated_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(user_id, media_type, tmdb_id)
+                )
+                """
+            )
+
 
     @contextmanager
     def _connection(self):
@@ -816,4 +834,118 @@ class SqliteWatchlistRepository(WatchlistRepository):
                 (user_id, session_id, briefing_json, now),
             )
         return briefing_data
+
+    def list_rated_movies(self, user_id: str) -> list[dict[str, Any]]:
+        from app.models import poster_url
+        from datetime import datetime, timezone
+
+        with self._connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM rated_movies
+                WHERE user_id = ?
+                ORDER BY updated_at DESC
+                """,
+                (user_id,),
+            ).fetchall()
+
+        now = datetime.now(timezone.utc)
+        results = []
+        for r in rows:
+            d = dict(r)
+            p_path = d.get("poster_path")
+            d["poster_url"] = poster_url(p_path) if p_path else None
+            # Calculate time ago
+            rated_at_str = d.get("updated_at") or d.get("rated_at")
+            rated_ago = "recently"
+            if rated_at_str:
+                try:
+                    dt = datetime.fromisoformat(rated_at_str)
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    seconds = int((now - dt).total_seconds())
+                    if seconds < 60:
+                        rated_ago = "just now"
+                    elif seconds < 3600:
+                        mins = seconds // 60
+                        rated_ago = f"{mins} min{'s' if mins > 1 else ''} ago"
+                    elif seconds < 86400:
+                        hrs = seconds // 3600
+                        rated_ago = f"{hrs} hour{'s' if hrs > 1 else ''} ago"
+                    elif seconds < 2592000:
+                        days = seconds // 86400
+                        rated_ago = f"{days} day{'s' if days > 1 else ''} ago"
+                    elif seconds < 31536000:
+                        months = seconds // 2592000
+                        rated_ago = f"{months} month{'s' if months > 1 else ''} ago"
+                    else:
+                        yrs = seconds // 31536000
+                        rated_ago = f"{yrs} year{'s' if yrs > 1 else ''} ago"
+                except Exception:
+                    rated_ago = "recently"
+            d["rated_ago"] = rated_ago
+            results.append(d)
+        return results
+
+    def rate_movie(
+        self,
+        user_id: str,
+        media_type: str,
+        tmdb_id: int,
+        title: str,
+        poster_path: str | None,
+        release_date: str | None,
+        rating: int,
+    ) -> dict[str, Any]:
+        now = self.utc_now_iso()
+        # Clamp rating between 1 and 5
+        rating = max(1, min(5, int(rating)))
+        with self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO rated_movies (user_id, media_type, tmdb_id, title, poster_path, release_date, rating, rated_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id, media_type, tmdb_id) DO UPDATE SET
+                    title = excluded.title,
+                    poster_path = COALESCE(excluded.poster_path, rated_movies.poster_path),
+                    release_date = COALESCE(excluded.release_date, rated_movies.release_date),
+                    rating = excluded.rating,
+                    updated_at = excluded.updated_at
+                """,
+                (user_id, media_type, tmdb_id, title, poster_path, release_date, rating, now, now),
+            )
+            # Synchronize user_rating in watchlist if present
+            conn.execute(
+                """
+                UPDATE watchlist SET user_rating = ?
+                WHERE user_id = ? AND media_type = ? AND tmdb_id = ?
+                """,
+                (rating, user_id, media_type, tmdb_id),
+            )
+        # Fetch updated record
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM rated_movies WHERE user_id = ? AND media_type = ? AND tmdb_id = ?",
+                (user_id, media_type, tmdb_id),
+            ).fetchone()
+        d = dict(row) if row else {}
+        d["rated_ago"] = "just now"
+        from app.models import poster_url
+        if d.get("poster_path"):
+            d["poster_url"] = poster_url(d["poster_path"])
+        return d
+
+    def delete_rated_movie(self, user_id: str, media_type: str, tmdb_id: int) -> bool:
+        with self._connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM rated_movies WHERE user_id = ? AND media_type = ? AND tmdb_id = ?",
+                (user_id, media_type, tmdb_id),
+            )
+            # Reset user_rating in watchlist if present
+            conn.execute(
+                "UPDATE watchlist SET user_rating = 0 WHERE user_id = ? AND media_type = ? AND tmdb_id = ?",
+                (user_id, media_type, tmdb_id),
+            )
+            return cursor.rowcount > 0
+
 

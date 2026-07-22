@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-
 import { api } from "../api";
-import type { AgentSettings, ChatMessage, PersonalityPreset } from "../types";
+import { StarRating } from "./StarRating";
+import type { AgentSettings, ChatMessage, PersonalityPreset, RatedMovie } from "../types";
+
 
 interface AgentModalProps {
   isOpen: boolean;
@@ -19,11 +20,13 @@ const PRESETS: { id: PersonalityPreset; name: string; icon: string; desc: string
 ];
 
 const SUGGESTIONS = [
+  "🎲 Quiz me on 5 movies!",
+  "⭐️ What movies have I rated?",
+  "🎬 Recommend a free movie to stream",
   "What updates do I have on my monitored shows?",
-  "I'm waiting for Severance season 2",
   "Notify me when Oppenheimer drops under $4 to rent",
-  "Recommend a great sci-fi movie for tonight",
 ];
+
 
 export function AgentModal({ isOpen, onClose, onWatchlistUpdated, initialTab = "chat" }: AgentModalProps) {
   const [activeTab, setActiveTab] = useState<"chat" | "settings">(initialTab);
@@ -31,6 +34,29 @@ export function AgentModal({ isOpen, onClose, onWatchlistUpdated, initialTab = "
   const [inputMessage, setInputMessage] = useState("");
   const [loadingChat, setLoadingChat] = useState(false);
   const [sending, setSending] = useState(false);
+  const [quizRatings, setQuizRatings] = useState<Record<number, number>>({});
+
+  const handleRateQuizMovie = async (movie: RatedMovie, rating: number) => {
+    setQuizRatings((prev) => ({ ...prev, [movie.tmdb_id]: rating }));
+    try {
+      if (rating === 0) {
+        await api.deleteRating(movie.media_type, movie.tmdb_id);
+      } else {
+        await api.rateMovie({
+          media_type: movie.media_type,
+          tmdb_id: movie.tmdb_id,
+          title: movie.title,
+          poster_path: movie.poster_path,
+          release_date: movie.release_date,
+          rating,
+        });
+      }
+      onWatchlistUpdated?.();
+    } catch (err) {
+      console.error("Failed to save quiz rating:", err);
+    }
+  };
+
 
   const [settings, setSettings] = useState<AgentSettings>({
     personality_preset: "cinephile",
@@ -207,16 +233,84 @@ export function AgentModal({ isOpen, onClose, onWatchlistUpdated, initialTab = "
                         <div className="chat-bubble">
                           <div className="chat-content">{msg.content}</div>
                           {msg.actions && msg.actions.length > 0 ? (
-                            <div className="chat-actions-list">
-                              {msg.actions.map((act, aIdx) => (
-                                <div key={aIdx} className="chat-action-tag">
-                                  {act.action === "add_monitoring" || act.action === "update_monitoring"
-                                    ? `🎯 Added "${act.title}" to Monitoring`
-                                    : `💲 Rental Target set to $${act.target_rental_price?.toFixed(2)}`}
-                                </div>
-                              ))}
+                            <div className="chat-actions-list" style={{ marginTop: "10px", display: "flex", flexDirection: "column", gap: "10px" }}>
+                              {msg.actions.map((act, aIdx) => {
+                                if (act.action === "movie_quiz" && act.movies) {
+                                  return (
+                                    <div key={aIdx} className="quiz-container-card" style={{ background: "rgba(0, 0, 0, 0.4)", borderRadius: "8px", padding: "12px", border: "1px solid rgba(255, 184, 0, 0.4)" }}>
+                                      <h4 style={{ margin: "0 0 10px 0", color: "#FFB800", fontSize: "0.95rem", display: "flex", alignItems: "center", gap: "6px" }}>
+                                        <span>🎲</span> 5-Movie Quiz — Have you seen these?
+                                      </h4>
+                                      <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+                                        {act.movies.map((m) => {
+                                          const currentRating = quizRatings[m.tmdb_id] !== undefined ? quizRatings[m.tmdb_id] : (m.rating || 0);
+                                          return (
+                                            <div key={m.tmdb_id} style={{ display: "flex", alignItems: "center", gap: "10px", background: "rgba(255, 255, 255, 0.05)", padding: "8px", borderRadius: "6px" }}>
+                                              {m.poster_url ? (
+                                                <img src={m.poster_url} alt={m.title} style={{ width: "40px", height: "60px", objectFit: "cover", borderRadius: "4px" }} />
+                                              ) : (
+                                                <div style={{ width: "40px", height: "60px", background: "#333", borderRadius: "4px", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "10px", textAlign: "center" }}>{m.title}</div>
+                                              )}
+                                              <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: "2px" }}>
+                                                <span style={{ fontWeight: 600, fontSize: "0.9rem", color: "#fff" }}>{m.title}</span>
+                                                {m.release_date ? <span style={{ fontSize: "0.75rem", color: "rgba(255, 255, 255, 0.5)" }}>{m.release_date.slice(0, 4)}</span> : null}
+                                                <StarRating
+                                                  rating={currentRating}
+                                                  onRate={(r) => void handleRateQuizMovie(m, r)}
+                                                  size="sm"
+                                                />
+                                              </div>
+                                            </div>
+                                          );
+                                        })}
+                                      </div>
+                                    </div>
+                                  );
+                                }
+                                if (act.action === "streaming_recommendation") {
+                                  return (
+                                    <div key={aIdx} className="recommendation-card" style={{ background: "rgba(0, 0, 0, 0.4)", borderRadius: "8px", padding: "12px", border: "1px solid rgba(0, 229, 255, 0.4)", display: "flex", gap: "12px", alignItems: "center" }}>
+                                      {act.poster_url ? (
+                                        <img src={act.poster_url} alt={act.title || "Movie"} style={{ width: "50px", height: "75px", objectFit: "cover", borderRadius: "4px" }} />
+                                      ) : null}
+                                      <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: "4px" }}>
+                                        <span style={{ fontWeight: 700, fontSize: "0.95rem", color: "#fff" }}>🎬 {act.title}</span>
+                                        <span style={{ fontSize: "0.85rem", color: "#00E5FF", fontWeight: 600 }}>{act.details_text}</span>
+                                        {act.overview ? <span style={{ fontSize: "0.75rem", color: "rgba(255, 255, 255, 0.7)" }}>{act.overview}</span> : null}
+                                        {act.tmdb_id ? (
+                                          <button
+                                            type="button"
+                                            style={{ alignSelf: "flex-start", marginTop: "4px", padding: "4px 10px", fontSize: "0.75rem", borderRadius: "4px", background: "#FFB800", color: "#000", border: "none", cursor: "pointer", fontWeight: 600 }}
+                                            onClick={async () => {
+                                              if (act.tmdb_id && act.title) {
+                                                await api.addToWatchlist({
+                                                  media_type: (act.media_type as any) || "movie",
+                                                  tmdb_id: act.tmdb_id,
+                                                  title: act.title,
+                                                  status: "queue",
+                                                });
+                                                onWatchlistUpdated?.();
+                                              }
+                                            }}
+                                          >
+                                            ➕ Add to Queue
+                                          </button>
+                                        ) : null}
+                                      </div>
+                                    </div>
+                                  );
+                                }
+                                return (
+                                  <div key={aIdx} className="chat-action-tag">
+                                    {act.action === "add_monitoring" || act.action === "update_monitoring"
+                                      ? `🎯 Added "${act.title}" to Monitoring`
+                                      : `💲 Rental Target set to $${act.target_rental_price?.toFixed(2)}`}
+                                  </div>
+                                );
+                              })}
                             </div>
                           ) : null}
+
                           <div className="chat-bubble-footer">
                             {msg.role === "assistant" ? (
                               <button

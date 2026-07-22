@@ -48,8 +48,12 @@ class BriefingService:
         if session_id and not force_refresh:
             cached = repo.get_agent_session(user_id, session_id)
             if cached:
-                logger.info(f"Returning session-cached briefing for session_id={session_id}")
-                return cached
+                b_text = cached.get("briefing") or ""
+                if "Nothing major changed in your watchlist" not in b_text:
+                    logger.info(f"Returning session-cached briefing for session_id={session_id}")
+                    return cached
+                logger.info(f"Invalidating stale hardcoded briefing for session_id={session_id}")
+
 
         # Step 3: Capture reference timestamps BEFORE updating login or presentation state
         briefing_state = repo.get_user_briefing_state(user_id)

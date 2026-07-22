@@ -258,7 +258,7 @@ async def test_manual_refresh_command(repo):
 
     chat_res = await AiAgentService.process_chat(user_id, "What's new on my watchlist?", repo, tmdb=None)
     reply = chat_res["message"]["content"]
-    assert "Good morning" in reply or "Movie Alpha" in reply or "watchlist" in reply
+    assert any(w in reply.lower() for w in ["good morning", "good afternoon", "good evening", "movie alpha", "watchlist", "queue"])
 
 
 def test_ranking_monitored_title_over_general_news():

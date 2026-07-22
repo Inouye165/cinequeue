@@ -326,5 +326,26 @@ export const api = {
     request<{ status: string }>("/api/agent/chat", {
       method: "DELETE",
     }),
+
+  // Ratings endpoints
+  getRatings: () => request<import("./types").RatedMovie[]>("/api/ratings"),
+  rateMovie: (item: {
+    media_type: string;
+    tmdb_id: number;
+    title: string;
+    poster_path?: string | null;
+    release_date?: string | null;
+    rating: number;
+  }) =>
+    request<import("./types").RatedMovie>("/api/ratings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(item),
+    }),
+  deleteRating: (mediaType: string, tmdbId: number) =>
+    request<{ success: boolean }>(`/api/ratings/${mediaType}/${tmdbId}`, {
+      method: "DELETE",
+    }),
 };
+
 

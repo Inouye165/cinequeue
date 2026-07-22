@@ -263,3 +263,28 @@ class WatchlistRepository(ABC):
         """Update login or presented briefing reference timestamps for user."""
         ...
 
+    @abstractmethod
+    def list_rated_movies(self, user_id: str) -> list[dict[str, Any]]:
+        """Return all movies rated by user ordered by update timestamp descending."""
+        ...
+
+    @abstractmethod
+    def rate_movie(
+        self,
+        user_id: str,
+        media_type: str,
+        tmdb_id: int,
+        title: str,
+        poster_path: str | None,
+        release_date: str | None,
+        rating: int,
+    ) -> dict[str, Any]:
+        """Save or update user rating for a movie/tv item (1-5 stars) and record timestamp."""
+        ...
+
+    @abstractmethod
+    def delete_rated_movie(self, user_id: str, media_type: str, tmdb_id: int) -> bool:
+        """Remove user rating for a movie/tv item."""
+        ...
+
+

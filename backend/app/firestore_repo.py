@@ -543,3 +543,92 @@ class FirestoreWatchlistRepository(WatchlistRepository):
         }, merge=True)
         return briefing_data
 
+    def list_rated_movies(self, user_id: str) -> list[dict[str, Any]]:
+        col = self._db.collection("users").document(user_id).collection("rated_movies")
+        docs = col.order_by("updated_at", direction=firestore.Query.DESCENDING).stream()
+        res = []
+        now = datetime.now(timezone.utc)
+        from app.models import poster_url
+        for doc in docs:
+            d = doc.to_dict()
+            if d:
+                d["id"] = doc.id
+                p_path = d.get("poster_path")
+                d["poster_url"] = poster_url(p_path) if p_path else None
+                rated_at_str = d.get("updated_at") or d.get("rated_at")
+                rated_ago = "recently"
+                if rated_at_str:
+                    try:
+                        dt = datetime.fromisoformat(rated_at_str)
+                        if dt.tzinfo is None:
+                            dt = dt.replace(tzinfo=timezone.utc)
+                        seconds = int((now - dt).total_seconds())
+                        if seconds < 60:
+                            rated_ago = "just now"
+                        elif seconds < 3600:
+                            mins = seconds // 60
+                            rated_ago = f"{mins} min{'s' if mins > 1 else ''} ago"
+                        elif seconds < 86400:
+                            hrs = seconds // 3600
+                            rated_ago = f"{hrs} hour{'s' if hrs > 1 else ''} ago"
+                        elif seconds < 2592000:
+                            days = seconds // 86400
+                            rated_ago = f"{days} day{'s' if days > 1 else ''} ago"
+                        elif seconds < 31536000:
+                            months = seconds // 2592000
+                            rated_ago = f"{months} month{'s' if months > 1 else ''} ago"
+                        else:
+                            yrs = seconds // 31536000
+                            rated_ago = f"{yrs} year{'s' if yrs > 1 else ''} ago"
+                    except Exception:
+                        rated_ago = "recently"
+                d["rated_ago"] = rated_ago
+                res.append(d)
+        return res
+
+    def rate_movie(
+        self,
+        user_id: str,
+        media_type: str,
+        tmdb_id: int,
+        title: str,
+        poster_path: str | None,
+        release_date: str | None,
+        rating: int,
+    ) -> dict[str, Any]:
+        doc_id = f"{media_type}_{tmdb_id}"
+        doc_ref = self._db.collection("users").document(user_id).collection("rated_movies").document(doc_id)
+        now = self.utc_now_iso()
+        rating = max(1, min(5, int(rating)))
+        data = {
+            "user_id": user_id,
+            "media_type": media_type,
+            "tmdb_id": tmdb_id,
+            "title": title,
+            "poster_path": poster_path,
+            "release_date": release_date,
+            "rating": rating,
+            "updated_at": now,
+        }
+        existing = doc_ref.get()
+        if not existing.exists:
+            data["rated_at"] = now
+        doc_ref.set(data, merge=True)
+
+        from app.models import poster_url
+        data["id"] = doc_id
+        data["rated_ago"] = "just now"
+        if poster_path:
+            data["poster_url"] = poster_url(poster_path)
+        return data
+
+    def delete_rated_movie(self, user_id: str, media_type: str, tmdb_id: int) -> bool:
+        doc_id = f"{media_type}_{tmdb_id}"
+        doc_ref = self._db.collection("users").document(user_id).collection("rated_movies").document(doc_id)
+        doc = doc_ref.get()
+        if doc.exists:
+            doc_ref.delete()
+            return True
+        return False
+
+

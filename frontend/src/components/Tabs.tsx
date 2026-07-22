@@ -1,6 +1,7 @@
 
 
-export type TabType = "watchlist" | "upcoming" | "theatres" | "trending" | "on-air" | "search" | "library" | "following";
+export type TabType = "watchlist" | "upcoming" | "theatres" | "trending" | "on-air" | "search" | "library" | "following" | "rated";
+
 
 interface TabsProps {
   tabsList: { id: TabType; label: string }[];

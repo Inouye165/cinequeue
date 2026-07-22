@@ -20,7 +20,7 @@ _CACHE_TTL_SECONDS = 1200  # 20 minutes (within 15-30 min spec)
 
 class WeatherService:
     def __init__(self, providers: list[WeatherProvider] | None = None) -> None:
-        self.providers = providers or [WttrInWeatherProvider(), OpenMeteoWeatherProvider()]
+        self.providers = providers or [OpenMeteoWeatherProvider(), WttrInWeatherProvider()]
 
     async def get_weather_data(self, location: str | None) -> WeatherData | None:
         """Fetch structured WeatherData for a city or ZIP code.

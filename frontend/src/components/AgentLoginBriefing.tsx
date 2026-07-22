@@ -39,38 +39,39 @@ export function AgentLoginBriefing({ onOpenChat }: AgentLoginBriefingProps) {
     window.speechSynthesis.speak(utterance);
   };
 
-  useEffect(() => {
-    let active = true;
-    const fetchBriefing = async () => {
-      try {
-        let sessionId = sessionStorage.getItem("cinequeue_briefing_session_id");
-        if (!sessionId) {
-          sessionId = "sess_" + Date.now() + "_" + Math.random().toString(36).substring(2, 9);
-          sessionStorage.setItem("cinequeue_briefing_session_id", sessionId);
-        }
-
-        const data = await api.agentBriefing(sessionId);
-        if (active && data && data.enabled && data.briefing) {
-          setBriefing(data);
-
-          // Short delay (1.5 seconds) before startup chat is spoken out loud over the speaker
-          timerRef.current = setTimeout(() => {
-            if (active && data.briefing) {
-              speakText(data.briefing);
-            }
-          }, 1500);
-        }
-      } catch (err) {
-        console.error("Failed to load agent briefing:", err);
-      } finally {
-        if (active) setLoading(false);
+  const loadBriefing = async (forceNewSession: boolean = false) => {
+    setLoading(true);
+    try {
+      let sessionId = forceNewSession ? null : sessionStorage.getItem("cinequeue_briefing_session_id");
+      if (!sessionId || forceNewSession) {
+        sessionId = "sess_" + Date.now() + "_" + Math.random().toString(36).substring(2, 9);
+        sessionStorage.setItem("cinequeue_briefing_session_id", sessionId);
       }
-    };
 
-    void fetchBriefing();
+      const data = await api.agentBriefing(sessionId);
+      if (data && data.enabled && data.briefing) {
+        setBriefing(data);
+
+        // Short delay before startup greeting is spoken
+        if (timerRef.current) clearTimeout(timerRef.current);
+        timerRef.current = setTimeout(() => {
+          if (data.briefing) {
+            speakText(data.briefing);
+          }
+        }, 1200);
+      }
+    } catch (err) {
+      console.error("Failed to load agent briefing:", err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    // Generate fresh session on initial page load
+    void loadBriefing(true);
 
     return () => {
-      active = false;
       if (timerRef.current) clearTimeout(timerRef.current);
       if ("speechSynthesis" in window) {
         window.speechSynthesis.cancel();
@@ -121,12 +122,13 @@ export function AgentLoginBriefing({ onOpenChat }: AgentLoginBriefingProps) {
           }}
           title="Listen to the startup briefing again"
         >
-          {isSpeaking ? "🔊 Speaking..." : "🔊 Listen Again"}
+          {isSpeaking ? "🔊 Speaking..." : "🔊 Listen"}
         </button>
         <button className="chat-briefing-btn" onClick={onOpenChat}>
           💬 Chat with AI
         </button>
       </div>
     </section>
+
   );
 }
