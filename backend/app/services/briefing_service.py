@@ -373,4 +373,13 @@ class BriefingService:
         if session_id:
             repo.save_agent_session(user_id, session_id, briefing_data)
 
+        # Save briefing into chat history so startup chat is available in Chat AI
+        if briefing_text:
+            try:
+                recent_msgs = repo.list_chat_messages(user_id, limit=5)
+                if not recent_msgs or recent_msgs[-1].get("content") != briefing_text:
+                    repo.add_chat_message(user_id, "assistant", briefing_text)
+            except Exception as e:
+                logger.warning(f"Error adding briefing to chat history: {e}")
+
         return briefing_data

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import type { AgentBriefing } from "../types";
 
@@ -6,9 +6,38 @@ interface AgentLoginBriefingProps {
   onOpenChat: () => void;
 }
 
+export function cleanTextForSpeech(text: string): string {
+  return text
+    .replace(/\[System Note:[^\]]*\]/gi, "")
+    .replace(/[*_~`#]+/g, "")
+    .replace(/https?:\/\/\S+/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 export function AgentLoginBriefing({ onOpenChat }: AgentLoginBriefingProps) {
   const [briefing, setBriefing] = useState<AgentBriefing | null>(null);
   const [loading, setLoading] = useState(true);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const speakText = (text: string) => {
+    if (!("speechSynthesis" in window)) return;
+    window.speechSynthesis.cancel();
+
+    const clean = cleanTextForSpeech(text);
+    if (!clean) return;
+
+    const utterance = new SpeechSynthesisUtterance(clean);
+    utterance.rate = 1.0;
+    utterance.pitch = 1.0;
+
+    utterance.onstart = () => setIsSpeaking(true);
+    utterance.onend = () => setIsSpeaking(false);
+    utterance.onerror = () => setIsSpeaking(false);
+
+    window.speechSynthesis.speak(utterance);
+  };
 
   useEffect(() => {
     let active = true;
@@ -23,6 +52,13 @@ export function AgentLoginBriefing({ onOpenChat }: AgentLoginBriefingProps) {
         const data = await api.agentBriefing(sessionId);
         if (active && data && data.enabled && data.briefing) {
           setBriefing(data);
+
+          // Short delay (1.5 seconds) before startup chat is spoken out loud over the speaker
+          timerRef.current = setTimeout(() => {
+            if (active && data.briefing) {
+              speakText(data.briefing);
+            }
+          }, 1500);
         }
       } catch (err) {
         console.error("Failed to load agent briefing:", err);
@@ -35,6 +71,10 @@ export function AgentLoginBriefing({ onOpenChat }: AgentLoginBriefingProps) {
 
     return () => {
       active = false;
+      if (timerRef.current) clearTimeout(timerRef.current);
+      if ("speechSynthesis" in window) {
+        window.speechSynthesis.cancel();
+      }
     };
   }, []);
 
@@ -62,11 +102,27 @@ export function AgentLoginBriefing({ onOpenChat }: AgentLoginBriefingProps) {
               {briefing.updates_count} update{briefing.updates_count > 1 ? "s" : ""}
             </span>
           ) : null}
+          {isSpeaking ? (
+            <span className="speaking-badge" title="Speaking out loud">
+              🔊 Playing Audio…
+            </span>
+          ) : null}
         </div>
         <p className="briefing-text">{briefing.briefing}</p>
       </div>
 
       <div className="briefing-actions">
+        <button
+          className={`listen-again-btn ${isSpeaking ? "active" : ""}`}
+          onClick={() => {
+            if (briefing.briefing) {
+              speakText(briefing.briefing);
+            }
+          }}
+          title="Listen to the startup briefing again"
+        >
+          {isSpeaking ? "🔊 Speaking..." : "🔊 Listen Again"}
+        </button>
         <button className="chat-briefing-btn" onClick={onOpenChat}>
           💬 Chat with AI
         </button>

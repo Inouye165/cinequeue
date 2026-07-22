@@ -217,11 +217,34 @@ export function AgentModal({ isOpen, onClose, onWatchlistUpdated, initialTab = "
                               ))}
                             </div>
                           ) : null}
-                          {msg.created_at ? (
-                            <div className="chat-time">
-                              {new Date(msg.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-                            </div>
-                          ) : null}
+                          <div className="chat-bubble-footer">
+                            {msg.role === "assistant" ? (
+                              <button
+                                className="speak-bubble-btn"
+                                onClick={() => {
+                                  if (!("speechSynthesis" in window)) return;
+                                  window.speechSynthesis.cancel();
+                                  const clean = msg.content
+                                    .replace(/\[System Note:[^\]]*\]/gi, "")
+                                    .replace(/[*_~`#]+/g, "")
+                                    .replace(/https?:\/\/\S+/g, "")
+                                    .replace(/\s+/g, " ")
+                                    .trim();
+                                  if (clean) {
+                                    window.speechSynthesis.speak(new SpeechSynthesisUtterance(clean));
+                                  }
+                                }}
+                                title="Listen out loud"
+                              >
+                                🔊 Listen
+                              </button>
+                            ) : null}
+                            {msg.created_at ? (
+                              <span className="chat-time">
+                                {new Date(msg.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                              </span>
+                            ) : null}
+                          </div>
                         </div>
                       </div>
                     ))}
