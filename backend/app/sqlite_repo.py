@@ -136,10 +136,17 @@ class SqliteWatchlistRepository(WatchlistRepository):
                 """
             )
             try:
+                conn.execute("ALTER TABLE agent_settings ADD COLUMN personality_preset TEXT NOT NULL DEFAULT 'cinephile'")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                conn.execute("ALTER TABLE agent_settings ADD COLUMN custom_prompt TEXT")
+            except sqlite3.OperationalError:
+                pass
+            try:
                 conn.execute("ALTER TABLE agent_settings ADD COLUMN location TEXT DEFAULT ''")
             except sqlite3.OperationalError:
                 pass
-
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS agent_conversations (
@@ -716,6 +723,4 @@ class SqliteWatchlistRepository(WatchlistRepository):
                 (user_id, session_id, briefing_json, now),
             )
         return briefing_data
-
-
 

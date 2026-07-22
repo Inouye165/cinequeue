@@ -299,7 +299,6 @@ class AiAgentService:
         }
 
     @staticmethod
-    @staticmethod
     async def _format_novelty_briefing(
         updates: list[dict[str, Any]],
         weather_report: str | None = None,

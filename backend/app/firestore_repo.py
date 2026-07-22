@@ -499,5 +499,3 @@ class FirestoreWatchlistRepository(WatchlistRepository):
         }, merge=True)
         return briefing_data
 
-
-

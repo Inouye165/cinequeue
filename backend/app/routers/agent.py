@@ -21,7 +21,6 @@ class AgentSettingsPayload(BaseModel):
     track_price_drops: bool = True
 
 
-
 class ChatMessagePayload(BaseModel):
     message: str
 

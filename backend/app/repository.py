@@ -246,5 +246,3 @@ class WatchlistRepository(ABC):
         """Save or cache briefing output for a session ID."""
         ...
 
-
-

@@ -317,7 +317,6 @@ export function AgentModal({ isOpen, onClose, onWatchlistUpdated, initialTab = "
                   Used to fetch real-time local weather reports to influence your AI agent's mood and recommendations.
                 </span>
               </div>
-
               <hr className="settings-divider" />
 
               <h4>Agent Automation & Capabilities</h4>
