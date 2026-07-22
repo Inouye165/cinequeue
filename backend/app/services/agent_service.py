@@ -662,7 +662,7 @@ class AiAgentService:
             patterns = [
                 r"(?:any\s+)?(?:update|updates|news|info|word)\s+(?:on|about|for)\s+['\"]?([^'.\"$\n]+?)['\"]?$",
                 r"(?:why\s+didn't\s+the\s+agent\s+say\s+something\s+about|why\s+didn't\s+you\s+mention|what\s+about|tell\s+me\s+about|is\s+there\s+any\s+update\s+on|how\s+about)\s+['\"]?([^'.\"$\n]+?)['\"]?$",
-                r"(?:is|when\s+is)\s+['\"]?([^'.\"$\n]+?)['\"]?\s+(?:releasing|coming\s+out|available|dropping)",
+                r"(?:is|when\s+(?:is|does))\s+['\"]?([^'.\"$\n]+?)['\"]?\s+(?:releasing|release|coming\s+out|available|dropping)",
                 r"(?:search|find|check)\s+(?:for\s+)?['\"]?([^'.\"$\n]+?)['\"]?$",
             ]
             for pat in patterns:
