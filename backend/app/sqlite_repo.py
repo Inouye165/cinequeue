@@ -147,6 +147,14 @@ class SqliteWatchlistRepository(WatchlistRepository):
                 conn.execute("ALTER TABLE agent_settings ADD COLUMN location TEXT DEFAULT ''")
             except sqlite3.OperationalError:
                 pass
+            try:
+                conn.execute("ALTER TABLE agent_settings ADD COLUMN previous_login_at TEXT")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                conn.execute("ALTER TABLE agent_settings ADD COLUMN previous_briefing_presented_at TEXT")
+            except sqlite3.OperationalError:
+                pass
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS agent_conversations (
@@ -178,20 +186,42 @@ class SqliteWatchlistRepository(WatchlistRepository):
                 CREATE TABLE IF NOT EXISTS briefing_presentations (
                     user_id TEXT NOT NULL,
                     item_key TEXT NOT NULL,
+                    story_cluster_id TEXT,
+                    news_item_id TEXT,
+                    related_title_id TEXT,
+                    news_category TEXT,
                     item_type TEXT NOT NULL,
                     title_id TEXT,
                     source_id TEXT,
                     content_fingerprint TEXT NOT NULL,
                     first_discovered_at TEXT NOT NULL,
                     last_updated_at TEXT NOT NULL,
+                    last_material_change_at TEXT,
                     first_presented_at TEXT NOT NULL,
                     last_presented_at TEXT NOT NULL,
                     presentation_count INTEGER DEFAULT 1,
                     importance INTEGER DEFAULT 3,
+                    importance_score INTEGER DEFAULT 3,
+                    acknowledged INTEGER DEFAULT 0,
+                    dismissed INTEGER DEFAULT 0,
                     PRIMARY KEY (user_id, item_key)
                 )
                 """
             )
+            for col_def in [
+                "story_cluster_id TEXT",
+                "news_item_id TEXT",
+                "related_title_id TEXT",
+                "news_category TEXT",
+                "last_material_change_at TEXT",
+                "importance_score INTEGER DEFAULT 3",
+                "acknowledged INTEGER DEFAULT 0",
+                "dismissed INTEGER DEFAULT 0",
+            ]:
+                try:
+                    conn.execute(f"ALTER TABLE briefing_presentations ADD COLUMN {col_def}")
+                except sqlite3.OperationalError:
+                    pass
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS agent_sessions (
@@ -659,31 +689,40 @@ class SqliteWatchlistRepository(WatchlistRepository):
         now = self.utc_now_iso()
         with self._connection() as conn:
             for item in items:
-                item_key = item["item_key"]
-                item_type = item.get("type", "unknown")
+                item_key = item.get("item_key") or item.get("story_cluster_id") or f"item_{item.get('title_id', 'gen')}"
+                item_type = item.get("type") or item.get("category", "unknown")
                 title_id = str(item.get("title_id") or "")
-                source_id = str(item.get("source_id") or "")
+                source_id = str(item.get("source") or item.get("source_id") or "")
                 content_fp = str(item.get("content_fingerprint") or "")
-                importance = int(item.get("urgency", 3))
+                importance = int(item.get("importance_score") or item.get("urgency", 3))
+                story_cluster_id = str(item.get("story_cluster_id") or item_key)
+                news_item_id = str(item.get("news_item_id") or item_key)
+                related_title_id = str(item.get("title_id") or "")
+                news_category = str(item.get("category") or item_type)
+                last_mat_change = str(item.get("last_material_change_at") or now)
 
                 conn.execute(
                     """
                     INSERT INTO briefing_presentations (
-                        user_id, item_key, item_type, title_id, source_id,
-                        content_fingerprint, first_discovered_at, last_updated_at,
-                        first_presented_at, last_presented_at, presentation_count, importance
+                        user_id, item_key, story_cluster_id, news_item_id, related_title_id, news_category,
+                        item_type, title_id, source_id, content_fingerprint, first_discovered_at, last_updated_at,
+                        last_material_change_at, first_presented_at, last_presented_at, presentation_count,
+                        importance, importance_score, acknowledged, dismissed
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 0, 0)
                     ON CONFLICT(user_id, item_key) DO UPDATE SET
                         content_fingerprint = excluded.content_fingerprint,
                         last_updated_at = excluded.last_updated_at,
+                        last_material_change_at = excluded.last_material_change_at,
                         last_presented_at = excluded.last_presented_at,
                         presentation_count = briefing_presentations.presentation_count + 1,
-                        importance = excluded.importance
+                        importance = excluded.importance,
+                        importance_score = excluded.importance_score
                     """,
                     (
-                        user_id, item_key, item_type, title_id, source_id,
-                        content_fp, now, now, now, now, importance
+                        user_id, item_key, story_cluster_id, news_item_id, related_title_id, news_category,
+                        item_type, title_id, source_id, content_fp, now, now, last_mat_change, now, now,
+                        importance, importance
                     ),
                 )
 
@@ -694,6 +733,39 @@ class SqliteWatchlistRepository(WatchlistRepository):
                 (user_id,),
             ).fetchall()
         return {r["item_key"]: dict(r) for r in rows}
+
+    def get_user_briefing_state(self, user_id: str) -> dict[str, Any]:
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT previous_login_at, previous_briefing_presented_at, updated_at FROM agent_settings WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+        if not row:
+            return {"previous_login_at": None, "previous_briefing_presented_at": None}
+        return {
+            "previous_login_at": row["previous_login_at"],
+            "previous_briefing_presented_at": row["previous_briefing_presented_at"],
+        }
+
+    def update_user_briefing_state(
+        self,
+        user_id: str,
+        login_at: str | None = None,
+        briefing_presented_at: str | None = None,
+    ) -> None:
+        now = self.utc_now_iso()
+        with self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO agent_settings (user_id, previous_login_at, previous_briefing_presented_at, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    previous_login_at = COALESCE(excluded.previous_login_at, agent_settings.previous_login_at),
+                    previous_briefing_presented_at = COALESCE(excluded.previous_briefing_presented_at, agent_settings.previous_briefing_presented_at),
+                    updated_at = excluded.updated_at
+                """,
+                (user_id, login_at, briefing_presented_at, now),
+            )
 
     def get_agent_session(self, user_id: str, session_id: str) -> dict[str, Any] | None:
         with self._connection() as conn:

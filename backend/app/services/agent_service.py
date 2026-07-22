@@ -299,60 +299,85 @@ class AiAgentService:
         }
 
     @staticmethod
-    async def _format_novelty_briefing(
-        updates: list[dict[str, Any]],
-        weather_report: str | None = None,
+    async def _format_structured_llm_briefing(
+        settings: dict[str, Any],
+        weather_data: Any,
+        briefing_items: list[dict[str, Any]],
         total_monitored: int = 0,
     ) -> str:
-        if not updates:
-            return "Good morning! No new release updates or news since your last visit. Everything in your queue is up to date."
+        location = settings.get("location", "").strip()
 
-        formatted_items = []
-        for u in updates:
-            formatted_items.append(f"• {u['message']}")
-        bullet_list = "\n".join(formatted_items)
+        # Build compact structured context for LLM
+        weather_json = None
+        if weather_data:
+            weather_dict = weather_data.to_dict() if hasattr(weather_data, "to_dict") else weather_data
+            weather_json = {
+                "conditions": weather_dict.get("conditions"),
+                "temperature_f": weather_dict.get("temperature_f"),
+                "high_f": weather_dict.get("high_f"),
+                "low_f": weather_dict.get("low_f"),
+                "precipitation_probability": weather_dict.get("precipitation_probability"),
+                "significant_alert": weather_dict.get("significant_alert"),
+            }
+
+        compact_payload = {
+            "local_context": {
+                "location": location,
+                "weather": weather_json,
+            },
+            "briefing_items": briefing_items,
+        }
+
+        if not briefing_items:
+            weather_msg = ""
+            if weather_json and weather_json.get("conditions"):
+                weather_msg = f"It looks like {weather_json['conditions'].lower()} in {location or 'your area'}. "
+            return f"Good morning. {weather_msg}Nothing major changed in your watchlist since your last visit. I'll keep an eye on it."
+
+        payload_json_str = json.dumps(compact_payload, indent=2)
 
         prompt = (
-            f"Here are the top novelty updates for the user's monitored titles:\n"
-            f"{bullet_list}\n\n"
-            f"Write a short, natural, friendly 2-3 sentence startup briefing. "
-            f"Start directly with a warm greeting (e.g. 'Good morning' or 'Welcome back'). "
-            f"Do NOT list every item like a database log; summarize the key points concisely."
+            f"Here is the structured input object containing verified facts and context:\n"
+            f"```json\n{payload_json_str}\n```\n\n"
+            f"Write a warm, concise, friendly startup briefing for the user based strictly on these facts.\n"
+            f"Guidelines:\n"
+            f"- Start with a brief, natural opening greeting (you may include a short, restrained weather reference if weather is available).\n"
+            f"- If there is a significant weather alert in local_context, state it clearly and respectfully before entertainment updates; do NOT turn severe alerts into jokes.\n"
+            f"- Summarize the 2 to 4 briefing items conversationally like a knowledgeable friend.\n"
+            f"- Do NOT invent or add facts, release dates, or news not present in the payload.\n"
+            f"- Do NOT use robotic phrasing like 'according to my database' or 'my algorithms found'."
         )
 
         system_prompt = RECOMMENDED_SYSTEM_PROMPT
-        if weather_report:
-            system_prompt += f"\n\nLocal Weather Note: {weather_report}"
 
         if GEMINI_API_KEY:
             try:
                 llm_response = await AiAgentService._call_gemini_api(system_prompt, prompt)
                 if llm_response:
-                    logger.info("Generated briefing via Gemini", extra={
+                    logger.info("Generated structured briefing via Gemini", extra={
                         "response_source": "gemini",
-                        "model_requested": "gemini-flash-latest",
                         "model_used": "gemini-flash-latest",
                         "intent": "startup_briefing",
-                        "fallback_used": False,
-                        "selected_count": len(updates),
+                        "selected_count": len(briefing_items),
                     })
                     return llm_response
             except Exception as e:
-                logger.error(f"Gemini API error during briefing generation: {e}")
+                logger.error(f"Gemini API error during structured briefing generation: {e}")
 
-        # Neutral, helpful fallback response
-        logger.info("Generated briefing via fallback", extra={
-            "response_source": "fallback",
-            "fallback_used": True,
-            "fallback_reason": "api_error_or_missing_key",
-            "intent": "startup_briefing",
-            "selected_count": len(updates),
-        })
+        # Deterministic fallback when Gemini is unavailable
+        bullet_lines = []
+        for it in briefing_items:
+            msg = it.get("summary") or it.get("message") or it.get("headline") or it.get("title")
+            bullet_lines.append(f"• {msg}")
+        bullets_str = "\n".join(bullet_lines)
 
-        count = len(updates)
+        weather_prefix = ""
+        if weather_json and weather_json.get("conditions"):
+            weather_prefix = f"It's currently {weather_json['conditions']} ({weather_json['temperature_f']}°F) in {location}. "
+
         return (
-            f"Welcome back! You have {count} update{'s' if count != 1 else ''} in your CineQueue data:\n"
-            f"{bullet_list}"
+            f"Good morning. {weather_prefix}Here are your verified watchlist updates since your last visit:\n"
+            f"{bullets_str}"
         )
 
     @staticmethod
@@ -411,6 +436,21 @@ class AiAgentService:
         monitored = [item for item in items if not item.get("is_owned") and (item.get("status") in {"following", "queue", "watchlist"} or not item.get("status"))]
 
         msg_lower = user_message.lower().strip()
+
+        # Handle manual "What's new?" / "Any movie news?" refresh queries using novelty pipeline
+        if any(phrase in msg_lower for phrase in [
+            "what's new", "whats new", "any movie news", "what changed",
+            "check my watchlist for updates", "any news about the movies", "what changed since i was last here"
+        ]):
+            from app.services.briefing_service import BriefingService
+            briefing_res = await BriefingService.evaluate_startup_briefing(user_id, repo, tmdb, force_refresh=True)
+            agent_reply = briefing_res.get("briefing") or "I checked your watchlist and news sources—everything is currently up to date!"
+            msg_record = repo.add_chat_message(user_id, "assistant", agent_reply, actions=actions_taken)
+            return {
+                "message": msg_record,
+                "actions_taken": actions_taken,
+            }
+
         title_query = ext_title
         if not title_query:
             title_patterns = [

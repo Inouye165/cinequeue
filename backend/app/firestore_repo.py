@@ -445,19 +445,27 @@ class FirestoreWatchlistRepository(WatchlistRepository):
         col = self._db.collection("users").document(user_id).collection("briefing_presentations")
         now = self.utc_now_iso()
         for item in items:
-            item_key = item["item_key"]
+            item_key = item.get("item_key") or item.get("story_cluster_id") or f"item_{item.get('title_id', 'gen')}"
             doc_ref = col.document(item_key)
             existing = doc_ref.get()
             data = {
                 "user_id": user_id,
                 "item_key": item_key,
-                "item_type": item.get("type", "unknown"),
+                "story_cluster_id": str(item.get("story_cluster_id") or item_key),
+                "news_item_id": str(item.get("news_item_id") or item_key),
+                "related_title_id": str(item.get("title_id") or ""),
+                "news_category": str(item.get("category") or item.get("type", "unknown")),
+                "item_type": item.get("type") or item.get("category", "unknown"),
                 "title_id": str(item.get("title_id") or ""),
-                "source_id": str(item.get("source_id") or ""),
+                "source_id": str(item.get("source") or item.get("source_id") or ""),
                 "content_fingerprint": str(item.get("content_fingerprint") or ""),
                 "last_updated_at": now,
+                "last_material_change_at": str(item.get("last_material_change_at") or now),
                 "last_presented_at": now,
-                "importance": int(item.get("urgency", 3)),
+                "importance": int(item.get("importance_score") or item.get("urgency", 3)),
+                "importance_score": int(item.get("importance_score") or item.get("urgency", 3)),
+                "acknowledged": False,
+                "dismissed": False,
             }
             if existing.exists:
                 prev = existing.to_dict() or {}
@@ -479,6 +487,32 @@ class FirestoreWatchlistRepository(WatchlistRepository):
             if dict_val:
                 res[d.id] = dict_val
         return res
+
+    def get_user_briefing_state(self, user_id: str) -> dict[str, Any]:
+        doc_ref = self._db.collection("users").document(user_id).collection("agent").document("settings")
+        doc = doc_ref.get()
+        if not doc.exists:
+            return {"previous_login_at": None, "previous_briefing_presented_at": None}
+        d = doc.to_dict() or {}
+        return {
+            "previous_login_at": d.get("previous_login_at"),
+            "previous_briefing_presented_at": d.get("previous_briefing_presented_at"),
+        }
+
+    def update_user_briefing_state(
+        self,
+        user_id: str,
+        login_at: str | None = None,
+        briefing_presented_at: str | None = None,
+    ) -> None:
+        doc_ref = self._db.collection("users").document(user_id).collection("agent").document("settings")
+        now = self.utc_now_iso()
+        data: dict[str, Any] = {"updated_at": now}
+        if login_at is not None:
+            data["previous_login_at"] = login_at
+        if briefing_presented_at is not None:
+            data["previous_briefing_presented_at"] = briefing_presented_at
+        doc_ref.set(data, merge=True)
 
     def get_agent_session(self, user_id: str, session_id: str) -> dict[str, Any] | None:
         doc = self._db.collection("users").document(user_id).collection("agent_sessions").document(session_id).get()
