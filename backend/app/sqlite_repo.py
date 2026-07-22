@@ -146,6 +146,20 @@ class SqliteWatchlistRepository(WatchlistRepository):
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS agent_query_memory (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id TEXT NOT NULL,
+                    query_text TEXT NOT NULL,
+                    title TEXT,
+                    media_type TEXT,
+                    tmdb_id INTEGER,
+                    asked_at TEXT NOT NULL,
+                    UNIQUE(user_id, title)
+                )
+                """
+            )
 
     @contextmanager
     def _connection(self):
@@ -542,4 +556,55 @@ class SqliteWatchlistRepository(WatchlistRepository):
     def clear_chat_messages(self, user_id: str) -> None:
         with self._connection() as conn:
             conn.execute("DELETE FROM agent_conversations WHERE user_id = ?", (user_id,))
+
+    def add_query_memory(
+        self,
+        user_id: str,
+        query_text: str,
+        tmdb_id: int | None = None,
+        media_type: str | None = None,
+        title: str | None = None,
+    ) -> dict[str, Any]:
+        now = self.utc_now_iso()
+        item_title = title or query_text
+        with self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO agent_query_memory (user_id, query_text, title, media_type, tmdb_id, asked_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id, title) DO UPDATE SET
+                    query_text = excluded.query_text,
+                    asked_at = excluded.asked_at,
+                    tmdb_id = COALESCE(excluded.tmdb_id, agent_query_memory.tmdb_id),
+                    media_type = COALESCE(excluded.media_type, agent_query_memory.media_type)
+                """,
+                (user_id, query_text, item_title, media_type, tmdb_id, now),
+            )
+            row = conn.execute(
+                "SELECT * FROM agent_query_memory WHERE user_id = ? AND title = ?",
+                (user_id, item_title),
+            ).fetchone()
+        return dict(row) if row else {"user_id": user_id, "title": item_title, "asked_at": now}
+
+    def list_query_memories(self, user_id: str, limit: int = 50) -> list[dict[str, Any]]:
+        with self._connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM agent_query_memory
+                WHERE user_id = ?
+                ORDER BY asked_at DESC
+                LIMIT ?
+                """,
+                (user_id, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def remove_query_memory(self, user_id: str, memory_id: Any) -> bool:
+        with self._connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM agent_query_memory WHERE user_id = ? AND (id = ? OR title = ?)",
+                (user_id, memory_id, str(memory_id)),
+            )
+            return cursor.rowcount > 0
+
 

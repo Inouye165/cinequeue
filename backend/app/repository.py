@@ -204,3 +204,26 @@ class WatchlistRepository(ABC):
         """Clear user conversation history with AI agent."""
         ...
 
+    @abstractmethod
+    def add_query_memory(
+        self,
+        user_id: str,
+        query_text: str,
+        tmdb_id: int | None = None,
+        media_type: str | None = None,
+        title: str | None = None,
+    ) -> dict[str, Any]:
+        """Record or update user interest/query memory in a movie or TV show."""
+        ...
+
+    @abstractmethod
+    def list_query_memories(self, user_id: str, limit: int = 50) -> list[dict[str, Any]]:
+        """List remembered user query topics for persistent monitoring."""
+        ...
+
+    @abstractmethod
+    def remove_query_memory(self, user_id: str, memory_id: Any) -> bool:
+        """Remove a query memory record."""
+        ...
+
+

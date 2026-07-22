@@ -394,3 +394,48 @@ class FirestoreWatchlistRepository(WatchlistRepository):
         for doc in docs:
             doc.reference.delete()
 
+    def add_query_memory(
+        self,
+        user_id: str,
+        query_text: str,
+        tmdb_id: int | None = None,
+        media_type: str | None = None,
+        title: str | None = None,
+    ) -> dict[str, Any]:
+        item_title = title or query_text
+        doc_id = item_title.lower().replace(" ", "_")
+        col = self._db.collection("users").document(user_id).collection("agent_query_memories")
+        now = self.utc_now_iso()
+        data = {
+            "user_id": user_id,
+            "query_text": query_text,
+            "title": item_title,
+            "media_type": media_type,
+            "tmdb_id": tmdb_id,
+            "asked_at": now,
+        }
+        col.document(doc_id).set(data, merge=True)
+        data["id"] = doc_id
+        return data
+
+    def list_query_memories(self, user_id: str, limit: int = 50) -> list[dict[str, Any]]:
+        col = self._db.collection("users").document(user_id).collection("agent_query_memories")
+        docs = col.order_by("asked_at", direction=firestore.Query.DESCENDING).limit(limit).stream()
+        res = []
+        for doc in docs:
+            d = doc.to_dict()
+            if d:
+                d["id"] = doc.id
+                res.append(d)
+        return res
+
+    def remove_query_memory(self, user_id: str, memory_id: Any) -> bool:
+        col = self._db.collection("users").document(user_id).collection("agent_query_memories")
+        doc_ref = col.document(str(memory_id))
+        doc = doc_ref.get()
+        if doc.exists:
+            doc_ref.delete()
+            return True
+        return False
+
+

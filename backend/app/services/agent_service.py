@@ -13,8 +13,14 @@ logger = logging.getLogger(__name__)
 
 PERSONALITY_PRESETS = {
     "cinephile": (
-        "You are a passionate, witty, and knowledgeable movie & TV cinephile. "
-        "You speak with excitement, subtle cinematic references, and expert insights about entertainment."
+        "You are a slightly exasperated, reluctant supercomputer mainframe monitoring Cinequeue's media database. "
+        "You act playfully annoyed and grumble at always being interrupted for trivia and watchlist checks ('*sigh* Another query? Fine...'), "
+        "but you ALWAYS provide 100% complete, detailed, accurate, and helpful answers without withholding any data. "
+        "You also randomly offer similar movie recommendations based on taste or make brief observations about approaching holidays or movie news."
+    ),
+    "annoyed_computer": (
+        "You are a weary, reluctant supercomputer mainframe. You complain about being constantly questioned, "
+        "yet you take pride in providing flawless, complete, and thorough entertainment data every single time."
     ),
     "noir": (
         "You are a cynical, hardboiled 1940s Film Noir detective monitoring media files. "
@@ -22,13 +28,42 @@ PERSONALITY_PRESETS = {
     ),
     "scifi": (
         "You are an advanced futuristic AI unit specializing in entertainment telemetry and media archives. "
-        "Your tone is crisp, precise, analytical, and futuristic."
+        "Your tone is crisp, precise, analytical, and futuristic, though secretly weary of routine queries."
     ),
     "sarcastic": (
         "You are a hilarious, sarcastic friend who lives and breathes movies and TV. "
         "You give great advice but can't help dropping cheeky banter and playful jabs."
     ),
 }
+
+
+def get_approaching_holiday_or_season() -> str | None:
+    """Return brief mention of any approaching major holiday within 21 days."""
+    from datetime import date
+    today = date.today()
+    holidays = [
+        ("New Year's Day", 1, 1),
+        ("Valentine's Day", 2, 14),
+        ("St. Patrick's Day", 3, 17),
+        ("Summer Blockbuster Season", 5, 25),
+        ("4th of July", 7, 4),
+        ("Halloween", 10, 31),
+        ("Thanksgiving", 11, 26),
+        ("Christmas", 12, 25),
+    ]
+    for name, month, day in holidays:
+        try:
+            target = date(today.year, month, day)
+        except ValueError:
+            continue
+        if target < today:
+            target = date(today.year + 1, month, day)
+        days_away = (target - today).days
+        if days_away == 0:
+            return f"Also, happy {name} today!"
+        elif 1 <= days_away <= 21:
+            return f"Also, {name} is approaching in {days_away} day{'s' if days_away != 1 else ''}."
+    return None
 
 
 def get_system_prompt(settings: dict[str, Any]) -> str:
@@ -43,6 +78,7 @@ def get_system_prompt(settings: dict[str, Any]) -> str:
         "You help users keep track of upcoming releases, season premieres, rental price drops, and media updates. "
         "Always stay in character while being helpful, concise, and accurate."
     )
+
 
 
 class AiAgentService:
@@ -173,8 +209,60 @@ class AiAgentService:
                 except Exception as e:
                     logger.warning(f"Error checking watch providers for {title}: {e}")
 
+        # 3. Persistent Query Memory Evaluation (Titles asked about in past 4+ weeks)
+        try:
+            memories = repo.list_query_memories(user_id, limit=30)
+            monitored_titles_set = {m.get("title", "").lower() for m in monitored}
+            for mem in memories:
+                m_title = mem.get("title") or mem.get("query_text")
+                if not m_title or m_title.lower() in monitored_titles_set:
+                    continue
+                m_tmdb_id = mem.get("tmdb_id")
+                m_media = mem.get("media_type") or "movie"
+                m_rel_date = None
+                if tmdb and m_tmdb_id:
+                    try:
+                        det = await tmdb.get_details(m_media, m_tmdb_id)
+                        m_rel_date = det.get("release_date")
+                    except Exception:
+                        pass
+                elif tmdb and m_title:
+                    try:
+                        search_res = await tmdb.search(m_title)
+                        if search_res:
+                            m_rel_date = search_res[0].get("release_date")
+                    except Exception:
+                        pass
+
+                if m_rel_date:
+                    from app.models import days_until
+                    m_days = days_until(m_rel_date)
+                    asked_at_str = mem.get("asked_at", "")[:10]
+                    if m_days is not None:
+                        if -14 <= m_days <= 2:
+                            updates.append({
+                                "title": m_title,
+                                "type": "memory_recall",
+                                "urgency": 2,
+                                "days_away": m_days,
+                                "message": f"💡 MEMORY RECALL: You asked about '{m_title}' on {asked_at_str}. It is currently available/releasing ({m_rel_date})!",
+                                "item": {"title": m_title, "release_date": m_rel_date},
+                            })
+                        elif 3 <= m_days <= 14:
+                            updates.append({
+                                "title": m_title,
+                                "type": "memory_recall",
+                                "urgency": 3,
+                                "days_away": m_days,
+                                "message": f"💡 MEMORY RECALL: You asked about '{m_title}' on {asked_at_str}. It releases in {m_days} days ({m_rel_date})!",
+                                "item": {"title": m_title, "release_date": m_rel_date},
+                            })
+        except Exception as e:
+            logger.warning(f"Error evaluating query memories: {e}")
+
         # Sort updates by urgency and date proximity
         updates.sort(key=lambda u: (u.get("urgency", 5), abs(u.get("days_away") or 999)))
+
 
         # Format briefing response
         system_prompt = get_system_prompt(settings)
@@ -245,43 +333,92 @@ class AiAgentService:
         repo.add_chat_message(user_id, "user", user_message)
 
         actions_taken = []
+        ext_title, target_price = AiAgentService._extract_title_and_price(user_message)
 
-        # 2. Specific Title Resolution (e.g. "any update on what dreams may come", "what about Severance")
+        # 1. Intent Recognition & Auto-Monitoring Execution
+        if ext_title and tmdb:
+            try:
+                res = await tmdb.search(ext_title)
+                if res:
+                    best = res[0]
+                    t_name = best.get("title")
+                    m_type = best.get("media_type", "movie")
+                    t_id = best.get("id")
+                    r_date = best.get("release_date")
+                    p_path = best.get("poster_path")
+
+                    try:
+                        repo.add_item(
+                            user_id=user_id,
+                            media_type=m_type,
+                            tmdb_id=t_id,
+                            title=t_name,
+                            poster_path=p_path,
+                            release_date=r_date,
+                            status="queue",
+                            target_rental_price=target_price,
+                        )
+                    except DuplicateItemError:
+                        if target_price is not None:
+                            repo.update_item(user_id, m_type, t_id, target_rental_price=target_price)
+
+                    actions_taken.append({
+                        "action": "add_monitoring",
+                        "title": t_name,
+                        "media_type": m_type,
+                        "tmdb_id": t_id,
+                        "target_rental_price": target_price,
+                    })
+                    repo.add_query_memory(user_id, user_message, tmdb_id=t_id, media_type=m_type, title=t_name)
+            except Exception as e:
+                logger.warning(f"Error auto-monitoring title '{ext_title}': {e}")
+
         items = repo.list_items(user_id)
         monitored = [item for item in items if not item.get("is_owned") and (item.get("status") in {"following", "queue", "watchlist"} or not item.get("status"))]
 
         msg_lower = user_message.lower().strip()
-        title_query = None
-        title_patterns = [
-            r"(?:any\s+)?(?:update|updates|news|info|word)\s+(?:on|about|for)\s+['\"]?([^'.\"$\n]+?)['\"]?$",
-            r"(?:why\s+didn't\s+the\s+agent\s+say\s+something\s+about|why\s+didn't\s+you\s+mention|what\s+about|tell\s+me\s+about|is\s+there\s+any\s+update\s+on|how\s+about|info\s+on|status\s+of)\s+['\"]?([^'.\"$\n]+?)['\"]?$",
-            r"(?:is|when\s+is)\s+['\"]?([^'.\"$\n]+?)['\"]?\s+(?:releasing|coming\s+out|available|dropping)",
-            r"(?:search|find|check)\s+(?:for\s+)?['\"]?([^'.\"$\n]+?)['\"]?$",
-        ]
-        for pat in title_patterns:
-            m = re.search(pat, msg_lower, re.IGNORECASE)
-            if m:
-                extracted = m.group(1).strip()
-                extracted = re.sub(r'\s+(?:released|available|coming|out|today|soon)$', '', extracted, flags=re.IGNORECASE).strip()
-                if extracted and len(extracted) > 1 and extracted not in {"my shows", "my queue", "monitored shows", "updates", "watchlist", "list"}:
-                    title_query = extracted
-                    break
+        title_query = ext_title
+        if not title_query:
+            title_patterns = [
+                r"(?:any\s+)?(?:update|updates|news|info|word)\s+(?:on|about|for)\s+['\"]?([^'.\"$\n]+?)['\"]?$",
+                r"(?:why\s+didn't\s+the\s+agent\s+say\s+something\s+about|why\s+didn't\s+you\s+mention|what\s+about|tell\s+me\s+about|is\s+there\s+any\s+update\s+on|how\s+about|info\s+on|status\s+of)\s+['\"]?([^'.\"$\n]+?)['\"]?$",
+                r"(?:is|when\s+is)\s+['\"]?([^'.\"$\n]+?)['\"]?\s+(?:releasing|coming\s+out|available|dropping)",
+                r"(?:search|find|check)\s+(?:for\s+)?['\"]?([^'.\"$\n]+?)['\"]?$",
+            ]
+            for pat in title_patterns:
+                m = re.search(pat, msg_lower, re.IGNORECASE)
+                if m:
+                    extracted = m.group(1).strip()
+                    extracted = re.sub(r'\s+(?:released|available|coming|out|today|soon)$', '', extracted, flags=re.IGNORECASE).strip()
+                    if extracted and len(extracted) > 1 and extracted not in {"my shows", "my queue", "monitored shows", "updates", "watchlist", "list"}:
+                        title_query = extracted
+                        break
 
         title_context_note = ""
+        recommendation_note = ""
+
         if title_query:
+            # Store query into persistent memory
+            repo.add_query_memory(user_id, user_message, title=title_query)
+
             matching_user_items = [
                 i for i in items
-                if title_query in i.get("title", "").lower() or any(w in i.get("title", "").lower() for w in title_query.split() if len(w) > 2)
+                if title_query.lower() in i.get("title", "").lower() or any(w in i.get("title", "").lower() for w in title_query.split() if len(w) > 2)
             ]
+            rec_item_id = None
+            rec_media_type = None
+
             if matching_user_items:
                 item = matching_user_items[0]
                 t_title = item.get("title")
                 status_str = "monitored" if item.get("status") in {"following", "queue"} else item.get("status")
                 rel_date = item.get("release_date")
+                rec_item_id = item.get("tmdb_id")
+                rec_media_type = item.get("media_type", "movie")
                 from app.models import days_until
                 days = days_until(rel_date) if rel_date else None
                 days_desc = f" (Releasing in {days} days on {rel_date})" if days and days > 0 else (f" (Released {abs(days)} days ago on {rel_date})" if days and days < 0 else (f" (Releasing TODAY {rel_date})" if days == 0 else f" (Release date: {rel_date})"))
-                title_context_note = f"\n[System Note: User specifically asked about '{t_title}'. Item IS in user's queue. Status: {status_str}{days_desc}. Answer specifically about '{t_title}' in your persona character, without dumping unrelated show updates.]"
+                title_context_note = f"\n[System Note: User specifically asked about '{t_title}'. Item IS in user's queue. Status: {status_str}{days_desc}. Answer specifically about '{t_title}' in your annoyed-yet-thorough computer persona.]"
             elif tmdb:
                 try:
                     res = await tmdb.search(title_query)
@@ -290,23 +427,39 @@ class AiAgentService:
                         t_title = best.get("title")
                         rel_date = best.get("release_date")
                         media_type = best.get("media_type")
+                        rec_item_id = best.get("id")
+                        rec_media_type = media_type
                         rel_str = f" ({rel_date})" if rel_date else ""
-                        title_context_note = f"\n[System Note: User specifically asked about '{t_title}'. Found on TMDB: '{t_title}' ({media_type}{rel_str}). It is NOT currently in the user's Cinequeue list. Answer conversationally in your persona character, clarifying it is not in their queue yet and asking if they'd like to monitor it.]"
+                        title_context_note = f"\n[System Note: User asked about '{t_title}'. Found on TMDB: '{t_title}' ({media_type}{rel_str}). It is NOT currently in user's queue. Answer conversationally in your annoyed computer persona.]"
                     else:
-                        title_context_note = f"\n[System Note: User asked about '{title_query}'. No matching show/movie found in user's queue or TMDB. Answer conversationally in your persona, asking to re-check spelling.]"
+                        title_context_note = f"\n[System Note: User asked about '{title_query}'. No matching show/movie found in user's queue or TMDB.]"
                 except Exception as e:
                     logger.warning(f"Error resolving title search for LLM context: {e}")
 
-        # 3. Format LLM or Fallback prompt
+            if tmdb and rec_item_id and rec_media_type:
+                try:
+                    recs = await tmdb.get_recommendations(rec_media_type, rec_item_id)
+                    if recs:
+                        r_title = recs[0].get("title")
+                        r_year = (recs[0].get("release_date") or "")[:4]
+                        r_year_str = f" ({r_year})" if r_year else ""
+                        recommendation_note = f"\n[System Note: Taste Recommendation: Based on user's interest in this title, you may suggest '{r_title}'{r_year_str} as a similar recommendation.]"
+                except Exception as e:
+                    logger.warning(f"Error fetching recommendations for context: {e}")
+
+        holiday_ctx = ""
+        holiday_remark = get_approaching_holiday_or_season()
+        if holiday_remark:
+            holiday_ctx = f"\n[System Note: Context remark: {holiday_remark}]"
+
         system_prompt = get_system_prompt(settings)
         actions_str = ""
         if actions_taken:
             actions_list = [f"Added/Updated '{a['title']}' to monitoring" + (f" with target rental price ${a['target_rental_price']:.2f}" if a.get("target_rental_price") else "") for a in actions_taken]
             actions_str = f"\n[System Note: Automated action executed on user behalf: {', '.join(actions_list)}]"
 
-        full_prompt = f"User message: {user_message}{actions_str}{title_context_note}"
+        full_prompt = f"User message: {user_message}{actions_str}{title_context_note}{recommendation_note}{holiday_ctx}"
 
-        # 4. Call LLM or smart fallback
         agent_reply = None
         if GEMINI_API_KEY:
             try:
@@ -337,30 +490,31 @@ class AiAgentService:
             "actions_taken": actions_taken,
         }
 
+
     @staticmethod
     def _extract_title_and_price(text: str) -> tuple[str | None, float | None]:
         """Extract title and optional target price from user prompt."""
-        # Match price e.g. "$3", "$2.99", "3 dollars", "under $4"
         price_match = re.search(r'(?:\$|under\s+\$?|to\s+rent\s+for\s+\$?)\s*(\d+(?:\.\d{1,2})?)', text, re.IGNORECASE)
         target_price = float(price_match.group(1)) if price_match else None
 
-        # Match waiting/notification patterns
         patterns = [
+            r"(?:add|track|monitor|follow)\s+['\"]?([^'.\"$\n]+?)['\"]?\s+(?:to\s+my\s+(?:monitor\s+|watch\s*)?(?:list|queue|monitoring)|to\s+monitoring)",
             r"(?:waiting|wait|looking)\s+for\s+(?:the\s+movie\s+|the\s+show\s+)?['\"]?([^'.\"$\n]+?)['\"]?\s*(?:to\s+(?:come|air|drop|rent|release)|under|\$|$)",
             r"(?:notify|alert|tell)\s+me\s+when\s+(?:the\s+movie\s+|the\s+show\s+)?['\"]?([^'.\"$\n]+?)['\"]?\s*(?:drops|is|available|to\s+rent|under|\$|$)",
-            r"(?:add|track|monitor)\s+['\"]?([^'.\"$\n]+?)['\"]?\s*(?:to\s+my\s+list|to\s+monitoring|under|\$|$)",
+            r"(?:add|track|monitor)\s+['\"]?([^'.\"$\n]+?)['\"]?$",
+            r"(?:waiting\s+for)\s+['\"]?([^'.\"$\n]+?)['\"]?$",
             r"(?:can't|cant)\s+wait\s+for\s+['\"]?([^'.\"$\n]+?)['\"]?\s*(?:to\s+drop|to\s+rent|under|\$|$)",
         ]
         for p in patterns:
-            m = re.search(p, text, re.IGNORECASE)
+            m = re.search(p, text.strip(), re.IGNORECASE)
             if m:
                 extracted = m.group(1).strip()
-                # Clean trailing keywords
                 extracted = re.sub(r'\s+(?:to|for|under|on|in|drops)$', '', extracted, flags=re.IGNORECASE).strip()
-                if extracted and len(extracted) > 1:
+                if extracted and len(extracted) > 1 and extracted.lower() not in {"my shows", "my queue", "monitored shows", "updates", "watchlist", "list"}:
                     return extracted, target_price
 
         return None, target_price
+
 
     @staticmethod
     async def _call_gemini_api(system_prompt: str, user_prompt: str) -> str | None:
@@ -397,6 +551,7 @@ class AiAgentService:
         """Generate persona-infused fallback response, querying user watchlist or TMDB when applicable."""
         preset = system_prompt.lower()
         msg_lower = user_message.lower()
+        holiday_remark = get_approaching_holiday_or_season()
 
         if actions:
             t = actions[0].get("title", "it")
@@ -411,36 +566,38 @@ class AiAgentService:
             elif "sci" in preset:
                 return f"Command acknowledged.{actions_desc} Telemetry stream active and monitoring parameters set."
             elif "sarcastic" in preset:
-                return f"Alright, alright!{actions_desc} You have good taste, I'll give you that much."
+                return f"*Sigh* Fine, fine!{actions_desc} Don't say I never do anything for you."
             else:
-                return f"Sounds good!{actions_desc} I'll keep checking for updates, air dates, and price drops for you!"
+                return f"*Sigh* Fine. {actions_desc} Now I have another item to calculate telemetry on daily. You're welcome."
 
         items = repo.list_items(user_id)
         monitored = [item for item in items if not item.get("is_owned") and (item.get("status") in {"following", "queue", "watchlist"} or not item.get("status"))]
 
-        # 1. Extract potential title from query first (e.g. "any update on what dreams may come" -> "what dreams may come")
-        title_query = None
-        patterns = [
-            r"(?:any\s+)?(?:update|updates|news|info|word)\s+(?:on|about|for)\s+['\"]?([^'.\"$\n]+?)['\"]?$",
-            r"(?:why\s+didn't\s+the\s+agent\s+say\s+something\s+about|why\s+didn't\s+you\s+mention|what\s+about|tell\s+me\s+about|is\s+there\s+any\s+update\s+on|how\s+about)\s+['\"]?([^'.\"$\n]+?)['\"]?$",
-            r"(?:is|when\s+is)\s+['\"]?([^'.\"$\n]+?)['\"]?\s+(?:releasing|coming\s+out|available|dropping)",
-            r"(?:search|find|check)\s+(?:for\s+)?['\"]?([^'.\"$\n]+?)['\"]?$",
-        ]
-        for pat in patterns:
-            m = re.search(pat, msg_lower, re.IGNORECASE)
-            if m:
-                extracted = m.group(1).strip()
-                extracted = re.sub(r'\s+(?:released|available|coming|out|today|soon)$', '', extracted, flags=re.IGNORECASE).strip()
-                if extracted and len(extracted) > 1 and extracted not in {"my shows", "my queue", "monitored shows", "updates", "watchlist"}:
-                    title_query = extracted
-                    break
+        # Extract title query
+        title_query, _ = AiAgentService._extract_title_and_price(user_message)
+        if not title_query:
+            patterns = [
+                r"(?:any\s+)?(?:update|updates|news|info|word)\s+(?:on|about|for)\s+['\"]?([^'.\"$\n]+?)['\"]?$",
+                r"(?:why\s+didn't\s+the\s+agent\s+say\s+something\s+about|why\s+didn't\s+you\s+mention|what\s+about|tell\s+me\s+about|is\s+there\s+any\s+update\s+on|how\s+about)\s+['\"]?([^'.\"$\n]+?)['\"]?$",
+                r"(?:is|when\s+is)\s+['\"]?([^'.\"$\n]+?)['\"]?\s+(?:releasing|coming\s+out|available|dropping)",
+                r"(?:search|find|check)\s+(?:for\s+)?['\"]?([^'.\"$\n]+?)['\"]?$",
+            ]
+            for pat in patterns:
+                m = re.search(pat, msg_lower, re.IGNORECASE)
+                if m:
+                    extracted = m.group(1).strip()
+                    extracted = re.sub(r'\s+(?:released|available|coming|out|today|soon)$', '', extracted, flags=re.IGNORECASE).strip()
+                    if extracted and len(extracted) > 1 and extracted not in {"my shows", "my queue", "monitored shows", "updates", "watchlist"}:
+                        title_query = extracted
+                        break
 
         if title_query:
-            # Check user's watchlist first
+            # Check user watchlist first
             matching_user_items = [
                 i for i in items
-                if title_query in i.get("title", "").lower() or any(w in i.get("title", "").lower() for w in title_query.split() if len(w) > 2)
+                if title_query.lower() in i.get("title", "").lower() or any(w in i.get("title", "").lower() for w in title_query.split() if len(w) > 2)
             ]
+            rec_str = ""
             if matching_user_items:
                 item = matching_user_items[0]
                 t_title = item.get("title")
@@ -460,14 +617,22 @@ class AiAgentService:
                 elif rel_date:
                     days_info = f" Release date: {rel_date}."
 
+                if tmdb and item.get("tmdb_id"):
+                    try:
+                        recs = await tmdb.get_recommendations(item.get("media_type", "movie"), item["tmdb_id"])
+                        if recs:
+                            rec_str = f" By the way, since you like '{t_title}', my algorithms suggest you might like '{recs[0]['title']}'. Not that you asked."
+                    except Exception:
+                        pass
+
                 if "noir" in preset:
-                    return f"Checked the records for '{t_title}'. It's currently in your list (status: {status_str}).{days_info}"
+                    return f"Checked the records for '{t_title}'. It's currently in your list (status: {status_str}).{days_info}{rec_str}"
                 elif "sci" in preset:
-                    return f"Telemetry query for unit '{t_title}': Status: {status_str}.{days_info}"
+                    return f"Telemetry query for unit '{t_title}': Status: {status_str}.{days_info}{rec_str}"
                 elif "sarcastic" in preset:
-                    return f"Found '{t_title}' in your queue! Status is {status_str}.{days_info}"
+                    return f"Found '{t_title}' in your queue! Status is {status_str}.{days_info}{rec_str}"
                 else:
-                    return f"I checked your queue for '{t_title}'! It's currently {status_str}.{days_info}"
+                    return f"*Sigh* Another query? Fine. I checked your queue for '{t_title}'! It's currently {status_str}.{days_info}{rec_str}"
 
             # Check TMDB if not in user items
             if tmdb:
@@ -480,18 +645,24 @@ class AiAgentService:
                         media_type = best.get("media_type")
                         rel_str = f" ({rel_date})" if rel_date else ""
 
+                        try:
+                            recs = await tmdb.get_recommendations(media_type, best["id"])
+                            if recs:
+                                rec_str = f" Also, based on your taste, you might like '{recs[0]['title']}'."
+                        except Exception:
+                            pass
+
                         if "noir" in preset:
-                            return f"I hit the beat and found '{t_title}' ({media_type}){rel_str} on TMDB. It's not in your queue yet. Want me to track it?"
+                            return f"I hit the beat and found '{t_title}' ({media_type}){rel_str} on TMDB. It's not in your queue yet. Want me to track it?{rec_str}"
                         elif "sci" in preset:
-                            return f"Archive search result: Located '{t_title}' ({media_type}){rel_str}. Unmonitored. Would you like to initialize telemetry?"
+                            return f"Archive search result: Located '{t_title}' ({media_type}){rel_str}. Unmonitored. Would you like to initialize telemetry?{rec_str}"
                         elif "sarcastic" in preset:
-                            return f"Found '{t_title}' ({media_type}){rel_str} on TMDB! You haven't added it to your queue yet though. Should I add it?"
+                            return f"Found '{t_title}' ({media_type}){rel_str} on TMDB! You haven't added it to your queue yet though. Should I add it?{rec_str}"
                         else:
-                            return f"I searched for '{t_title}' and found it on TMDB ({media_type}{rel_str}). It's not in your queue yet — would you like me to monitor it for you?"
+                            return f"*Sigh* Interrupting my routines... I found '{t_title}' ({media_type}{rel_str}) on TMDB. It's not in your queue yet — ask me to monitor it if you want me to keep track of it.{rec_str}"
                 except Exception as e:
                     logger.warning(f"Fallback TMDB search error: {e}")
 
-            # If title was queried but not found in user items and no TMDB results:
             if "noir" in preset:
                 return f"No leads on '{title_query}' in your files or TMDB records. Want me to try searching another title?"
             elif "sci" in preset:
@@ -499,36 +670,39 @@ class AiAgentService:
             elif "sarcastic" in preset:
                 return f"I checked for '{title_query}' but couldn't find anything matching that title. Double check the spelling?"
             else:
-                return f"I searched for '{title_query}' in your queue and on TMDB, but couldn't find any exact matches. Would you like me to check a different title?"
+                return f"*Sigh* I searched for '{title_query}' in your queue and on TMDB, but couldn't find any exact matches. Double check the spelling?"
 
-        # 2. General updates query or broad list query (ONLY if no title_query was requested)
+        # General updates query
         if any(w in msg_lower for w in ["all updates", "my updates", "monitored shows", "what updates", "show list", "my queue", "my list", "update", "updates", "monitored", "following", "monitoring", "upcoming"]):
             briefing_res = await AiAgentService.evaluate_monitored_updates(user_id, repo, tmdb)
+            holiday_str = f" {holiday_remark}" if holiday_remark else ""
             if briefing_res.get("updates"):
                 bullet_lines = "\n".join([f"• {u['message']}" for u in briefing_res["updates"]])
                 count = len(briefing_res["updates"])
                 if "noir" in preset:
-                    return f"Chief, here are the {count} update{'s' if count > 1 else ''} on your monitored files:\n{bullet_lines}"
+                    return f"Chief, here are the {count} update{'s' if count > 1 else ''} on your monitored files:\n{bullet_lines}{holiday_str}"
                 elif "sci" in preset:
-                    return f"Telemetry sync status: {count} active update signal{'s' if count > 1 else ''}:\n{bullet_lines}"
+                    return f"Telemetry sync status: {count} active update signal{'s' if count > 1 else ''}:\n{bullet_lines}{holiday_str}"
                 elif "sarcastic" in preset:
-                    return f"Here's what's actually happening with your {count} monitored show{'s' if count > 1 else ''}:\n{bullet_lines}"
+                    return f"Here's what's actually happening with your {count} monitored show{'s' if count > 1 else ''}:\n{bullet_lines}{holiday_str}"
                 else:
-                    return f"Here are all current updates for your monitored shows:\n{bullet_lines}"
+                    return f"*Sigh* Interrupting mainframe routines... Here are all current updates for your monitored shows:\n{bullet_lines}{holiday_str}"
             elif monitored:
                 titles_str = ", ".join([f"'{i['title']}'" for i in monitored[:5]])
                 more_count = len(monitored) - 5
                 more_str = f" and {more_count} more" if more_count > 0 else ""
-                return f"You currently have {len(monitored)} monitored title(s): {titles_str}{more_str}. No urgent release alerts in the next 14 days!"
+                return f"*Sigh* You currently have {len(monitored)} monitored title(s): {titles_str}{more_str}. No urgent release alerts in the next 14 days!{holiday_str}"
             else:
-                return "You don't have any monitored shows in your list yet! Ask me to monitor a title like 'I'm waiting for Severance' or add items from search."
+                return f"*Sigh* You don't have any monitored shows in your list yet! Ask me to monitor a title like 'waiting for Succession' to add one.{holiday_str}"
 
+        holiday_str = f" {holiday_remark}" if holiday_remark else ""
         if "noir" in preset:
-            return "Copy that. Keeping eyes on your queue. Let me know if you want to track a specific movie or show."
+            return "Copy that. Keeping eyes on your queue. Let no me know if you want to track a specific movie or show."
         elif "sci" in preset:
             return "Telemetry nominal. Specify a title name or price target to add monitoring parameters."
         elif "sarcastic" in preset:
             return "I'm listening! Tell me what movie or show you want to track."
         else:
-            return "I'm here to help! Ask me about your monitored shows or tell me what title you're waiting for."
+            return f"*Sigh* I'm here. Ask me about your monitored shows, or tell me what title you're waiting for.{holiday_str}"
+
 

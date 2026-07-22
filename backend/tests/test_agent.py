@@ -202,4 +202,58 @@ def test_agent_http_routes(repo, monkeypatch):
     assert res.json() == {"status": "cleared"}
 
 
+def test_persistent_query_memory_repository(repo):
+    user_id = "test_user_mem"
+    repo.add_query_memory(user_id, "what about Succession", tmdb_id=99, media_type="tv", title="Succession")
+    repo.add_query_memory(user_id, "tell me about Avatar 3", title="Avatar 3")
+
+    mems = repo.list_query_memories(user_id)
+    assert len(mems) == 2
+    titles = [m["title"] for m in mems]
+    assert "Succession" in titles
+    assert "Avatar 3" in titles
+
+    removed = repo.remove_query_memory(user_id, "Succession")
+    assert removed is True
+    mems_after = repo.list_query_memories(user_id)
+    assert len(mems_after) == 1
+    assert mems_after[0]["title"] == "Avatar 3"
+
+
+@pytest.mark.asyncio
+async def test_auto_monitoring_intent_extraction(repo):
+    user_id = "test_user_auto_intent"
+    # "add succession to my monitor list"
+    title, price = AiAgentService._extract_title_and_price("add succession to my monitor list")
+    assert title and title.lower() == "succession"
+
+    # "waiting for Severance"
+    title2, price2 = AiAgentService._extract_title_and_price("waiting for Severance")
+    assert title2 and title2.lower() == "severance"
+
+
+@pytest.mark.asyncio
+async def test_persistent_query_memory_briefing_recall(repo):
+    from datetime import date, timedelta
+    user_id = "test_user_mem_recall"
+    today = date.today()
+    in_2_days = (today + timedelta(days=2)).isoformat()
+
+    # User asked about "What Dreams May Come" 20 days ago
+    repo.add_query_memory(user_id, "any update on What Dreams May Come", title="What Dreams May Come")
+
+    # Mock tmdb search to return release date in 2 days
+    class DummyTmdb:
+        async def get_details(self, media_type, tmdb_id):
+            return {"release_date": in_2_days}
+        async def search(self, title):
+            return [{"title": title, "release_date": in_2_days, "media_type": "movie", "id": 777}]
+
+    briefing = await AiAgentService.evaluate_monitored_updates(user_id, repo, DummyTmdb())
+    assert briefing["enabled"] is True
+    messages = [u["message"] for u in briefing["updates"]]
+    assert any("MEMORY RECALL" in msg and "What Dreams May Come" in msg for msg in messages)
+
+
+
 
