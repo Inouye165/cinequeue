@@ -15,4 +15,3 @@ start "Cinequeue Frontend" cmd /k "cd /d "%ROOT_DIR%frontend" && npm run dev"
 echo ========================================================
 echo Both servers launching. Close individual windows to stop.
 echo ========================================================
-

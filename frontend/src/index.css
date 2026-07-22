@@ -1143,8 +1143,17 @@ a {
 /* ==========================================================================
    Avatar Dropdown Menu & User Bar Styles
    ========================================================================== */
+.user-profile-bar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 16px;
+  position: relative;
+  z-index: 1000;
+}
+
 .user-info-dropdown-container {
   position: relative;
+  z-index: 1000;
 }
 
 .avatar-dropdown-trigger {
@@ -1181,7 +1190,7 @@ a {
   border-radius: 12px;
   padding: 8px;
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
-  z-index: 100;
+  z-index: 1000;
   animation: fadeIn 0.15s ease-out;
 }
 
@@ -1224,19 +1233,22 @@ a {
 }
 
 /* ==========================================================================
-   Agent Login Briefing Banner
+   Agent Login Briefing Banner / Card Widget
    ========================================================================== */
+.agent-briefing-card,
 .agent-briefing-banner {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  background: linear-gradient(135deg, rgba(99, 102, 241, 0.15), rgba(168, 85, 247, 0.15));
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.12), rgba(168, 85, 247, 0.12));
   border: 1px solid rgba(168, 85, 247, 0.3);
   border-radius: 14px;
-  padding: 16px 20px;
+  padding: 18px 24px;
   margin-bottom: 24px;
   backdrop-filter: blur(8px);
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+  position: relative;
+  z-index: 1;
 }
 
 .briefing-left {

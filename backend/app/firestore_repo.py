@@ -49,6 +49,7 @@ class FirestoreWatchlistRepository(WatchlistRepository):
             d.setdefault("watch_free_streaming", False)
             d.setdefault("watch_on_sale_buy", False)
             d.setdefault("target_rental_price", None)
+            d.setdefault("user_rating", 0)
             res.append(d)
         return res
 
@@ -66,6 +67,7 @@ class FirestoreWatchlistRepository(WatchlistRepository):
         watch_free_streaming: bool = False,
         watch_on_sale_buy: bool = False,
         target_rental_price: float | None = None,
+        user_rating: int = 0,
     ) -> dict[str, Any]:
         doc_id = _doc_id(media_type, tmdb_id)
         col = self._user_watchlist_col(user_id)
@@ -89,6 +91,7 @@ class FirestoreWatchlistRepository(WatchlistRepository):
             "watch_free_streaming": watch_free_streaming,
             "watch_on_sale_buy": watch_on_sale_buy,
             "target_rental_price": target_rental_price,
+            "user_rating": user_rating,
         }
         doc_ref.set(data)
         return data
@@ -104,6 +107,7 @@ class FirestoreWatchlistRepository(WatchlistRepository):
         watch_free_streaming: bool | None = None,
         watch_on_sale_buy: bool | None = None,
         target_rental_price: float | None = None,
+        user_rating: int | None = None,
     ) -> dict[str, Any] | None:
         doc_id = _doc_id(media_type, tmdb_id)
         col = self._user_watchlist_col(user_id)
@@ -127,6 +131,8 @@ class FirestoreWatchlistRepository(WatchlistRepository):
             data["watch_on_sale_buy"] = watch_on_sale_buy
         if target_rental_price is not None:
             data["target_rental_price"] = target_rental_price
+        if user_rating is not None:
+            data["user_rating"] = user_rating
 
         doc_ref.update(data)
         updated = snapshot.to_dict()
@@ -137,6 +143,7 @@ class FirestoreWatchlistRepository(WatchlistRepository):
         updated.setdefault("watch_free_streaming", False)
         updated.setdefault("watch_on_sale_buy", False)
         updated.setdefault("target_rental_price", None)
+        updated.setdefault("user_rating", 0)
         return updated
 
 
@@ -322,6 +329,7 @@ class FirestoreWatchlistRepository(WatchlistRepository):
                 "notify_on_login": True,
                 "auto_add_mentioned": True,
                 "track_price_drops": True,
+                "auto_speak_briefing": False,
                 "updated_at": self.utc_now_iso(),
             }
         d = doc.to_dict() or {}
@@ -332,6 +340,7 @@ class FirestoreWatchlistRepository(WatchlistRepository):
         d.setdefault("notify_on_login", True)
         d.setdefault("auto_add_mentioned", True)
         d.setdefault("track_price_drops", True)
+        d.setdefault("auto_speak_briefing", False)
         return d
 
     def save_agent_settings(self, user_id: str, settings: dict[str, Any]) -> dict[str, Any]:
@@ -345,6 +354,7 @@ class FirestoreWatchlistRepository(WatchlistRepository):
             "notify_on_login": bool(settings.get("notify_on_login", True)),
             "auto_add_mentioned": bool(settings.get("auto_add_mentioned", True)),
             "track_price_drops": bool(settings.get("track_price_drops", True)),
+            "auto_speak_briefing": bool(settings.get("auto_speak_briefing", False)),
             "updated_at": now,
         }
         doc_ref.set(data, merge=True)

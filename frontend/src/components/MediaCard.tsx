@@ -1,10 +1,13 @@
 import type { MediaItem, WatchlistItem } from "../types";
+import { StarRating } from "./StarRating";
 
 interface Props {
   item: MediaItem;
   onOpen: (item: MediaItem) => void;
   onAdd?: (item: MediaItem) => void;
   onRemove?: (item: MediaItem) => void;
+  onRate?: (item: MediaItem, rating: number) => void;
+  userRating?: number | null;
   isOnWatchlist?: boolean;
   isOnQueue?: boolean;
   isFollowing?: boolean;
@@ -26,6 +29,8 @@ export function MediaCard({
   onOpen,
   onAdd,
   onRemove,
+  onRate,
+  userRating,
   isOnQueue,
   isFollowing,
   isOwned,
@@ -103,6 +108,14 @@ export function MediaCard({
           {item.vote_average ? <span className="rating">★ {item.vote_average.toFixed(1)}</span> : null}
         </div>
         {item.overview ? <p>{item.overview.slice(0, 110)}{item.overview.length > 110 ? "…" : ""}</p> : null}
+        <div className="card-user-rating" style={{ margin: "8px 0", display: "flex", alignItems: "center", gap: "8px" }}>
+          <span style={{ fontSize: "0.8rem", color: "var(--text-muted)", fontWeight: 500 }}>Your Rating:</span>
+          <StarRating
+            rating={watchItem.user_rating !== undefined ? watchItem.user_rating : userRating}
+            onRate={(rating) => onRate?.(item, rating)}
+            size="sm"
+          />
+        </div>
         <div className="card-actions">
           <button className="pill-button" onClick={() => onOpen(item)}>
             Details

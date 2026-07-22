@@ -35,6 +35,7 @@ export function AgentModal({ isOpen, onClose, onWatchlistUpdated, initialTab = "
   const [settings, setSettings] = useState<AgentSettings>({
     personality_preset: "cinephile",
     custom_prompt: "",
+    location: "",
     notify_on_login: true,
     auto_add_mentioned: true,
     track_price_drops: true,
@@ -125,10 +126,11 @@ export function AgentModal({ isOpen, onClose, onWatchlistUpdated, initialTab = "
     }
   };
 
-  const handleSaveSettings = async () => {
+  const handleSaveSettings = async (settingsToSave?: AgentSettings) => {
+    const payload = settingsToSave && "personality_preset" in settingsToSave ? settingsToSave : settings;
     setSavingSettings(true);
     try {
-      const updated = await api.saveAgentSettings(settings);
+      const updated = await api.saveAgentSettings(payload);
       setSettings(updated);
       setSettingsSavedToast(true);
       setTimeout(() => setSettingsSavedToast(false), 3000);
@@ -303,6 +305,13 @@ export function AgentModal({ isOpen, onClose, onWatchlistUpdated, initialTab = "
                   placeholder="e.g., New York, NY or 10001"
                   value={settings.location || ""}
                   onChange={(e) => setSettings((prev) => ({ ...prev, location: e.target.value }))}
+                  onBlur={() => void handleSaveSettings()}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      void handleSaveSettings();
+                    }
+                  }}
                   style={{
                     width: "100%",
                     background: "rgba(0, 0, 0, 0.2)",
@@ -360,7 +369,7 @@ export function AgentModal({ isOpen, onClose, onWatchlistUpdated, initialTab = "
 
               <div className="settings-actions">
                 {settingsSavedToast ? <span className="saved-toast">✓ Settings saved!</span> : <span />}
-                <button className="save-settings-btn" onClick={handleSaveSettings} disabled={savingSettings}>
+                <button className="save-settings-btn" onClick={() => void handleSaveSettings()} disabled={savingSettings}>
                   {savingSettings ? "Saving…" : "Save Agent Settings"}
                 </button>
               </div>

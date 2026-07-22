@@ -174,6 +174,15 @@ async def add_to_watchlist(request: Request, body: dict[str, Any], current_user:
     status = body.get("status", "queue")
     watch_free_streaming = body.get("watch_free_streaming", False)
     watch_on_sale_buy = body.get("watch_on_sale_buy", False)
+    user_rating = body.get("user_rating", None)
+
+    if user_rating is not None:
+        try:
+            user_rating = int(user_rating)
+            if not (1 <= user_rating <= 5):
+                raise ValueError()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="user_rating must be an integer between 1 and 5")
 
     if is_owned and owned_format not in {"electronic", "cloud", "hard_copy"}:
         raise HTTPException(status_code=400, detail="Invalid owned_format. Must be 'electronic', 'cloud', or 'hard_copy'")
@@ -195,6 +204,7 @@ async def add_to_watchlist(request: Request, body: dict[str, Any], current_user:
             status=status,
             watch_free_streaming=watch_free_streaming,
             watch_on_sale_buy=watch_on_sale_buy,
+            user_rating=user_rating,
         )
 
         days = days_until(release_date)
@@ -212,6 +222,7 @@ async def add_to_watchlist(request: Request, body: dict[str, Any], current_user:
             "status": added.get("status", "queue"),
             "watch_free_streaming": added.get("watch_free_streaming", False),
             "watch_on_sale_buy": added.get("watch_on_sale_buy", False),
+            "user_rating": added.get("user_rating"),
         }
     except DuplicateItemError:
         logger.warning(f"Item already on watchlist: {media_type}/{tmdb_id}")
@@ -241,9 +252,18 @@ async def update_watchlist_item(
     status = body.get("status")
     watch_free_streaming = body.get("watch_free_streaming")
     watch_on_sale_buy = body.get("watch_on_sale_buy")
+    user_rating = body.get("user_rating")
 
-    if is_owned is None and status is None and watch_free_streaming is None and watch_on_sale_buy is None:
+    if is_owned is None and status is None and watch_free_streaming is None and watch_on_sale_buy is None and user_rating is None:
         raise HTTPException(status_code=400, detail="At least one field to update is required")
+
+    if user_rating is not None:
+        try:
+            user_rating = int(user_rating)
+            if not (0 <= user_rating <= 5):
+                raise ValueError()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="user_rating must be an integer between 0 and 5")
 
     if is_owned is not None and is_owned and owned_format not in {"electronic", "cloud", "hard_copy"}:
         raise HTTPException(status_code=400, detail="Invalid owned_format. Must be 'electronic', 'cloud', or 'hard_copy'")
@@ -262,6 +282,7 @@ async def update_watchlist_item(
             status=status,
             watch_free_streaming=watch_free_streaming,
             watch_on_sale_buy=watch_on_sale_buy,
+            user_rating=user_rating,
         )
         if not updated:
             logger.warning(f"Item not found for update: {media_type}/{tmdb_id}")
@@ -275,6 +296,7 @@ async def update_watchlist_item(
             "status_value": updated.get("status", "queue"),
             "watch_free_streaming": updated.get("watch_free_streaming", False),
             "watch_on_sale_buy": updated.get("watch_on_sale_buy", False),
+            "user_rating": updated.get("user_rating"),
         }
     except HTTPException:
         raise

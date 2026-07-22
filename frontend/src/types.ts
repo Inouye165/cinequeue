@@ -36,6 +36,7 @@ export interface MediaItem {
   vote_count?: number;
   popularity?: number;
   next_season?: NextSeasonInfo | null;
+  user_rating?: number | null;
 }
 
 export interface WatchlistItem extends MediaItem {

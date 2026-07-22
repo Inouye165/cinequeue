@@ -275,7 +275,8 @@ export const api = {
     ownedFormat?: string | null,
     status?: string,
     watchFreeStreaming?: boolean,
-    watchOnSaleBuy?: boolean
+    watchOnSaleBuy?: boolean,
+    userRating?: number | null
   ) =>
     request<{
       status: string;
@@ -284,6 +285,7 @@ export const api = {
       status_value?: string;
       watch_free_streaming?: boolean;
       watch_on_sale_buy?: boolean;
+      user_rating?: number | null;
     }>(`/api/watchlist/${mediaType}/${tmdbId}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
@@ -293,6 +295,7 @@ export const api = {
         status,
         watch_free_streaming: watchFreeStreaming,
         watch_on_sale_buy: watchOnSaleBuy,
+        user_rating: userRating,
       }),
     }),
   removeFromWatchlist: (mediaType: string, tmdbId: number) =>

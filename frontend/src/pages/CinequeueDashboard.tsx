@@ -245,6 +245,44 @@ export function CinequeueDashboard() {
     }
   };
 
+  const handleUpdateRating = async (item: MediaItem, rating: number) => {
+    const tmdbId = "tmdb_id" in item ? (item as WatchlistItem).tmdb_id : item.id;
+    const key = `${item.media_type}:${tmdbId}`;
+    const exists = watchlist.some((i) => `${i.media_type}:${i.tmdb_id ?? i.id}` === key);
+
+    try {
+      if (exists) {
+        await api.updateWatchlistItem(
+          item.media_type,
+          tmdbId,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          rating
+        );
+      } else {
+        await api.addToWatchlist({
+          media_type: item.media_type,
+          tmdb_id: tmdbId,
+          title: item.title,
+          poster_path: item.poster_url?.replace("https://image.tmdb.org/t/p/w342", "") ?? undefined,
+          release_date: item.release_date ?? undefined,
+          user_rating: rating,
+          status: "queue",
+        });
+      }
+      const updatedList = await loadWatchlist();
+      if (selected && selected.id === tmdbId) {
+        const updatedItem = updatedList.find((i) => `${i.media_type}:${i.tmdb_id ?? i.id}` === key);
+        setSelected((prev) => (prev ? { ...prev, user_rating: updatedItem?.user_rating ?? rating } : null));
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not save rating");
+    }
+  };
+
   const localItems = useMemo(() => {
     if (tab === "watchlist") {
       const queueItems = watchlist.filter((item) => {
@@ -381,7 +419,8 @@ export function CinequeueDashboard() {
             const isOwned = libraryKeys.has(key);
             const isOnQueue = queueKeys.has(key);
             const isFollowing = followingKeys.has(key);
-            const ownedFormat = watchlist.find((i) => `${i.media_type}:${i.tmdb_id ?? i.id}` === key)?.owned_format || null;
+            const watchItem = watchlist.find((i) => `${i.media_type}:${i.tmdb_id ?? i.id}` === key);
+            const ownedFormat = watchItem?.owned_format || null;
             return (
               <MediaCard
                 key={key}
@@ -389,6 +428,8 @@ export function CinequeueDashboard() {
                 onOpen={openDetails}
                 onAdd={addToWatchlist}
                 onRemove={removeFromWatchlist}
+                onRate={handleUpdateRating}
+                userRating={watchItem?.user_rating}
                 isOnWatchlist={isOnQueue || isFollowing}
                 isOnQueue={isOnQueue}
                 isFollowing={isFollowing}
@@ -425,9 +466,11 @@ export function CinequeueDashboard() {
               ownedFormat={watchItem?.owned_format || null}
               watchFreeStreaming={watchItem?.watch_free_streaming || false}
               watchOnSaleBuy={watchItem?.watch_on_sale_buy || false}
+              userRating={watchItem?.user_rating}
               onClose={() => setSelected(null)}
               onAdd={() => void addToWatchlist(selected)}
               onRemove={() => void removeFromWatchlist(selected)}
+              onRate={(rating) => void handleUpdateRating(selected, rating)}
               onUpdateOwned={handleUpdateOwned}
               onMoveToFollowing={() => void moveToFollowing(selected)}
               onMoveToQueue={() => void moveToQueue(selected)}

@@ -8,7 +8,6 @@ interface AgentLoginBriefingProps {
 
 export function AgentLoginBriefing({ onOpenChat }: AgentLoginBriefingProps) {
   const [briefing, setBriefing] = useState<AgentBriefing | null>(null);
-  const [dismissed, setDismissed] = useState(false);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -39,7 +38,7 @@ export function AgentLoginBriefing({ onOpenChat }: AgentLoginBriefingProps) {
     };
   }, []);
 
-  if (loading || !briefing || dismissed || !briefing.briefing) {
+  if (loading || !briefing || !briefing.briefing) {
     return null;
   }
 
@@ -54,12 +53,14 @@ export function AgentLoginBriefing({ onOpenChat }: AgentLoginBriefingProps) {
   const label = presetLabels[briefing.personality_preset || "cinephile"] || "🤖 Agent Briefing";
 
   return (
-    <div className="agent-briefing-banner">
+    <section className="agent-briefing-card" aria-label="AI Agent Greeting Briefing">
       <div className="briefing-left">
         <div className="briefing-header">
           <span className="briefing-tag">{label}</span>
           {briefing.updates_count ? (
-            <span className="updates-count-badge">{briefing.updates_count} update{briefing.updates_count > 1 ? "s" : ""}</span>
+            <span className="updates-count-badge">
+              {briefing.updates_count} update{briefing.updates_count > 1 ? "s" : ""}
+            </span>
           ) : null}
         </div>
         <p className="briefing-text">{briefing.briefing}</p>
@@ -69,10 +70,7 @@ export function AgentLoginBriefing({ onOpenChat }: AgentLoginBriefingProps) {
         <button className="chat-briefing-btn" onClick={onOpenChat}>
           💬 Chat with AI
         </button>
-        <button className="dismiss-briefing-btn" onClick={() => setDismissed(true)} title="Dismiss">
-          &times;
-        </button>
       </div>
-    </div>
+    </section>
   );
 }

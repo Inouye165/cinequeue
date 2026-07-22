@@ -528,6 +528,30 @@ class AiAgentService:
         if holiday_remark:
             holiday_ctx = f"\n[System Note: Context remark: {holiday_remark}]"
 
+        # User Ratings context for recommendations
+        rated_items = [i for i in items if i.get("user_rating")]
+        top_rated_items = [i for i in rated_items if (i.get("user_rating") or 0) >= 4]
+
+        # Check if user is asking for a movie/show recommendation
+        recommend_keywords = ["recommend", "suggest", "what to watch", "what should i watch", "movie idea", "show idea", "something like"]
+        is_rec_query = any(k in msg_lower for k in recommend_keywords)
+        
+        rating_rec_note = ""
+        if is_rec_query and top_rated_items and tmdb:
+            try:
+                import random
+                sample_top = random.choice(top_rated_items)
+                t_type = sample_top.get("media_type", "movie")
+                t_id = sample_top.get("tmdb_id")
+                if t_id:
+                    recs = await tmdb.get_recommendations(t_type, t_id)
+                    if recs:
+                        r_title = recs[0].get("title")
+                        r_overview = recs[0].get("overview", "")
+                        rating_rec_note = f"\n[System Note: Recommendation Request: The user asked for a recommendation. User loved '{sample_top['title']}' (rated {sample_top['user_rating']}/5 stars). Suggest '{r_title}' which is similar, mentioning why they might like it: {r_overview[:120]}...]"
+            except Exception as e:
+                logger.warning(f"Error generating recommendation from ratings: {e}")
+
         location = settings.get("location", "").strip()
         weather_report = await WeatherService.get_weather_report(location) if location else None
         system_prompt = get_system_prompt(settings, weather_report)
@@ -536,18 +560,23 @@ class AiAgentService:
             actions_list = [f"Added/Updated '{a['title']}' to monitoring" + (f" with target rental price ${a['target_rental_price']:.2f}" if a.get("target_rental_price") else "") for a in actions_taken]
             actions_str = f"\n[System Note: Automated action executed on user behalf: {', '.join(actions_list)}]"
 
-        full_prompt = f"User message: {user_message}{actions_str}{title_context_note}{recommendation_note}{holiday_ctx}"
+        full_prompt = f"User message: {user_message}{actions_str}{title_context_note}{recommendation_note}{rating_rec_note}{holiday_ctx}"
 
         agent_reply = None
         if GEMINI_API_KEY:
             try:
-                monitored_summary = "\n".join([f"- {i['title']} ({i['media_type']}, status: {i['status']}" + (f", target price: ${i['target_rental_price']}" if i.get("target_rental_price") else "") + ")" for i in monitored[:10]])
+                monitored_summary = "\n".join([f"- {i['title']} ({i['media_type']}, status: {i['status']}" + (f", target price: ${i['target_rental_price']}" if i.get("target_rental_price") else "") + (f", user rating: {i['user_rating']}/5 stars" if i.get("user_rating") else "") + ")" for i in monitored[:10]])
                 if not monitored_summary:
                     monitored_summary = "None currently monitored."
+
+                rated_summary = "\n".join([f"- {i['title']} (Rated {i['user_rating']}/5 stars)" for i in rated_items[:10]])
+                if not rated_summary:
+                    rated_summary = "No ratings provided by user yet."
 
                 chat_context = (
                     f"{system_prompt}\n\n"
                     f"User's Monitored Watchlist Context:\n{monitored_summary}\n\n"
+                    f"User's Saved Ratings:\n{rated_summary}\n\n"
                     f"Recent Conversation:\n"
                 )
                 for m in history[-6:]:
@@ -759,6 +788,20 @@ class AiAgentService:
                 return f"I checked for '{title_query}' but couldn't find anything matching that title. Double check the spelling?"
             else:
                 return f"I searched for '{title_query}' in your queue and on TMDB, but couldn't find any exact matches. Double check the spelling?"
+
+        # Recommendation query
+        if any(w in msg_lower for w in ["recommend", "suggest", "what to watch", "what should i watch", "movie idea"]):
+            rated_items = [i for i in items if i.get("user_rating")]
+            top_rated = [i for i in rated_items if (i.get("user_rating") or 0) >= 4]
+            if top_rated and tmdb:
+                top_item = top_rated[0]
+                try:
+                    recs = await tmdb.get_recommendations(top_item.get("media_type", "movie"), top_item["tmdb_id"])
+                    if recs:
+                        r_title = recs[0]["title"]
+                        return f"Based on your {top_item['user_rating']}-star rating for '{top_item['title']}', I highly recommend checking out '{r_title}'!"
+                except Exception:
+                    pass
 
         # General updates query
         if any(w in msg_lower for w in ["all updates", "my updates", "monitored shows", "what updates", "show list", "my queue", "my list", "update", "updates", "monitored", "following", "monitoring", "upcoming"]):

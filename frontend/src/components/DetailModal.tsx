@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { MediaDetails, Trailer } from "../types";
+import { StarRating } from "./StarRating";
 
 interface Props {
   details: MediaDetails;
@@ -9,9 +10,11 @@ interface Props {
   ownedFormat: "electronic" | "cloud" | "hard_copy" | null;
   watchFreeStreaming: boolean;
   watchOnSaleBuy: boolean;
+  userRating?: number | null;
   onClose: () => void;
   onAdd: () => void;
   onRemove: () => void;
+  onRate?: (rating: number) => void;
   onUpdateOwned: (item: MediaDetails, isOwned: boolean, format?: "electronic" | "cloud" | "hard_copy") => void;
   onMoveToFollowing: () => void;
   onMoveToQueue: () => void;
@@ -79,9 +82,11 @@ export function DetailModal({
   ownedFormat,
   watchFreeStreaming,
   watchOnSaleBuy,
+  userRating,
   onClose,
   onAdd,
   onRemove,
+  onRate,
   onUpdateOwned,
   onMoveToFollowing,
   onMoveToQueue,
@@ -164,6 +169,15 @@ export function DetailModal({
                     {genre}
                   </span>
                 ))}
+              </div>
+
+              <div className="detail-rating-row" style={{ marginTop: 14, display: "flex", alignItems: "center", gap: 10 }}>
+                <span style={{ fontSize: "0.9rem", color: "var(--text-muted)", fontWeight: 600 }}>Your Rating:</span>
+                <StarRating
+                  rating={details.user_rating !== undefined ? details.user_rating : userRating}
+                  onRate={onRate}
+                  size="md"
+                />
               </div>
               
               <div className="detail-owned-section">

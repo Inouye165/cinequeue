@@ -36,6 +36,7 @@ class WatchlistRepository(ABC):
         watch_free_streaming: bool = False,
         watch_on_sale_buy: bool = False,
         target_rental_price: float | None = None,
+        user_rating: int = 0,
     ) -> dict[str, Any]:
         """Add an item to the watchlist.
 
@@ -56,6 +57,7 @@ class WatchlistRepository(ABC):
         watch_free_streaming: bool | None = None,
         watch_on_sale_buy: bool | None = None,
         target_rental_price: float | None = None,
+        user_rating: int | None = None,
     ) -> dict[str, Any] | None:
         """Update an item's owned status, format, status, watch alert preferences, or target rental price.
 
