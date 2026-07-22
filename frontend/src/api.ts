@@ -133,8 +133,17 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
         durationMs: performance.now() - requestStartTime,
       });
     }
-    throw new Error(error.detail || "Request failed");
+    const detailMsg =
+      typeof error.detail === "string"
+        ? error.detail
+        : Array.isArray(error.detail)
+        ? error.detail.map((d: any) => d.msg || JSON.stringify(d)).join(", ")
+        : error.detail
+        ? JSON.stringify(error.detail)
+        : "Request failed";
+    throw new Error(detailMsg);
   }
+
 
   const data = await response.json();
   if (isAdminMe) {
@@ -290,4 +299,26 @@ export const api = {
     request<{ status: string }>(`/api/watchlist/${mediaType}/${tmdbId}`, {
       method: "DELETE",
     }),
+
+  // AI Agent Endpoints
+  agentBriefing: () => request<import("./types").AgentBriefing>("/api/agent/briefing"),
+  agentSettings: () => request<import("./types").AgentSettings>("/api/agent/settings"),
+  saveAgentSettings: (settings: Partial<import("./types").AgentSettings>) =>
+    request<import("./types").AgentSettings>("/api/agent/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(settings),
+    }),
+  agentChatHistory: () => request<import("./types").ChatMessage[]>("/api/agent/chat"),
+  sendAgentChatMessage: (message: string) =>
+    request<{ message: import("./types").ChatMessage; actions_taken: import("./types").ChatAction[] }>("/api/agent/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message }),
+    }),
+  clearAgentChatHistory: () =>
+    request<{ status: string }>("/api/agent/chat", {
+      method: "DELETE",
+    }),
 };
+

@@ -18,7 +18,7 @@ from app.config import (
     PUBLIC_AUTH_DOMAIN,
 )
 from app.logging_config import setup_logging
-from app.routers import movies, watchlist, auth, admin
+from app.routers import movies, watchlist, auth, admin, agent
 from app.services.tmdb import TmdbClient
 
 setup_logging()
@@ -122,6 +122,7 @@ async def add_security_headers(request, call_next):
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
         response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+        response.headers["Cross-Origin-Opener-Policy"] = "same-origin-allow-popups"
         
         csp = (
             "default-src 'self'; "
@@ -153,6 +154,7 @@ async def check_tmdb_key(request, call_next):
     if (
         request.url.path.startswith("/api")
         and not request.url.path.startswith("/api/auth")
+        and not request.url.path.startswith("/api/agent")
         and request.url.path != "/api/health"
     ):
         if not app.state.tmdb:
@@ -279,8 +281,10 @@ async def firebase_auth_proxy(path: str, request: Request):
 
 app.include_router(auth.router)
 app.include_router(admin.router)
-app.include_router(movies.router)
+app.include_router(agent.router)
 app.include_router(watchlist.router)
+app.include_router(movies.router)
+
 
 
 if FRONTEND_DIST.exists():

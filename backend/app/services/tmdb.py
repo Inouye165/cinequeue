@@ -94,7 +94,21 @@ class TmdbClient:
             "seasons": data.get("seasons") if media_type == "tv" else None,
         }
 
+    async def get_recommendations(self, media_type: str, tmdb_id: int) -> list[dict[str, Any]]:
+        """Fetch recommended/similar titles for a given movie or show."""
+        try:
+            data = await self._get(f"/{media_type}/{tmdb_id}/recommendations")
+            results = data.get("results", [])
+            if not results:
+                data = await self._get(f"/{media_type}/{tmdb_id}/similar")
+                results = data.get("results", [])
+            return [enrich_media_item(item, media_type) for item in results[:5]]
+        except Exception as e:
+            logger.warning(f"Error fetching recommendations for {media_type}/{tmdb_id}: {e}")
+            return []
+
     def get_next_season(self, seasons: list[dict[str, Any]]) -> dict[str, Any] | None:
+
         if not seasons:
             return None
         valid_seasons = [

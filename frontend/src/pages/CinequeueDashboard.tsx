@@ -1,11 +1,15 @@
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../api";
+import { AgentLoginBriefing } from "../components/AgentLoginBriefing";
+import { AgentModal } from "../components/AgentModal";
 import { DetailModal } from "../components/DetailModal";
 import { MediaCard } from "../components/MediaCard";
 import { SearchHeader } from "../components/SearchHeader";
 import { Tabs, TabType } from "../components/Tabs";
 import { useAuth } from "../context/AuthContext";
 import type { MediaDetails, MediaItem, WatchlistItem } from "../types";
+
+
 
 const TABS: { id: TabType; label: string }[] = [
   { id: "watchlist", label: "My Queue" },
@@ -284,6 +288,16 @@ export function CinequeueDashboard() {
     return [];
   }, [watchlist, tab]);
 
+  const [showAvatarMenu, setShowAvatarMenu] = useState(false);
+  const [agentModalOpen, setAgentModalOpen] = useState(false);
+  const [agentModalTab, setAgentModalTab] = useState<"chat" | "settings">("chat");
+
+  const openAgentModal = (tab: "chat" | "settings" = "chat") => {
+    setAgentModalTab(tab);
+    setAgentModalOpen(true);
+    setShowAvatarMenu(false);
+  };
+
   const isLocalTab = ["watchlist", "following", "library"].includes(tab);
   const items = isLocalTab ? localItems : remoteItems;
 
@@ -297,27 +311,64 @@ export function CinequeueDashboard() {
   return (
     <div className="app-shell">
       <div className="user-profile-bar">
-        <div className="user-info">
-          {user.photo_url ? (
-            <img src={user.photo_url} alt={user.display_name || user.email} className="user-avatar" />
-          ) : (
-            <div className="user-avatar-fallback">
-              {(user.display_name || user.email)[0].toUpperCase()}
+        <div className="user-info-dropdown-container">
+          <button
+            className="avatar-dropdown-trigger"
+            onClick={() => setShowAvatarMenu((prev) => !prev)}
+            aria-label="User Account and AI Agent Menu"
+          >
+            {user.photo_url ? (
+              <img src={user.photo_url} alt={user.display_name || user.email} className="user-avatar" />
+            ) : (
+              <div className="user-avatar-fallback">
+                {(user.display_name || user.email)[0].toUpperCase()}
+              </div>
+            )}
+            <div className="user-details">
+              <span className="user-name">{user.display_name || user.email}</span>
+              <span className="user-email">{user.email}</span>
             </div>
-          )}
-          <div className="user-details">
-            <span className="user-name">{user.display_name || user.email}</span>
-            <span className="user-email">{user.email}</span>
-          </div>
+            <span className="dropdown-caret">▼</span>
+          </button>
+
+          {showAvatarMenu ? (
+            <div className="avatar-dropdown-menu">
+              <button
+                className="dropdown-menu-item"
+                onClick={() => openAgentModal("chat")}
+              >
+                <span className="menu-item-icon">💬</span> Chat with AI Agent
+              </button>
+              <button
+                className="dropdown-menu-item"
+                onClick={() => openAgentModal("settings")}
+              >
+                <span className="menu-item-icon">⚙️</span> AI Personality & Settings
+              </button>
+              <hr className="dropdown-divider" />
+              <button className="dropdown-menu-item logout-item" onClick={logout}>
+                <span className="menu-item-icon">🚪</span> Sign Out
+              </button>
+            </div>
+          ) : null}
         </div>
-        <button className="logout-btn" onClick={logout}>Sign Out</button>
       </div>
+
+      <AgentLoginBriefing onOpenChat={() => openAgentModal("chat")} />
 
       <SearchHeader query={query} setQuery={setQuery} onSubmit={handleSearch} />
 
       {error ? <div className="error-banner">{error}</div> : null}
 
       <Tabs tabsList={TABS} activeTab={tab} onChangeTab={setTab} />
+
+      <AgentModal
+        isOpen={agentModalOpen}
+        initialTab={agentModalTab}
+        onClose={() => setAgentModalOpen(false)}
+        onWatchlistUpdated={() => void loadWatchlist()}
+      />
+
 
       <h2 className="section-title">{sectionTitle}</h2>
 

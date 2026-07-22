@@ -47,11 +47,57 @@ export interface WatchlistItem extends MediaItem {
   owned_format?: "electronic" | "cloud" | "hard_copy" | null;
   watch_free_streaming?: boolean;
   watch_on_sale_buy?: boolean;
+  target_rental_price?: number | null;
   is_free_streaming_alert?: boolean;
   is_on_sale_alert?: boolean;
   buy_original_price?: string | null;
   buy_current_price?: string | null;
 }
+
+export type PersonalityPreset = "cinephile" | "noir" | "scifi" | "sarcastic" | "custom";
+
+export interface AgentSettings {
+  user_id?: string;
+  personality_preset: PersonalityPreset;
+  custom_prompt?: string;
+  notify_on_login: boolean;
+  auto_add_mentioned: boolean;
+  track_price_drops: boolean;
+  updated_at?: string;
+}
+
+export interface ChatAction {
+  action: string;
+  title: string;
+  media_type?: string;
+  tmdb_id?: number;
+  target_rental_price?: number | null;
+}
+
+export interface ChatMessage {
+  id?: number | string;
+  user_id?: string;
+  role: "user" | "assistant" | "system";
+  content: string;
+  actions?: ChatAction[];
+  created_at?: string;
+}
+
+export interface AgentBriefingUpdate {
+  title: string;
+  type: string;
+  message: string;
+  item?: WatchlistItem;
+}
+
+export interface AgentBriefing {
+  enabled: boolean;
+  briefing: string | null;
+  updates_count?: number;
+  updates?: AgentBriefingUpdate[];
+  personality_preset?: string;
+}
+
 
 export interface Provider {
   name: string;

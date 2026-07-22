@@ -116,6 +116,50 @@ class SqliteWatchlistRepository(WatchlistRepository):
                 conn.execute("ALTER TABLE watchlist ADD COLUMN watch_on_sale_buy INTEGER DEFAULT 0")
             except sqlite3.OperationalError:
                 pass
+            try:
+                conn.execute("ALTER TABLE watchlist ADD COLUMN target_rental_price REAL")
+            except sqlite3.OperationalError:
+                pass
+
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS agent_settings (
+                    user_id TEXT PRIMARY KEY,
+                    personality_preset TEXT NOT NULL DEFAULT 'cinephile',
+                    custom_prompt TEXT,
+                    notify_on_login INTEGER DEFAULT 1,
+                    auto_add_mentioned INTEGER DEFAULT 1,
+                    track_price_drops INTEGER DEFAULT 1,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS agent_conversations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id TEXT NOT NULL,
+                    role TEXT NOT NULL CHECK(role IN ('user', 'assistant', 'system')),
+                    content TEXT NOT NULL,
+                    actions TEXT,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS agent_query_memory (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id TEXT NOT NULL,
+                    query_text TEXT NOT NULL,
+                    title TEXT,
+                    media_type TEXT,
+                    tmdb_id INTEGER,
+                    asked_at TEXT NOT NULL,
+                    UNIQUE(user_id, title)
+                )
+                """
+            )
 
     @contextmanager
     def _connection(self):
@@ -143,6 +187,7 @@ class SqliteWatchlistRepository(WatchlistRepository):
             d["status"] = d.get("status") or "queue"
             d["watch_free_streaming"] = bool(d.get("watch_free_streaming"))
             d["watch_on_sale_buy"] = bool(d.get("watch_on_sale_buy"))
+            d["target_rental_price"] = d.get("target_rental_price")
             items.append(d)
         return items
 
@@ -159,16 +204,17 @@ class SqliteWatchlistRepository(WatchlistRepository):
         status: str = "queue",
         watch_free_streaming: bool = False,
         watch_on_sale_buy: bool = False,
+        target_rental_price: float | None = None,
     ) -> dict[str, Any]:
         added_at = self.utc_now_iso()
         try:
             with self._connection() as conn:
                 conn.execute(
                     """
-                    INSERT INTO watchlist (user_id, media_type, tmdb_id, title, poster_path, release_date, added_at, is_owned, owned_format, status, watch_free_streaming, watch_on_sale_buy)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO watchlist (user_id, media_type, tmdb_id, title, poster_path, release_date, added_at, is_owned, owned_format, status, watch_free_streaming, watch_on_sale_buy, target_rental_price)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (user_id, media_type, tmdb_id, title, poster_path, release_date, added_at, 1 if is_owned else 0, owned_format, status, 1 if watch_free_streaming else 0, 1 if watch_on_sale_buy else 0),
+                    (user_id, media_type, tmdb_id, title, poster_path, release_date, added_at, 1 if is_owned else 0, owned_format, status, 1 if watch_free_streaming else 0, 1 if watch_on_sale_buy else 0, target_rental_price),
                 )
         except sqlite3.IntegrityError as exc:
             raise DuplicateItemError(
@@ -187,6 +233,7 @@ class SqliteWatchlistRepository(WatchlistRepository):
             "status": status,
             "watch_free_streaming": watch_free_streaming,
             "watch_on_sale_buy": watch_on_sale_buy,
+            "target_rental_price": target_rental_price,
         }
 
     def update_item(
@@ -199,6 +246,7 @@ class SqliteWatchlistRepository(WatchlistRepository):
         status: str | None = None,
         watch_free_streaming: bool | None = None,
         watch_on_sale_buy: bool | None = None,
+        target_rental_price: float | None = None,
     ) -> dict[str, Any] | None:
         with self._connection() as conn:
             # First check if item exists
@@ -216,14 +264,15 @@ class SqliteWatchlistRepository(WatchlistRepository):
             current_status = row["status"] if status is None else status
             current_watch_free = bool(row["watch_free_streaming"]) if watch_free_streaming is None else watch_free_streaming
             current_watch_sale = bool(row["watch_on_sale_buy"]) if watch_on_sale_buy is None else watch_on_sale_buy
+            current_target_price = row["target_rental_price"] if target_rental_price is None else target_rental_price
 
             conn.execute(
                 """
                 UPDATE watchlist
-                SET is_owned = ?, owned_format = ?, status = ?, watch_free_streaming = ?, watch_on_sale_buy = ?
+                SET is_owned = ?, owned_format = ?, status = ?, watch_free_streaming = ?, watch_on_sale_buy = ?, target_rental_price = ?
                 WHERE user_id = ? AND media_type = ? AND tmdb_id = ?
                 """,
-                (1 if current_is_owned else 0, current_owned_format, current_status, 1 if current_watch_free else 0, 1 if current_watch_sale else 0, user_id, media_type, tmdb_id),
+                (1 if current_is_owned else 0, current_owned_format, current_status, 1 if current_watch_free else 0, 1 if current_watch_sale else 0, current_target_price, user_id, media_type, tmdb_id),
             )
             
             # Fetch updated item
@@ -238,8 +287,10 @@ class SqliteWatchlistRepository(WatchlistRepository):
             d["status"] = d.get("status") or "queue"
             d["watch_free_streaming"] = bool(d.get("watch_free_streaming"))
             d["watch_on_sale_buy"] = bool(d.get("watch_on_sale_buy"))
+            d["target_rental_price"] = d.get("target_rental_price")
             return d
         return None
+
 
     def update_item_cache(
         self,
@@ -387,4 +438,173 @@ class SqliteWatchlistRepository(WatchlistRepository):
                 "SELECT * FROM login_logs ORDER BY timestamp DESC LIMIT ?", (limit,)
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def get_agent_settings(self, user_id: str) -> dict[str, Any]:
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM agent_settings WHERE user_id = ?", (user_id,)
+            ).fetchone()
+        if not row:
+            return {
+                "user_id": user_id,
+                "personality_preset": "cinephile",
+                "custom_prompt": "",
+                "notify_on_login": True,
+                "auto_add_mentioned": True,
+                "track_price_drops": True,
+                "updated_at": self.utc_now_iso(),
+            }
+        return {
+            "user_id": row["user_id"],
+            "personality_preset": row["personality_preset"],
+            "custom_prompt": row["custom_prompt"] or "",
+            "notify_on_login": bool(row["notify_on_login"]),
+            "auto_add_mentioned": bool(row["auto_add_mentioned"]),
+            "track_price_drops": bool(row["track_price_drops"]),
+            "updated_at": row["updated_at"],
+        }
+
+    def save_agent_settings(self, user_id: str, settings: dict[str, Any]) -> dict[str, Any]:
+        now = self.utc_now_iso()
+        preset = settings.get("personality_preset", "cinephile")
+        custom_prompt = settings.get("custom_prompt", "")
+        notify_on_login = 1 if settings.get("notify_on_login", True) else 0
+        auto_add_mentioned = 1 if settings.get("auto_add_mentioned", True) else 0
+        track_price_drops = 1 if settings.get("track_price_drops", True) else 0
+
+        with self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO agent_settings (user_id, personality_preset, custom_prompt, notify_on_login, auto_add_mentioned, track_price_drops, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    personality_preset = excluded.personality_preset,
+                    custom_prompt = excluded.custom_prompt,
+                    notify_on_login = excluded.notify_on_login,
+                    auto_add_mentioned = excluded.auto_add_mentioned,
+                    track_price_drops = excluded.track_price_drops,
+                    updated_at = excluded.updated_at
+                """,
+                (user_id, preset, custom_prompt, notify_on_login, auto_add_mentioned, track_price_drops, now),
+            )
+        return self.get_agent_settings(user_id)
+
+    def update_agent_last_login(self, user_id: str, timestamp: str) -> None:
+        now = self.utc_now_iso()
+        with self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO agent_settings (user_id, updated_at)
+                VALUES (?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    updated_at = excluded.updated_at
+                """,
+                (user_id, now),
+            )
+
+    def list_chat_messages(self, user_id: str, limit: int = 50) -> list[dict[str, Any]]:
+        with self._connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM agent_conversations
+                WHERE user_id = ?
+                ORDER BY created_at ASC
+                LIMIT ?
+                """,
+                (user_id, limit),
+            ).fetchall()
+        result = []
+        for r in rows:
+            d = dict(r)
+            if d.get("actions"):
+                try:
+                    d["actions"] = json.loads(d["actions"])
+                except Exception:
+                    d["actions"] = []
+            else:
+                d["actions"] = []
+            result.append(d)
+        return result
+
+    def add_chat_message(
+        self,
+        user_id: str,
+        role: str,
+        content: str,
+        actions: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        now = self.utc_now_iso()
+        actions_json = json.dumps(actions) if actions else None
+        with self._connection() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO agent_conversations (user_id, role, content, actions, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (user_id, role, content, actions_json, now),
+            )
+            msg_id = cursor.lastrowid
+        return {
+            "id": msg_id,
+            "user_id": user_id,
+            "role": role,
+            "content": content,
+            "actions": actions or [],
+            "created_at": now,
+        }
+
+    def clear_chat_messages(self, user_id: str) -> None:
+        with self._connection() as conn:
+            conn.execute("DELETE FROM agent_conversations WHERE user_id = ?", (user_id,))
+
+    def add_query_memory(
+        self,
+        user_id: str,
+        query_text: str,
+        tmdb_id: int | None = None,
+        media_type: str | None = None,
+        title: str | None = None,
+    ) -> dict[str, Any]:
+        now = self.utc_now_iso()
+        item_title = title or query_text
+        with self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO agent_query_memory (user_id, query_text, title, media_type, tmdb_id, asked_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id, title) DO UPDATE SET
+                    query_text = excluded.query_text,
+                    asked_at = excluded.asked_at,
+                    tmdb_id = COALESCE(excluded.tmdb_id, agent_query_memory.tmdb_id),
+                    media_type = COALESCE(excluded.media_type, agent_query_memory.media_type)
+                """,
+                (user_id, query_text, item_title, media_type, tmdb_id, now),
+            )
+            row = conn.execute(
+                "SELECT * FROM agent_query_memory WHERE user_id = ? AND title = ?",
+                (user_id, item_title),
+            ).fetchone()
+        return dict(row) if row else {"user_id": user_id, "title": item_title, "asked_at": now}
+
+    def list_query_memories(self, user_id: str, limit: int = 50) -> list[dict[str, Any]]:
+        with self._connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM agent_query_memory
+                WHERE user_id = ?
+                ORDER BY asked_at DESC
+                LIMIT ?
+                """,
+                (user_id, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def remove_query_memory(self, user_id: str, memory_id: Any) -> bool:
+        with self._connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM agent_query_memory WHERE user_id = ? AND (id = ? OR title = ?)",
+                (user_id, memory_id, str(memory_id)),
+            )
+            return cursor.rowcount > 0
+
 
