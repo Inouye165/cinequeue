@@ -246,3 +246,18 @@ class WatchlistRepository(ABC):
         """Save or cache briefing output for a session ID."""
         ...
 
+    @abstractmethod
+    def get_user_briefing_state(self, user_id: str) -> dict[str, Any]:
+        """Get previous_login_at and previous_briefing_presented_at reference timestamps."""
+        ...
+
+    @abstractmethod
+    def update_user_briefing_state(
+        self,
+        user_id: str,
+        login_at: str | None = None,
+        briefing_presented_at: str | None = None,
+    ) -> None:
+        """Update login or presented briefing reference timestamps for user."""
+        ...
+
