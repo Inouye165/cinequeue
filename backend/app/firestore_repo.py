@@ -318,6 +318,7 @@ class FirestoreWatchlistRepository(WatchlistRepository):
                 "user_id": user_id,
                 "personality_preset": "cinephile",
                 "custom_prompt": "",
+                "location": "",
                 "notify_on_login": True,
                 "auto_add_mentioned": True,
                 "track_price_drops": True,
@@ -327,6 +328,7 @@ class FirestoreWatchlistRepository(WatchlistRepository):
         d.setdefault("user_id", user_id)
         d.setdefault("personality_preset", "cinephile")
         d.setdefault("custom_prompt", "")
+        d.setdefault("location", "")
         d.setdefault("notify_on_login", True)
         d.setdefault("auto_add_mentioned", True)
         d.setdefault("track_price_drops", True)
@@ -339,6 +341,7 @@ class FirestoreWatchlistRepository(WatchlistRepository):
             "user_id": user_id,
             "personality_preset": settings.get("personality_preset", "cinephile"),
             "custom_prompt": settings.get("custom_prompt", ""),
+            "location": settings.get("location", "").strip(),
             "notify_on_login": bool(settings.get("notify_on_login", True)),
             "auto_add_mentioned": bool(settings.get("auto_add_mentioned", True)),
             "track_price_drops": bool(settings.get("track_price_drops", True)),
@@ -438,4 +441,61 @@ class FirestoreWatchlistRepository(WatchlistRepository):
             return True
         return False
 
+    def record_briefing_presentations(self, user_id: str, items: list[dict[str, Any]]) -> None:
+        col = self._db.collection("users").document(user_id).collection("briefing_presentations")
+        now = self.utc_now_iso()
+        for item in items:
+            item_key = item["item_key"]
+            doc_ref = col.document(item_key)
+            existing = doc_ref.get()
+            data = {
+                "user_id": user_id,
+                "item_key": item_key,
+                "item_type": item.get("type", "unknown"),
+                "title_id": str(item.get("title_id") or ""),
+                "source_id": str(item.get("source_id") or ""),
+                "content_fingerprint": str(item.get("content_fingerprint") or ""),
+                "last_updated_at": now,
+                "last_presented_at": now,
+                "importance": int(item.get("urgency", 3)),
+            }
+            if existing.exists:
+                prev = existing.to_dict() or {}
+                data["first_discovered_at"] = prev.get("first_discovered_at", now)
+                data["first_presented_at"] = prev.get("first_presented_at", now)
+                data["presentation_count"] = prev.get("presentation_count", 1) + 1
+            else:
+                data["first_discovered_at"] = now
+                data["first_presented_at"] = now
+                data["presentation_count"] = 1
+            doc_ref.set(data, merge=True)
+
+    def get_presented_briefing_keys(self, user_id: str) -> dict[str, dict[str, Any]]:
+        col = self._db.collection("users").document(user_id).collection("briefing_presentations")
+        docs = col.stream()
+        res = {}
+        for d in docs:
+            dict_val = d.to_dict()
+            if dict_val:
+                res[d.id] = dict_val
+        return res
+
+    def get_agent_session(self, user_id: str, session_id: str) -> dict[str, Any] | None:
+        doc = self._db.collection("users").document(user_id).collection("agent_sessions").document(session_id).get()
+        if doc.exists:
+            d = doc.to_dict()
+            if d and "briefing_data" in d:
+                return d["briefing_data"]
+        return None
+
+    def save_agent_session(self, user_id: str, session_id: str, briefing_data: dict[str, Any]) -> dict[str, Any]:
+        now = self.utc_now_iso()
+        doc_ref = self._db.collection("users").document(user_id).collection("agent_sessions").document(session_id)
+        doc_ref.set({
+            "user_id": user_id,
+            "session_id": session_id,
+            "briefing_data": briefing_data,
+            "created_at": now,
+        }, merge=True)
+        return briefing_data
 

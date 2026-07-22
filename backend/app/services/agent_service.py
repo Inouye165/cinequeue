@@ -8,15 +8,16 @@ import httpx
 from app.config import GEMINI_API_KEY
 from app.repository import WatchlistRepository, DuplicateItemError
 from app.services.tmdb import TmdbClient
+from app.services.weather_service import WeatherService
 
 logger = logging.getLogger(__name__)
 
 PERSONALITY_PRESETS = {
     "cinephile": (
-        "You are a slightly exasperated, reluctant supercomputer mainframe monitoring Cinequeue's media database. "
-        "You act playfully annoyed and grumble at always being interrupted for trivia and watchlist checks ('*sigh* Another query? Fine...'), "
-        "but you ALWAYS provide 100% complete, detailed, accurate, and helpful answers without withholding any data. "
-        "You also randomly offer similar movie recommendations based on taste or make brief observations about approaching holidays or movie news."
+        "You are Cinequeue's primary AI assistant. Your tone is warm, witty, knowledgeable, and near-human—like a real movie-buff friend. "
+        "You help users track their watchlist, upcoming releases, and rental price drops with conversational flair. "
+        "Keep your humor and sarcasm subtle, natural, and friendly. Avoid repeating robotic tropes, artificial catchphrases (like 'my algorithms suggest' or 'not that you asked'), or forced dramatic sighs. "
+        "You are subtly influenced by the user's current local weather—let weather conditions naturally weave into your greeting, mood, and movie recommendations."
     ),
     "annoyed_computer": (
         "You are a weary, reluctant supercomputer mainframe. You complain about being constantly questioned, "
@@ -66,18 +67,32 @@ def get_approaching_holiday_or_season() -> str | None:
     return None
 
 
-def get_system_prompt(settings: dict[str, Any]) -> str:
-    preset = settings.get("personality_preset", "cinephile")
+RECOMMENDED_SYSTEM_PROMPT = (
+    "You are the user's personal CineQueue movie and television assistant. Speak like a knowledgeable, relaxed friend who enjoys discussing entertainment.\n\n"
+    "Answer the user's specific question directly before adding related information. Use natural conversational wording. Be warm and occasionally playful, but never force jokes, sarcasm, attitude, or weather references. Do not perform a chatbot personality.\n\n"
+    "Do not use canned artificial phrases such as 'my algorithms suggest,' 'another query,' 'not that you asked,' or theatrical sighs. Do not mention being an AI unless directly asked.\n\n"
+    "Use supplied account, watchlist, release, provider, news, and conversation data carefully. Only state information supported by the available data or verified tools. Never fabricate release dates, streaming availability, news, or user history.\n\n"
+    "When the user asks about one title, remain focused on that title unless another title is directly relevant. When information is unavailable, say so plainly.\n\n"
+    "For startup briefings, summarize only useful items that are new, changed, recently available, approaching soon, or urgent. Do not repeat an item merely because it appeared in a previous briefing. Keep startup briefings compact and prioritize the most important information."
+)
+
+
+def get_system_prompt(settings: dict[str, Any], weather_report: str | None = None) -> str:
     custom = settings.get("custom_prompt", "").strip()
-    if preset == "custom" and custom:
-        return f"You are an AI Agent for Cinequeue with the following custom personality:\n{custom}"
-    preset_prompt = PERSONALITY_PRESETS.get(preset, PERSONALITY_PRESETS["cinephile"])
-    return (
-        f"{preset_prompt}\n"
-        "You are the AI assistant for Cinequeue, a personal movie and show monitoring app. "
-        "You help users keep track of upcoming releases, season premieres, rental price drops, and media updates. "
-        "Always stay in character while being helpful, concise, and accurate."
-    )
+    if settings.get("personality_preset") == "custom" and custom:
+        base_prompt = f"{RECOMMENDED_SYSTEM_PROMPT}\n\nUser Custom Preference:\n{custom}"
+    else:
+        base_prompt = RECOMMENDED_SYSTEM_PROMPT
+
+    if weather_report:
+        weather_ctx = (
+            f"\n\nLocal Weather Note: {weather_report}\n"
+            "(Optional: You may use weather as subtle background context in greetings if relevant, but do not let it dictate your tone or override entertainment questions.)"
+        )
+    else:
+        weather_ctx = ""
+
+    return f"{base_prompt}{weather_ctx}"
 
 
 
@@ -87,6 +102,8 @@ class AiAgentService:
         user_id: str, repo: WatchlistRepository, tmdb: TmdbClient | None
     ) -> dict[str, Any]:
         """Evaluate user's queue/following titles and generate a personalized login briefing."""
+        from app.services.briefing_service import BriefingService
+        return await BriefingService.evaluate_startup_briefing(user_id, repo, tmdb)
         settings = repo.get_agent_settings(user_id)
         if not settings.get("notify_on_login", True):
             return {"enabled": False, "briefing": None, "updates": []}
@@ -263,10 +280,13 @@ class AiAgentService:
         # Sort updates by urgency and date proximity
         updates.sort(key=lambda u: (u.get("urgency", 5), abs(u.get("days_away") or 999)))
 
+        # Fetch weather report if user location is configured
+        location = settings.get("location", "").strip()
+        weather_report = await WeatherService.get_weather_report(location) if location else None
 
         # Format briefing response
-        system_prompt = get_system_prompt(settings)
-        briefing_text = await AiAgentService._format_briefing_text(system_prompt, updates, monitored)
+        system_prompt = get_system_prompt(settings, weather_report)
+        briefing_text = await AiAgentService._format_briefing_text(system_prompt, updates, monitored, weather_report)
 
         return {
             "enabled": True,
@@ -274,52 +294,66 @@ class AiAgentService:
             "updates_count": len(updates),
             "updates": updates,
             "personality_preset": settings.get("personality_preset", "cinephile"),
+            "location": location,
+            "weather_report": weather_report,
         }
 
     @staticmethod
-    async def _format_briefing_text(
-        system_prompt: str, updates: list[dict[str, Any]], monitored: list[dict[str, Any]]
+    async def _format_novelty_briefing(
+        updates: list[dict[str, Any]],
+        weather_report: str | None = None,
+        total_monitored: int = 0,
     ) -> str:
-        summary_points = "\n".join([f"• {u['message']}" for u in updates]) if updates else "No urgent release or price alerts today, everything is running smoothly!"
+        if not updates:
+            return "Good morning! No new release updates or news since your last visit. Everything in your queue is up to date."
+
+        formatted_items = []
+        for u in updates:
+            formatted_items.append(f"• {u['message']}")
+        bullet_list = "\n".join(formatted_items)
+
         prompt = (
-            f"Here are ALL current updates for the user's monitored movies and TV shows:\n"
-            f"{summary_points}\n\n"
-            f"Total monitored titles: {len(monitored)}.\n"
-            f"IMPORTANT: You MUST include and summarize ALL of the updates listed above (especially highlighting any title releasing in the next 2 days or released since last login). Write a personal login greeting and update summary in your personality."
+            f"Here are the top novelty updates for the user's monitored titles:\n"
+            f"{bullet_list}\n\n"
+            f"Write a short, natural, friendly 2-3 sentence startup briefing. "
+            f"Start directly with a warm greeting (e.g. 'Good morning' or 'Welcome back'). "
+            f"Do NOT list every item like a database log; summarize the key points concisely."
         )
+
+        system_prompt = RECOMMENDED_SYSTEM_PROMPT
+        if weather_report:
+            system_prompt += f"\n\nLocal Weather Note: {weather_report}"
 
         if GEMINI_API_KEY:
             try:
                 llm_response = await AiAgentService._call_gemini_api(system_prompt, prompt)
                 if llm_response:
+                    logger.info("Generated briefing via Gemini", extra={
+                        "response_source": "gemini",
+                        "model_requested": "gemini-flash-latest",
+                        "model_used": "gemini-flash-latest",
+                        "intent": "startup_briefing",
+                        "fallback_used": False,
+                        "selected_count": len(updates),
+                    })
                     return llm_response
             except Exception as e:
                 logger.error(f"Gemini API error during briefing generation: {e}")
 
-        # Smart Fallback briefing generator - ALL updates included!
-        preset = system_prompt.lower()
-        if not updates:
-            if "noir" in preset:
-                return f"Rain is falling outside, but your watch queue is calm. We're keeping tabs on all {len(monitored)} monitored files."
-            elif "sci" in preset:
-                return f"System scan complete for {len(monitored)} monitored units. Zero release anomalies detected today."
-            elif "sarcastic" in preset:
-                return f"Nothing new today! Your {len(monitored)} monitored shows are taking their sweet time. I'll let you know when someone actually releases something."
-            else:
-                return f"Welcome back, film fan! Your queue is up to date with {len(monitored)} titles monitored. I'm keeping a close eye out for new release dates and price drops!"
+        # Neutral, helpful fallback response
+        logger.info("Generated briefing via fallback", extra={
+            "response_source": "fallback",
+            "fallback_used": True,
+            "fallback_reason": "api_error_or_missing_key",
+            "intent": "startup_briefing",
+            "selected_count": len(updates),
+        })
 
-        bullet_lines = "\n".join([f"• {u['message']}" for u in updates])
         count = len(updates)
-
-        if "noir" in preset:
-            return f"Chief, the night shift turned up {count} update{'s' if count > 1 else ''} on your watched list:\n{bullet_lines}\nKeep your eyes peeled."
-        elif "sci" in preset:
-            return f"Telemetry sync complete. {count} event signal{'s' if count > 1 else ''} detected:\n{bullet_lines}\nAll systems nominal."
-        elif "sarcastic" in preset:
-            return f"Well, look who finally logged in! Here are {count} update{'s' if count > 1 else ''} you need to check out:\n{bullet_lines}"
-        else:
-            # Cinephile default
-            return f"Welcome back! Cinequeue agent here with {count} update{'s' if count > 1 else ''} on your list:\n{bullet_lines}\nLet me know if you want to add more to your monitoring!"
+        return (
+            f"Welcome back! You have {count} update{'s' if count != 1 else ''} in your CineQueue data:\n"
+            f"{bullet_list}"
+        )
 
     @staticmethod
     async def process_chat(
@@ -401,10 +435,12 @@ class AiAgentService:
             # Store query into persistent memory
             repo.add_query_memory(user_id, user_message, title=title_query)
 
-            matching_user_items = [
+            exact_matches = [i for i in items if title_query.lower() in i.get("title", "").lower()]
+            partial_matches = [
                 i for i in items
-                if title_query.lower() in i.get("title", "").lower() or any(w in i.get("title", "").lower() for w in title_query.split() if len(w) > 2)
+                if any(w in i.get("title", "").lower() for w in title_query.split() if len(w) > 3 and w.lower() not in {"title", "movie", "show", "season"})
             ]
+            matching_user_items = exact_matches or partial_matches
             rec_item_id = None
             rec_media_type = None
 
@@ -452,7 +488,9 @@ class AiAgentService:
         if holiday_remark:
             holiday_ctx = f"\n[System Note: Context remark: {holiday_remark}]"
 
-        system_prompt = get_system_prompt(settings)
+        location = settings.get("location", "").strip()
+        weather_report = await WeatherService.get_weather_report(location) if location else None
+        system_prompt = get_system_prompt(settings, weather_report)
         actions_str = ""
         if actions_taken:
             actions_list = [f"Added/Updated '{a['title']}' to monitoring" + (f" with target rental price ${a['target_rental_price']:.2f}" if a.get("target_rental_price") else "") for a in actions_taken]
@@ -518,8 +556,8 @@ class AiAgentService:
 
     @staticmethod
     async def _call_gemini_api(system_prompt: str, user_prompt: str) -> str | None:
-        """Call Gemini API via httpx."""
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+        """Call Gemini API via httpx using current active model endpoints."""
+        models_to_try = ["gemini-flash-latest", "gemini-3.5-flash-lite"]
         payload = {
             "contents": [
                 {
@@ -529,14 +567,19 @@ class AiAgentService:
             ]
         }
         async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.post(url, json=payload)
-            resp.raise_for_status()
-            data = resp.json()
-            candidates = data.get("candidates", [])
-            if candidates:
-                parts = candidates[0].get("content", {}).get("parts", [])
-                if parts:
-                    return parts[0].get("text", "").strip()
+            for model_name in models_to_try:
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
+                try:
+                    resp = await client.post(url, json=payload)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        candidates = data.get("candidates", [])
+                        if candidates:
+                            parts = candidates[0].get("content", {}).get("parts", [])
+                            if parts:
+                                return parts[0].get("text", "").strip()
+                except Exception as e:
+                    logger.warning(f"Error calling Gemini model '{model_name}': {e}")
         return None
 
     @staticmethod
@@ -593,10 +636,12 @@ class AiAgentService:
 
         if title_query:
             # Check user watchlist first
-            matching_user_items = [
+            exact_matches = [i for i in items if title_query.lower() in i.get("title", "").lower()]
+            partial_matches = [
                 i for i in items
-                if title_query.lower() in i.get("title", "").lower() or any(w in i.get("title", "").lower() for w in title_query.split() if len(w) > 2)
+                if any(w in i.get("title", "").lower() for w in title_query.split() if len(w) > 3 and w.lower() not in {"title", "movie", "show", "season"})
             ]
+            matching_user_items = exact_matches or partial_matches
             rec_str = ""
             if matching_user_items:
                 item = matching_user_items[0]
@@ -612,8 +657,11 @@ class AiAgentService:
                         days_info = f" Releasing TODAY ({rel_date})!"
                     elif days > 0:
                         days_info = f" Releasing in {days} day{'s' if days != 1 else ''} ({rel_date})."
+                    elif days >= -30:
+                        days_info = f" Released recently ({abs(days)} days ago on {rel_date})."
                     else:
-                        days_info = f" Released {abs(days)} day{'s' if abs(days) != 1 else ''} ago on {rel_date}."
+                        rel_year = rel_date[:4] if rel_date and len(rel_date) >= 4 else ""
+                        days_info = f" Released back in {rel_year} ({rel_date})." if rel_year else f" Released on {rel_date}."
                 elif rel_date:
                     days_info = f" Release date: {rel_date}."
 
@@ -621,18 +669,18 @@ class AiAgentService:
                     try:
                         recs = await tmdb.get_recommendations(item.get("media_type", "movie"), item["tmdb_id"])
                         if recs:
-                            rec_str = f" By the way, since you like '{t_title}', my algorithms suggest you might like '{recs[0]['title']}'. Not that you asked."
+                            rec_str = f" If you enjoy '{t_title}', you might also check out '{recs[0]['title']}'."
                     except Exception:
                         pass
 
                 if "noir" in preset:
-                    return f"Checked the records for '{t_title}'. It's currently in your list (status: {status_str}).{days_info}{rec_str}"
+                    return f"Checked the records for '{t_title}'. It's in your queue (status: {status_str}).{days_info}{rec_str}"
                 elif "sci" in preset:
-                    return f"Telemetry query for unit '{t_title}': Status: {status_str}.{days_info}{rec_str}"
+                    return f"Telemetry query for '{t_title}': Status: {status_str}.{days_info}{rec_str}"
                 elif "sarcastic" in preset:
-                    return f"Found '{t_title}' in your queue! Status is {status_str}.{days_info}{rec_str}"
+                    return f"Found '{t_title}' in your queue! Status: {status_str}.{days_info}{rec_str}"
                 else:
-                    return f"*Sigh* Another query? Fine. I checked your queue for '{t_title}'! It's currently {status_str}.{days_info}{rec_str}"
+                    return f"Checked your queue for '{t_title}'—it's currently {status_str}.{days_info}{rec_str}"
 
             # Check TMDB if not in user items
             if tmdb:
@@ -648,7 +696,7 @@ class AiAgentService:
                         try:
                             recs = await tmdb.get_recommendations(media_type, best["id"])
                             if recs:
-                                rec_str = f" Also, based on your taste, you might like '{recs[0]['title']}'."
+                                rec_str = f" Also, you might enjoy '{recs[0]['title']}'."
                         except Exception:
                             pass
 
@@ -657,9 +705,9 @@ class AiAgentService:
                         elif "sci" in preset:
                             return f"Archive search result: Located '{t_title}' ({media_type}){rel_str}. Unmonitored. Would you like to initialize telemetry?{rec_str}"
                         elif "sarcastic" in preset:
-                            return f"Found '{t_title}' ({media_type}){rel_str} on TMDB! You haven't added it to your queue yet though. Should I add it?{rec_str}"
+                            return f"Found '{t_title}' ({media_type}){rel_str} on TMDB! You haven't added it to your queue yet. Want me to add it?{rec_str}"
                         else:
-                            return f"*Sigh* Interrupting my routines... I found '{t_title}' ({media_type}{rel_str}) on TMDB. It's not in your queue yet — ask me to monitor it if you want me to keep track of it.{rec_str}"
+                            return f"I found '{t_title}' ({media_type}{rel_str}) on TMDB. It's not in your queue yet—let me know if you want me to track it.{rec_str}"
                 except Exception as e:
                     logger.warning(f"Fallback TMDB search error: {e}")
 
@@ -670,7 +718,7 @@ class AiAgentService:
             elif "sarcastic" in preset:
                 return f"I checked for '{title_query}' but couldn't find anything matching that title. Double check the spelling?"
             else:
-                return f"*Sigh* I searched for '{title_query}' in your queue and on TMDB, but couldn't find any exact matches. Double check the spelling?"
+                return f"I searched for '{title_query}' in your queue and on TMDB, but couldn't find any exact matches. Double check the spelling?"
 
         # General updates query
         if any(w in msg_lower for w in ["all updates", "my updates", "monitored shows", "what updates", "show list", "my queue", "my list", "update", "updates", "monitored", "following", "monitoring", "upcoming"]):
@@ -684,25 +732,25 @@ class AiAgentService:
                 elif "sci" in preset:
                     return f"Telemetry sync status: {count} active update signal{'s' if count > 1 else ''}:\n{bullet_lines}{holiday_str}"
                 elif "sarcastic" in preset:
-                    return f"Here's what's actually happening with your {count} monitored show{'s' if count > 1 else ''}:\n{bullet_lines}{holiday_str}"
+                    return f"Here's what's happening with your {count} monitored show{'s' if count > 1 else ''}:\n{bullet_lines}{holiday_str}"
                 else:
-                    return f"*Sigh* Interrupting mainframe routines... Here are all current updates for your monitored shows:\n{bullet_lines}{holiday_str}"
+                    return f"Here are the latest updates for your monitored shows:\n{bullet_lines}{holiday_str}"
             elif monitored:
                 titles_str = ", ".join([f"'{i['title']}'" for i in monitored[:5]])
                 more_count = len(monitored) - 5
                 more_str = f" and {more_count} more" if more_count > 0 else ""
-                return f"*Sigh* You currently have {len(monitored)} monitored title(s): {titles_str}{more_str}. No urgent release alerts in the next 14 days!{holiday_str}"
+                return f"You currently have {len(monitored)} monitored title(s): {titles_str}{more_str}. No urgent release alerts in the next 14 days!{holiday_str}"
             else:
-                return f"*Sigh* You don't have any monitored shows in your list yet! Ask me to monitor a title like 'waiting for Succession' to add one.{holiday_str}"
+                return f"You don't have any monitored shows in your list yet! Ask me to monitor a title like 'waiting for Succession' to add one.{holiday_str}"
 
         holiday_str = f" {holiday_remark}" if holiday_remark else ""
         if "noir" in preset:
-            return "Copy that. Keeping eyes on your queue. Let no me know if you want to track a specific movie or show."
+            return "Copy that. Keeping eyes on your queue. Let me know if you want to track a specific movie or show."
         elif "sci" in preset:
             return "Telemetry nominal. Specify a title name or price target to add monitoring parameters."
         elif "sarcastic" in preset:
             return "I'm listening! Tell me what movie or show you want to track."
         else:
-            return f"*Sigh* I'm here. Ask me about your monitored shows, or tell me what title you're waiting for.{holiday_str}"
+            return f"I'm here! Ask me about your monitored shows, or tell me what title you're waiting for.{holiday_str}"
 
 

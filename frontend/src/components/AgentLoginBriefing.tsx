@@ -15,7 +15,13 @@ export function AgentLoginBriefing({ onOpenChat }: AgentLoginBriefingProps) {
     let active = true;
     const fetchBriefing = async () => {
       try {
-        const data = await api.agentBriefing();
+        let sessionId = sessionStorage.getItem("cinequeue_briefing_session_id");
+        if (!sessionId) {
+          sessionId = "sess_" + Date.now() + "_" + Math.random().toString(36).substring(2, 9);
+          sessionStorage.setItem("cinequeue_briefing_session_id", sessionId);
+        }
+
+        const data = await api.agentBriefing(sessionId);
         if (active && data && data.enabled && data.briefing) {
           setBriefing(data);
         }
