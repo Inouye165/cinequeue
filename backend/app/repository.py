@@ -287,4 +287,3 @@ class WatchlistRepository(ABC):
         """Remove user rating for a movie/tv item."""
         ...
 
-

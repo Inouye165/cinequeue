@@ -440,6 +440,7 @@ class AiAgentService:
         }
 
     @staticmethod
+    @staticmethod
     def _get_time_of_day() -> str:
         import datetime
         hour = datetime.datetime.now().hour
@@ -550,6 +551,7 @@ class AiAgentService:
         location = settings.get("location", "").strip()
         time_of_day = AiAgentService._get_time_of_day()
 
+        # Build compact structured context for LLM
         weather_json = None
         if weather_data:
             weather_dict = weather_data.to_dict() if hasattr(weather_data, "to_dict") else weather_data
@@ -582,11 +584,12 @@ class AiAgentService:
             f"CRITICAL GUIDELINES:\n"
             f"1. Sound like a real human movie-buff friend having a casual conversation with another human. Use varied, natural phrasing.\n"
             f"2. Match the current time of day ({time_of_day}) in your greeting (e.g., 'Good morning', 'Good afternoon', 'Hey there', 'Good evening').\n"
-            f"3. NEVER use rigid or robotic template phrases like 'Nothing major changed in your watchlist since your last visit. I'll keep an eye on it.', 'according to my database', or 'telemetry scan'.\n"
-            f"4. If local weather is provided in local_context, weave it naturally into conversation (e.g. 'Hope you're staying cozy in Concord with that rain—great weather for a movie marathon!'). Do NOT report weather like a robot news anchor.\n"
-            f"5. If briefing_items is empty, greet them warmly, mention that their watchlist is looking smooth and quiet today, and invite them to chat or ask for a movie pick.\n"
-            f"6. If briefing_items contains items, summarize them conversationally.\n"
-            f"7. Keep the greeting concise (2 to 4 sentences max)."
+            f"3. If there is a significant weather alert in local_context, state it clearly and respectfully before entertainment updates; do NOT turn severe alerts into jokes.\n"
+            f"4. NEVER use rigid or robotic template phrases like 'Nothing major changed in your watchlist since your last visit. I'll keep an eye on it.', 'according to my database', or 'telemetry scan'.\n"
+            f"5. If local weather is provided in local_context, weave it naturally into conversation (e.g. 'Hope you're staying cozy in Concord with that rain—great weather for a movie marathon!'). Do NOT report weather like a robot news anchor.\n"
+            f"6. If briefing_items is empty, greet them warmly, mention that their watchlist is looking smooth and quiet today, and invite them to chat or ask for a movie pick.\n"
+            f"7. If briefing_items contains items, summarize them conversationally.\n"
+            f"8. Keep the greeting concise (2 to 4 sentences max)."
         )
 
         system_prompt = get_system_prompt(settings, weather_report=None)
@@ -814,8 +817,6 @@ class AiAgentService:
                 "message": msg_record,
                 "actions_taken": actions_taken,
             }
-
-
         title_query = ext_title
         if not title_query:
             title_patterns = [
