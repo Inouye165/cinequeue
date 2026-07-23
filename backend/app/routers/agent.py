@@ -48,8 +48,13 @@ async def get_agent_settings(
     request: Request,
     current_user: CurrentUser = Depends(get_current_user),
 ) -> dict[str, Any]:
+    from app.config import GEMINI_API_KEY
     repo = request.app.state.watchlist_repo
-    return repo.get_agent_settings(current_user.uid)
+    settings = repo.get_agent_settings(current_user.uid)
+    settings["gemini_api_key_configured"] = bool(GEMINI_API_KEY)
+    settings["gemini_provider_enabled"] = bool(GEMINI_API_KEY)
+    return settings
+
 
 
 @router.post("/settings")
