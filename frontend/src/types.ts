@@ -36,6 +36,7 @@ export interface MediaItem {
   vote_count?: number;
   popularity?: number;
   next_season?: NextSeasonInfo | null;
+  user_rating?: number | null;
 }
 
 export interface WatchlistItem extends MediaItem {
@@ -67,12 +68,35 @@ export interface AgentSettings {
   updated_at?: string;
 }
 
+export interface RatedMovie {
+  id?: number | string;
+  user_id?: string;
+  media_type: MediaType;
+  tmdb_id: number;
+  title: string;
+  poster_path?: string | null;
+  poster_url?: string | null;
+  release_date?: string | null;
+  rating: number;
+  rated_at?: string;
+  updated_at?: string;
+  rated_ago?: string;
+  overview?: string;
+}
+
 export interface ChatAction {
   action: string;
-  title: string;
+  title?: string;
   media_type?: string;
   tmdb_id?: number;
   target_rental_price?: number | null;
+  movies?: RatedMovie[];
+  poster_url?: string | null;
+  availability_type?: "free" | "rent" | "buy";
+  provider_name?: string;
+  price?: string;
+  details_text?: string;
+  overview?: string;
 }
 
 export interface ChatMessage {
@@ -83,6 +107,7 @@ export interface ChatMessage {
   actions?: ChatAction[];
   created_at?: string;
 }
+
 
 export interface AgentBriefingUpdate {
   title: string;

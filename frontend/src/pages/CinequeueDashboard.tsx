@@ -7,7 +7,8 @@ import { MediaCard } from "../components/MediaCard";
 import { SearchHeader } from "../components/SearchHeader";
 import { Tabs, TabType } from "../components/Tabs";
 import { useAuth } from "../context/AuthContext";
-import type { MediaDetails, MediaItem, WatchlistItem } from "../types";
+import { StarRating } from "../components/StarRating";
+import type { MediaDetails, MediaItem, RatedMovie, WatchlistItem } from "../types";
 
 
 
@@ -15,11 +16,13 @@ const TABS: { id: TabType; label: string }[] = [
   { id: "watchlist", label: "My Queue" },
   { id: "following", label: "Monitoring" },
   { id: "library", label: "My Library" },
+  { id: "rated", label: "My Ratings" },
   { id: "upcoming", label: "Upcoming" },
   { id: "theatres", label: "In Theatres" },
   { id: "on-air", label: "TV On Air" },
   { id: "trending", label: "Trending" },
 ];
+
 
 export function CinequeueDashboard() {
   const { user, logout } = useAuth();
@@ -28,6 +31,7 @@ export function CinequeueDashboard() {
   const [query, setQuery] = useState("");
   const [remoteItems, setRemoteItems] = useState<MediaItem[]>([]);
   const [watchlist, setWatchlist] = useState<WatchlistItem[]>([]);
+  const [ratedMovies, setRatedMovies] = useState<RatedMovie[]>([]);
   const [selected, setSelected] = useState<MediaDetails | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -59,15 +63,35 @@ export function CinequeueDashboard() {
     }
   }, [user]);
 
+  const loadRatedMovies = useCallback(async () => {
+    if (!user) return [];
+    try {
+      const data = await api.getRatings();
+      setRatedMovies(data);
+      return data;
+    } catch (err) {
+      console.error("Failed to load ratings:", err);
+      return [];
+    }
+  }, [user]);
+
   // Initial watchlist fetch on mount or user change
   useEffect(() => {
     if (user) {
       setLoading(true);
-      loadWatchlist().finally(() => {
+      Promise.all([loadWatchlist(), loadRatedMovies()]).finally(() => {
         setLoading(false);
       });
     }
-  }, [user, loadWatchlist]);
+  }, [user, loadWatchlist, loadRatedMovies]);
+
+  useEffect(() => {
+    if (user && tab === "rated") {
+      setLoading(true);
+      loadRatedMovies().finally(() => setLoading(false));
+    }
+  }, [tab, user, loadRatedMovies]);
+
 
   // Handle remote data fetching when tab is a remote tab
   useEffect(() => {
@@ -245,6 +269,70 @@ export function CinequeueDashboard() {
     }
   };
 
+  const handleUpdateRating = async (item: MediaItem, rating: number) => {
+    const tmdbId = "tmdb_id" in item ? (item as WatchlistItem).tmdb_id : item.id;
+    const key = `${item.media_type}:${tmdbId}`;
+    const exists = watchlist.some((i) => `${i.media_type}:${i.tmdb_id ?? i.id}` === key);
+
+    try {
+      if (rating === 0) {
+        await api.deleteRating(item.media_type, tmdbId);
+      } else {
+        await api.rateMovie({
+          media_type: item.media_type,
+          tmdb_id: tmdbId,
+          title: item.title,
+          poster_path: item.poster_url?.replace("https://image.tmdb.org/t/p/w342", "") ?? undefined,
+          release_date: item.release_date ?? undefined,
+          rating,
+        });
+      }
+
+      if (exists) {
+        await api.updateWatchlistItem(
+          item.media_type,
+          tmdbId,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          rating
+        );
+      }
+      const updatedList = await loadWatchlist();
+      await loadRatedMovies();
+      if (selected && selected.id === tmdbId) {
+        const updatedItem = updatedList.find((i) => `${i.media_type}:${i.tmdb_id ?? i.id}` === key);
+        setSelected((prev) => (prev ? { ...prev, user_rating: updatedItem?.user_rating ?? rating } : null));
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not save rating");
+    }
+  };
+
+  const handleEditRatedMovie = async (movie: RatedMovie, rating: number) => {
+    try {
+      if (rating === 0) {
+        await api.deleteRating(movie.media_type, movie.tmdb_id);
+      } else {
+        await api.rateMovie({
+          media_type: movie.media_type,
+          tmdb_id: movie.tmdb_id,
+          title: movie.title,
+          poster_path: movie.poster_path,
+          release_date: movie.release_date,
+          rating,
+        });
+      }
+      await loadRatedMovies();
+      await loadWatchlist();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not update rating");
+    }
+  };
+
+
   const localItems = useMemo(() => {
     if (tab === "watchlist") {
       const queueItems = watchlist.filter((item) => {
@@ -374,6 +462,49 @@ export function CinequeueDashboard() {
 
       {loading ? (
         <div className="loading">Loading…</div>
+      ) : tab === "rated" ? (
+        ratedMovies.length ? (
+          <div className="media-grid">
+            {ratedMovies.map((movie) => (
+              <div key={`${movie.media_type}:${movie.tmdb_id}`} className="media-card rated-card" style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                <div
+                  className="poster-wrapper"
+                  onClick={() => void openDetails({ id: movie.tmdb_id, media_type: movie.media_type, title: movie.title })}
+                  style={{ cursor: "pointer" }}
+                >
+                  {movie.poster_url ? (
+                    <img src={movie.poster_url} alt={movie.title} className="poster-img" />
+                  ) : (
+                    <div className="poster-fallback">
+                      <span>{movie.title}</span>
+                    </div>
+                  )}
+                  {movie.media_type === "tv" ? <span className="media-type-badge">TV</span> : null}
+                </div>
+                <div className="card-info" style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+                  <h3 className="card-title" onClick={() => void openDetails({ id: movie.tmdb_id, media_type: movie.media_type, title: movie.title })} style={{ cursor: "pointer" }}>
+                    {movie.title}
+                  </h3>
+                  {movie.release_date ? <span className="card-year">{movie.release_date.slice(0, 4)}</span> : null}
+                  <div style={{ margin: "4px 0" }}>
+                    <StarRating
+                      rating={movie.rating}
+                      onRate={(r) => void handleEditRatedMovie(movie, r)}
+                      size="md"
+                    />
+                  </div>
+                  <div style={{ fontSize: "0.75rem", color: "rgba(255, 255, 255, 0.5)" }}>
+                    Rated {movie.rated_ago || "recently"}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="empty-state">
+            You haven't rated any movies yet. Rate movies when searching, in your Queue, or ask the AI agent to quiz you!
+          </div>
+        )
       ) : items.length ? (
         <div className="media-grid">
           {items.map((item) => {
@@ -381,7 +512,8 @@ export function CinequeueDashboard() {
             const isOwned = libraryKeys.has(key);
             const isOnQueue = queueKeys.has(key);
             const isFollowing = followingKeys.has(key);
-            const ownedFormat = watchlist.find((i) => `${i.media_type}:${i.tmdb_id ?? i.id}` === key)?.owned_format || null;
+            const watchItem = watchlist.find((i) => `${i.media_type}:${i.tmdb_id ?? i.id}` === key);
+            const ownedFormat = watchItem?.owned_format || null;
             return (
               <MediaCard
                 key={key}
@@ -389,6 +521,8 @@ export function CinequeueDashboard() {
                 onOpen={openDetails}
                 onAdd={addToWatchlist}
                 onRemove={removeFromWatchlist}
+                onRate={handleUpdateRating}
+                userRating={watchItem?.user_rating}
                 isOnWatchlist={isOnQueue || isFollowing}
                 isOnQueue={isOnQueue}
                 isFollowing={isFollowing}
@@ -412,6 +546,7 @@ export function CinequeueDashboard() {
         </div>
       )}
 
+
       {selected ? (
         (() => {
           const watchKey = `${selected.media_type}:${selected.id}`;
@@ -425,9 +560,11 @@ export function CinequeueDashboard() {
               ownedFormat={watchItem?.owned_format || null}
               watchFreeStreaming={watchItem?.watch_free_streaming || false}
               watchOnSaleBuy={watchItem?.watch_on_sale_buy || false}
+              userRating={watchItem?.user_rating}
               onClose={() => setSelected(null)}
               onAdd={() => void addToWatchlist(selected)}
               onRemove={() => void removeFromWatchlist(selected)}
+              onRate={(rating) => void handleUpdateRating(selected, rating)}
               onUpdateOwned={handleUpdateOwned}
               onMoveToFollowing={() => void moveToFollowing(selected)}
               onMoveToQueue={() => void moveToQueue(selected)}

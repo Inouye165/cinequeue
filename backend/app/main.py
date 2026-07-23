@@ -18,7 +18,7 @@ from app.config import (
     PUBLIC_AUTH_DOMAIN,
 )
 from app.logging_config import setup_logging
-from app.routers import movies, watchlist, auth, admin, agent
+from app.routers import movies, watchlist, auth, admin, agent, ratings
 from app.services.tmdb import TmdbClient
 
 setup_logging()
@@ -284,13 +284,17 @@ app.include_router(admin.router)
 app.include_router(agent.router)
 app.include_router(watchlist.router)
 app.include_router(movies.router)
+app.include_router(ratings.router)
+
 
 
 
 if FRONTEND_DIST.exists():
-    app.mount("/assets", StaticFiles(directory=FRONTEND_DIST / "assets"), name="assets")
+    if (FRONTEND_DIST / "assets").is_dir():
+        app.mount("/assets", StaticFiles(directory=FRONTEND_DIST / "assets"), name="assets")
 
     @app.get("/{full_path:path}")
+
     async def serve_spa(full_path: str):
         if full_path.startswith("api"):
             return {"detail": "Not found"}

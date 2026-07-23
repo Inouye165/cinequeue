@@ -120,7 +120,7 @@ class OpenMeteoWeatherProvider(WeatherProvider):
             async with httpx.AsyncClient(timeout=4.0) as client:
                 geo_res = await client.get(
                     "https://geocoding-api.open-meteo.com/v1/search",
-                    params={"name": loc_str, "count": 1},
+                    params={"name": loc_str, "count": 5},
                 )
                 if geo_res.status_code != 200:
                     return None
@@ -129,6 +129,7 @@ class OpenMeteoWeatherProvider(WeatherProvider):
                 if not results:
                     return None
 
+                results.sort(key=lambda x: x.get("population") or 0, reverse=True)
                 place = results[0]
                 lat = place.get("latitude")
                 lon = place.get("longitude")

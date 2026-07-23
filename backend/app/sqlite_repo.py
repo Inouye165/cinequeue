@@ -36,6 +36,8 @@ class SqliteWatchlistRepository(WatchlistRepository):
                     status TEXT DEFAULT 'queue',
                     watch_free_streaming INTEGER DEFAULT 0,
                     watch_on_sale_buy INTEGER DEFAULT 0,
+                    target_rental_price REAL,
+                    user_rating INTEGER DEFAULT 0,
                     UNIQUE(user_id, media_type, tmdb_id)
                 )
                 """
@@ -120,6 +122,10 @@ class SqliteWatchlistRepository(WatchlistRepository):
                 conn.execute("ALTER TABLE watchlist ADD COLUMN target_rental_price REAL")
             except sqlite3.OperationalError:
                 pass
+            try:
+                conn.execute("ALTER TABLE watchlist ADD COLUMN user_rating INTEGER DEFAULT 0")
+            except sqlite3.OperationalError:
+                pass
 
             conn.execute(
                 """
@@ -153,6 +159,10 @@ class SqliteWatchlistRepository(WatchlistRepository):
                 pass
             try:
                 conn.execute("ALTER TABLE agent_settings ADD COLUMN previous_briefing_presented_at TEXT")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                conn.execute("ALTER TABLE agent_settings ADD COLUMN auto_speak_briefing INTEGER DEFAULT 0")
             except sqlite3.OperationalError:
                 pass
             conn.execute(
@@ -233,6 +243,24 @@ class SqliteWatchlistRepository(WatchlistRepository):
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS rated_movies (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id TEXT NOT NULL DEFAULT 'local_test_user',
+                    media_type TEXT NOT NULL CHECK(media_type IN ('movie', 'tv')),
+                    tmdb_id INTEGER NOT NULL,
+                    title TEXT NOT NULL,
+                    poster_path TEXT,
+                    release_date TEXT,
+                    rating INTEGER NOT NULL CHECK(rating >= 1 AND rating <= 5),
+                    rated_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(user_id, media_type, tmdb_id)
+                )
+                """
+            )
+
 
     @contextmanager
     def _connection(self):
@@ -261,6 +289,7 @@ class SqliteWatchlistRepository(WatchlistRepository):
             d["watch_free_streaming"] = bool(d.get("watch_free_streaming"))
             d["watch_on_sale_buy"] = bool(d.get("watch_on_sale_buy"))
             d["target_rental_price"] = d.get("target_rental_price")
+            d["user_rating"] = int(d.get("user_rating") or 0)
             items.append(d)
         return items
 
@@ -278,16 +307,17 @@ class SqliteWatchlistRepository(WatchlistRepository):
         watch_free_streaming: bool = False,
         watch_on_sale_buy: bool = False,
         target_rental_price: float | None = None,
+        user_rating: int = 0,
     ) -> dict[str, Any]:
         added_at = self.utc_now_iso()
         try:
             with self._connection() as conn:
                 conn.execute(
                     """
-                    INSERT INTO watchlist (user_id, media_type, tmdb_id, title, poster_path, release_date, added_at, is_owned, owned_format, status, watch_free_streaming, watch_on_sale_buy, target_rental_price)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO watchlist (user_id, media_type, tmdb_id, title, poster_path, release_date, added_at, is_owned, owned_format, status, watch_free_streaming, watch_on_sale_buy, target_rental_price, user_rating)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (user_id, media_type, tmdb_id, title, poster_path, release_date, added_at, 1 if is_owned else 0, owned_format, status, 1 if watch_free_streaming else 0, 1 if watch_on_sale_buy else 0, target_rental_price),
+                    (user_id, media_type, tmdb_id, title, poster_path, release_date, added_at, 1 if is_owned else 0, owned_format, status, 1 if watch_free_streaming else 0, 1 if watch_on_sale_buy else 0, target_rental_price, user_rating),
                 )
         except sqlite3.IntegrityError as exc:
             raise DuplicateItemError(
@@ -307,6 +337,7 @@ class SqliteWatchlistRepository(WatchlistRepository):
             "watch_free_streaming": watch_free_streaming,
             "watch_on_sale_buy": watch_on_sale_buy,
             "target_rental_price": target_rental_price,
+            "user_rating": user_rating,
         }
 
     def update_item(
@@ -320,6 +351,7 @@ class SqliteWatchlistRepository(WatchlistRepository):
         watch_free_streaming: bool | None = None,
         watch_on_sale_buy: bool | None = None,
         target_rental_price: float | None = None,
+        user_rating: int | None = None,
     ) -> dict[str, Any] | None:
         with self._connection() as conn:
             # First check if item exists
@@ -338,14 +370,15 @@ class SqliteWatchlistRepository(WatchlistRepository):
             current_watch_free = bool(row["watch_free_streaming"]) if watch_free_streaming is None else watch_free_streaming
             current_watch_sale = bool(row["watch_on_sale_buy"]) if watch_on_sale_buy is None else watch_on_sale_buy
             current_target_price = row["target_rental_price"] if target_rental_price is None else target_rental_price
+            current_user_rating = int(row["user_rating"]) if (user_rating is None and "user_rating" in row.keys() and row["user_rating"] is not None) else (user_rating or 0)
 
             conn.execute(
                 """
                 UPDATE watchlist
-                SET is_owned = ?, owned_format = ?, status = ?, watch_free_streaming = ?, watch_on_sale_buy = ?, target_rental_price = ?
+                SET is_owned = ?, owned_format = ?, status = ?, watch_free_streaming = ?, watch_on_sale_buy = ?, target_rental_price = ?, user_rating = ?
                 WHERE user_id = ? AND media_type = ? AND tmdb_id = ?
                 """,
-                (1 if current_is_owned else 0, current_owned_format, current_status, 1 if current_watch_free else 0, 1 if current_watch_sale else 0, current_target_price, user_id, media_type, tmdb_id),
+                (1 if current_is_owned else 0, current_owned_format, current_status, 1 if current_watch_free else 0, 1 if current_watch_sale else 0, current_target_price, current_user_rating, user_id, media_type, tmdb_id),
             )
             
             # Fetch updated item
@@ -361,6 +394,7 @@ class SqliteWatchlistRepository(WatchlistRepository):
             d["watch_free_streaming"] = bool(d.get("watch_free_streaming"))
             d["watch_on_sale_buy"] = bool(d.get("watch_on_sale_buy"))
             d["target_rental_price"] = d.get("target_rental_price")
+            d["user_rating"] = int(d.get("user_rating") or 0)
             return d
         return None
 
@@ -526,6 +560,7 @@ class SqliteWatchlistRepository(WatchlistRepository):
                 "notify_on_login": True,
                 "auto_add_mentioned": True,
                 "track_price_drops": True,
+                "auto_speak_briefing": False,
                 "updated_at": self.utc_now_iso(),
             }
         keys = row.keys()
@@ -537,6 +572,7 @@ class SqliteWatchlistRepository(WatchlistRepository):
             "notify_on_login": bool(row["notify_on_login"]),
             "auto_add_mentioned": bool(row["auto_add_mentioned"]),
             "track_price_drops": bool(row["track_price_drops"]),
+            "auto_speak_briefing": bool(row["auto_speak_briefing"]) if ("auto_speak_briefing" in keys and row["auto_speak_briefing"] is not None) else False,
             "updated_at": row["updated_at"],
         }
 
@@ -549,11 +585,13 @@ class SqliteWatchlistRepository(WatchlistRepository):
         auto_add_mentioned = 1 if settings.get("auto_add_mentioned", True) else 0
         track_price_drops = 1 if settings.get("track_price_drops", True) else 0
 
+        auto_speak_briefing = 1 if settings.get("auto_speak_briefing", False) else 0
+
         with self._connection() as conn:
             conn.execute(
                 """
-                INSERT INTO agent_settings (user_id, personality_preset, custom_prompt, location, notify_on_login, auto_add_mentioned, track_price_drops, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO agent_settings (user_id, personality_preset, custom_prompt, location, notify_on_login, auto_add_mentioned, track_price_drops, auto_speak_briefing, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(user_id) DO UPDATE SET
                     personality_preset = excluded.personality_preset,
                     custom_prompt = excluded.custom_prompt,
@@ -561,9 +599,10 @@ class SqliteWatchlistRepository(WatchlistRepository):
                     notify_on_login = excluded.notify_on_login,
                     auto_add_mentioned = excluded.auto_add_mentioned,
                     track_price_drops = excluded.track_price_drops,
+                    auto_speak_briefing = excluded.auto_speak_briefing,
                     updated_at = excluded.updated_at
                 """,
-                (user_id, preset, custom_prompt, location, notify_on_login, auto_add_mentioned, track_price_drops, now),
+                (user_id, preset, custom_prompt, location, notify_on_login, auto_add_mentioned, track_price_drops, auto_speak_briefing, now),
             )
         return self.get_agent_settings(user_id)
 
@@ -795,4 +834,118 @@ class SqliteWatchlistRepository(WatchlistRepository):
                 (user_id, session_id, briefing_json, now),
             )
         return briefing_data
+
+    def list_rated_movies(self, user_id: str) -> list[dict[str, Any]]:
+        from app.models import poster_url
+        from datetime import datetime, timezone
+
+        with self._connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM rated_movies
+                WHERE user_id = ?
+                ORDER BY updated_at DESC
+                """,
+                (user_id,),
+            ).fetchall()
+
+        now = datetime.now(timezone.utc)
+        results = []
+        for r in rows:
+            d = dict(r)
+            p_path = d.get("poster_path")
+            d["poster_url"] = poster_url(p_path) if p_path else None
+            # Calculate time ago
+            rated_at_str = d.get("updated_at") or d.get("rated_at")
+            rated_ago = "recently"
+            if rated_at_str:
+                try:
+                    dt = datetime.fromisoformat(rated_at_str)
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    seconds = int((now - dt).total_seconds())
+                    if seconds < 60:
+                        rated_ago = "just now"
+                    elif seconds < 3600:
+                        mins = seconds // 60
+                        rated_ago = f"{mins} min{'s' if mins > 1 else ''} ago"
+                    elif seconds < 86400:
+                        hrs = seconds // 3600
+                        rated_ago = f"{hrs} hour{'s' if hrs > 1 else ''} ago"
+                    elif seconds < 2592000:
+                        days = seconds // 86400
+                        rated_ago = f"{days} day{'s' if days > 1 else ''} ago"
+                    elif seconds < 31536000:
+                        months = seconds // 2592000
+                        rated_ago = f"{months} month{'s' if months > 1 else ''} ago"
+                    else:
+                        yrs = seconds // 31536000
+                        rated_ago = f"{yrs} year{'s' if yrs > 1 else ''} ago"
+                except Exception:
+                    rated_ago = "recently"
+            d["rated_ago"] = rated_ago
+            results.append(d)
+        return results
+
+    def rate_movie(
+        self,
+        user_id: str,
+        media_type: str,
+        tmdb_id: int,
+        title: str,
+        poster_path: str | None,
+        release_date: str | None,
+        rating: int,
+    ) -> dict[str, Any]:
+        now = self.utc_now_iso()
+        # Clamp rating between 1 and 5
+        rating = max(1, min(5, int(rating)))
+        with self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO rated_movies (user_id, media_type, tmdb_id, title, poster_path, release_date, rating, rated_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id, media_type, tmdb_id) DO UPDATE SET
+                    title = excluded.title,
+                    poster_path = COALESCE(excluded.poster_path, rated_movies.poster_path),
+                    release_date = COALESCE(excluded.release_date, rated_movies.release_date),
+                    rating = excluded.rating,
+                    updated_at = excluded.updated_at
+                """,
+                (user_id, media_type, tmdb_id, title, poster_path, release_date, rating, now, now),
+            )
+            # Synchronize user_rating in watchlist if present
+            conn.execute(
+                """
+                UPDATE watchlist SET user_rating = ?
+                WHERE user_id = ? AND media_type = ? AND tmdb_id = ?
+                """,
+                (rating, user_id, media_type, tmdb_id),
+            )
+        # Fetch updated record
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM rated_movies WHERE user_id = ? AND media_type = ? AND tmdb_id = ?",
+                (user_id, media_type, tmdb_id),
+            ).fetchone()
+        d = dict(row) if row else {}
+        d["rated_ago"] = "just now"
+        from app.models import poster_url
+        if d.get("poster_path"):
+            d["poster_url"] = poster_url(d["poster_path"])
+        return d
+
+    def delete_rated_movie(self, user_id: str, media_type: str, tmdb_id: int) -> bool:
+        with self._connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM rated_movies WHERE user_id = ? AND media_type = ? AND tmdb_id = ?",
+                (user_id, media_type, tmdb_id),
+            )
+            # Reset user_rating in watchlist if present
+            conn.execute(
+                "UPDATE watchlist SET user_rating = 0 WHERE user_id = ? AND media_type = ? AND tmdb_id = ?",
+                (user_id, media_type, tmdb_id),
+            )
+            return cursor.rowcount > 0
+
 

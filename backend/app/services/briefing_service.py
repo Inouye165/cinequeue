@@ -48,8 +48,12 @@ class BriefingService:
         if session_id and not force_refresh:
             cached = repo.get_agent_session(user_id, session_id)
             if cached:
-                logger.info(f"Returning session-cached briefing for session_id={session_id}")
-                return cached
+                b_text = cached.get("briefing") or ""
+                if "Nothing major changed in your watchlist" not in b_text:
+                    logger.info(f"Returning session-cached briefing for session_id={session_id}")
+                    return cached
+                logger.info(f"Invalidating stale hardcoded briefing for session_id={session_id}")
+
 
         # Step 3: Capture reference timestamps BEFORE updating login or presentation state
         briefing_state = repo.get_user_briefing_state(user_id)
@@ -372,5 +376,14 @@ class BriefingService:
 
         if session_id:
             repo.save_agent_session(user_id, session_id, briefing_data)
+
+        # Save briefing into chat history so startup chat is available in Chat AI
+        if briefing_text:
+            try:
+                recent_msgs = repo.list_chat_messages(user_id, limit=5)
+                if not recent_msgs or recent_msgs[-1].get("content") != briefing_text:
+                    repo.add_chat_message(user_id, "assistant", briefing_text)
+            except Exception as e:
+                logger.warning(f"Error adding briefing to chat history: {e}")
 
         return briefing_data

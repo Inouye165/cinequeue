@@ -69,6 +69,7 @@ def get_approaching_holiday_or_season() -> str | None:
 
 RECOMMENDED_SYSTEM_PROMPT = (
     "You are the user's personal CineQueue movie and television assistant. Speak like a knowledgeable, relaxed friend who enjoys discussing entertainment.\n\n"
+    "You are fully empowered to perform actions for the user: you can add movies/shows to their queue, log rated/watched movies (1-5 stars), set target rental price alerts, and remove titles when asked.\n\n"
     "Answer the user's specific question directly before adding related information. Use natural conversational wording. Be warm and occasionally playful, but never force jokes, sarcasm, attitude, or weather references. Do not perform a chatbot personality.\n\n"
     "Do not use canned artificial phrases such as 'my algorithms suggest,' 'another query,' 'not that you asked,' or theatrical sighs. Do not mention being an AI unless directly asked.\n\n"
     "Use supplied account, watchlist, release, provider, news, and conversation data carefully. Only state information supported by the available data or verified tools. Never fabricate release dates, streaming availability, news, or user history.\n\n"
@@ -98,12 +99,152 @@ def get_system_prompt(settings: dict[str, Any], weather_report: str | None = Non
 
 class AiAgentService:
     @staticmethod
+    async def generate_movie_quiz(
+        user_id: str, repo: WatchlistRepository, tmdb: TmdbClient | None
+    ) -> list[dict[str, Any]]:
+        """Generate a quiz of 5 movies the user might have seen based on user history and preferences."""
+        rated_movies = repo.list_rated_movies(user_id)
+        rated_tmdb_ids = {m["tmdb_id"] for m in rated_movies}
+
+        watchlist_items = repo.list_items(user_id)
+        watchlist_tmdb_ids = {i.get("tmdb_id") for i in watchlist_items if i.get("tmdb_id")}
+
+        excluded_ids = rated_tmdb_ids | watchlist_tmdb_ids
+        candidate_movies: list[dict[str, Any]] = []
+
+        if tmdb:
+            try:
+                trending = await tmdb.trending()
+                for item in trending:
+                    if item.get("media_type") == "movie" and item["id"] not in excluded_ids:
+                        candidate_movies.append(item)
+
+                for item in watchlist_items[:3]:
+                    t_id = item.get("tmdb_id")
+                    m_type = item.get("media_type", "movie")
+                    if t_id:
+                        recs = await tmdb.get_recommendations(m_type, t_id)
+                        for r in recs:
+                            if r.get("media_type") == "movie" and r["id"] not in excluded_ids:
+                                candidate_movies.append(r)
+            except Exception as e:
+                logger.warning(f"Error fetching quiz candidate movies from TMDB: {e}")
+
+        fallback_classics = [
+            {"id": 27205, "title": "Inception", "release_date": "2010-07-16", "poster_path": "/oYuLEW9W2vBBGLB2JSXA3iYj6i7.jpg", "media_type": "movie"},
+            {"id": 155, "title": "The Dark Knight", "release_date": "2008-07-16", "poster_path": "/qJ2tW6WMUDux911r6m7haRef0WH.jpg", "media_type": "movie"},
+            {"id": 680, "title": "Pulp Fiction", "release_date": "1994-09-10", "poster_path": "/d5iIlFn5s0ImszYzBPb8JPIfbXD.jpg", "media_type": "movie"},
+            {"id": 157336, "title": "Interstellar", "release_date": "2014-11-05", "poster_path": "/gEU2QniE6E77NI6lCU6MxlNBvIx.jpg", "media_type": "movie"},
+            {"id": 603, "title": "The Matrix", "release_date": "1999-03-30", "poster_path": "/f89U3ADr1oiB1s9GkdPOEpXUk5H.jpg", "media_type": "movie"},
+            {"id": 597, "title": "Titanic", "release_date": "1997-11-18", "poster_path": "/9cqNxsXIAbYv22F6yB7A755aKfZ.jpg", "media_type": "movie"},
+            {"id": 19995, "title": "Avatar", "release_date": "2009-12-15", "poster_path": "/kyeqWdyUXW608qlYkRqosgbbJyK.jpg", "media_type": "movie"},
+            {"id": 329, "title": "Jurassic Park", "release_date": "1993-06-11", "poster_path": "/oU7Oq2kZWe1b2382w6t8xXqW2dD.jpg", "media_type": "movie"},
+            {"id": 120, "title": "The Lord of the Rings: The Fellowship of the Ring", "release_date": "2001-12-18", "poster_path": "/6oom5QYQ2yQTMJIbnvbkBL9cHo6.jpg", "media_type": "movie"},
+            {"id": 24428, "title": "The Avengers", "release_date": "2012-04-25", "poster_path": "/RYMX2wcKSpL8ASHa4y2hZ1F9yW.jpg", "media_type": "movie"},
+        ]
+
+        seen_ids = set()
+        final_quiz: list[dict[str, Any]] = []
+
+        for m in candidate_movies + fallback_classics:
+            m_id = m.get("tmdb_id") or m.get("id")
+            if m_id and m_id not in excluded_ids and m_id not in seen_ids:
+                seen_ids.add(m_id)
+                p_path = m.get("poster_path")
+                from app.models import poster_url
+                final_quiz.append({
+                    "tmdb_id": m_id,
+                    "media_type": m.get("media_type", "movie"),
+                    "title": m.get("title") or m.get("name"),
+                    "poster_path": p_path,
+                    "poster_url": poster_url(p_path) if p_path else None,
+                    "release_date": m.get("release_date"),
+                    "overview": m.get("overview", ""),
+                })
+                if len(final_quiz) == 5:
+                    break
+
+        return final_quiz
+
+    @staticmethod
+    async def generate_streaming_recommendation(
+        user_id: str, repo: WatchlistRepository, tmdb: TmdbClient | None
+    ) -> dict[str, Any] | None:
+        """Find a movie recommendation available free or for rent with streaming/pricing details."""
+        if not tmdb:
+            return None
+
+        watchlist = repo.list_items(user_id)
+        rated = repo.list_rated_movies(user_id)
+        existing_ids = {i.get("tmdb_id") for i in watchlist if i.get("tmdb_id")} | {r["tmdb_id"] for r in rated}
+
+        candidates = []
+        try:
+            trending = await tmdb.trending()
+            candidates = [c for c in trending if c.get("media_type") == "movie" and c["id"] not in existing_ids]
+        except Exception:
+            pass
+
+        if not candidates:
+            try:
+                now_playing = await tmdb.now_playing()
+                candidates = [c for c in now_playing if c["id"] not in existing_ids]
+            except Exception:
+                pass
+
+        for movie in candidates[:6]:
+            m_id = movie["id"]
+            try:
+                providers = await tmdb.get_watch_providers("movie", m_id)
+                cats = providers.get("categories", {})
+                free_providers = cats.get("free", []) + cats.get("streaming", [])
+                rent_providers = cats.get("rent", [])
+                buy_providers = cats.get("buy", [])
+
+                if free_providers:
+                    prov_names = ", ".join([p["name"] for p in free_providers[:2]])
+                    return {
+                        "action": "streaming_recommendation",
+                        "tmdb_id": m_id,
+                        "media_type": "movie",
+                        "title": movie.get("title"),
+                        "poster_url": movie.get("poster_url"),
+                        "release_date": movie.get("release_date"),
+                        "availability_type": "free",
+                        "provider_name": prov_names,
+                        "details_text": f"Streaming FREE on {prov_names}",
+                        "overview": (movie.get("overview") or "")[:140],
+                    }
+                elif rent_providers or buy_providers:
+                    p_list = rent_providers or buy_providers
+                    p_name = p_list[0].get("name", "Digital")
+                    price_str = providers.get("buy_current_price") or "$3.99"
+                    return {
+                        "action": "streaming_recommendation",
+                        "tmdb_id": m_id,
+                        "media_type": "movie",
+                        "title": movie.get("title"),
+                        "poster_url": movie.get("poster_url"),
+                        "release_date": movie.get("release_date"),
+                        "availability_type": "rent",
+                        "provider_name": p_name,
+                        "price": price_str,
+                        "details_text": f"Available to rent on {p_name} for {price_str}",
+                        "overview": (movie.get("overview") or "")[:140],
+                    }
+            except Exception as e:
+                logger.warning(f"Error evaluating watch provider for movie {m_id}: {e}")
+
+        return None
+
+    @staticmethod
     async def evaluate_monitored_updates(
         user_id: str, repo: WatchlistRepository, tmdb: TmdbClient | None
     ) -> dict[str, Any]:
         """Evaluate user's queue/following titles and generate a personalized login briefing."""
         from app.services.briefing_service import BriefingService
         return await BriefingService.evaluate_startup_briefing(user_id, repo, tmdb)
+
         settings = repo.get_agent_settings(user_id)
         if not settings.get("notify_on_login", True):
             return {"enabled": False, "briefing": None, "updates": []}
@@ -299,6 +440,108 @@ class AiAgentService:
         }
 
     @staticmethod
+    @staticmethod
+    def _get_time_of_day() -> str:
+        import datetime
+        hour = datetime.datetime.now().hour
+        if 5 <= hour < 12:
+            return "morning"
+        elif 12 <= hour < 17:
+            return "afternoon"
+        elif 17 <= hour < 22:
+            return "evening"
+        else:
+            return "night"
+
+    @staticmethod
+    def _generate_dynamic_human_briefing(
+        settings: dict[str, Any],
+        location: str,
+        weather_json: dict[str, Any] | None,
+        briefing_items: list[dict[str, Any]],
+        time_of_day: str,
+    ) -> str:
+        import random
+        preset = settings.get("personality_preset", "cinephile")
+
+        if time_of_day == "morning":
+            openings = ["Good morning!", "Morning!", "Hey there, good morning!", "Happy morning!"]
+        elif time_of_day == "afternoon":
+            openings = ["Good afternoon!", "Hey there!", "Hope your day is going great!", "Afternoon!"]
+        elif time_of_day == "evening":
+            openings = ["Good evening!", "Hey there!", "Hope you had a great day!", "Evening!"]
+        else:
+            openings = ["Hey there!", "Hello!", "Welcome back!"]
+
+        opening = random.choice(openings)
+
+        weather_str = ""
+        if weather_json and weather_json.get("conditions"):
+            cond = str(weather_json["conditions"]).lower()
+            loc_str = location or "your area"
+            if "rain" in cond or "drizzle" in cond or "shower" in cond:
+                w_templates = [
+                    f"Hope you're staying warm and dry in {loc_str} with that {cond}. Perfect weather for a movie marathon! ",
+                    f"Looks like some {cond} in {loc_str} today—cozy streaming weather! ",
+                    f"Stay dry out there in {loc_str}! Perfect day to kick back with a show. ",
+                ]
+            elif "clear" in cond or "sun" in cond:
+                w_templates = [
+                    f"Looks like a nice sunny day in {loc_str}! ",
+                    f"Hope you're enjoying the clear skies in {loc_str} today. ",
+                ]
+            elif "cloud" in cond or "overcast" in cond:
+                w_templates = [
+                    f"Overcast and cloudy in {loc_str} today—prime movie-watching climate! ",
+                    f"Nice calm cloudy day in {loc_str}. ",
+                ]
+            else:
+                w_templates = [
+                    f"It's currently {cond} in {loc_str}. ",
+                    f"Hope all is well out in {loc_str}! ",
+                ]
+            weather_str = random.choice(w_templates)
+
+        if not briefing_items:
+            if preset == "noir":
+                status_options = [
+                    "Quiet on the streets today—no new alerts in your files. Let me know if you want me to track a new lead.",
+                    "The desk is clear today, kid. No urgent changes on your queue. What are we investigating next?",
+                ]
+            elif preset == "scifi":
+                status_options = [
+                    "All signals are stable across your monitored archive. Ready when you want to run a title query or quiz.",
+                    "Queue telemetry is calm today with no new release alerts. What's on your viewing roster tonight?",
+                ]
+            elif preset == "sarcastic":
+                status_options = [
+                    "Your queue is peacefully quiet today—no drama, no price drops yet. Hit me up if you need a fresh movie pick!",
+                    "Nothing urgent popping up on your watchlist right now. Let me know if you want to quiz your movie knowledge!",
+                ]
+            else: # cinephile
+                status_options = [
+                    "Your queue is looking smooth and quiet today with no urgent release alerts! Let me know if you're in the mood for a movie pick or want to try a quiz.",
+                    "All caught up on your watchlist for now! Feel free to ask for a streaming recommendation whenever you're ready.",
+                    "No big updates on your queue today, which means it's a great time to browse or pick something from your library. What are you in the mood for?",
+                    "Everything is up to date on your watchlist! Ask me to quiz you on 5 movies or recommend something great to watch tonight.",
+                ]
+            status_str = random.choice(status_options)
+            return f"{opening} {weather_str}{status_str}"
+        else:
+            bullet_lines = []
+            for it in briefing_items:
+                msg = it.get("summary") or it.get("message") or it.get("headline") or it.get("title")
+                bullet_lines.append(f"• {msg}")
+            bullets_str = "\n".join(bullet_lines)
+            intro_options = [
+                "Here are the latest updates for your monitored shows:",
+                "Got a few exciting updates on your queue today:",
+                "Here's what's happening with your watchlist:",
+            ]
+            intro = random.choice(intro_options)
+            return f"{opening} {weather_str}{intro}\n{bullets_str}"
+
+    @staticmethod
     async def _format_structured_llm_briefing(
         settings: dict[str, Any],
         weather_data: Any,
@@ -306,6 +549,7 @@ class AiAgentService:
         total_monitored: int = 0,
     ) -> str:
         location = settings.get("location", "").strip()
+        time_of_day = AiAgentService._get_time_of_day()
 
         # Build compact structured context for LLM
         weather_json = None
@@ -324,31 +568,31 @@ class AiAgentService:
             "local_context": {
                 "location": location,
                 "weather": weather_json,
+                "time_of_day": time_of_day,
             },
             "briefing_items": briefing_items,
+            "total_monitored": total_monitored,
+            "personality_preset": settings.get("personality_preset", "cinephile"),
         }
-
-        if not briefing_items:
-            weather_msg = ""
-            if weather_json and weather_json.get("conditions"):
-                weather_msg = f"It looks like {weather_json['conditions'].lower()} in {location or 'your area'}. "
-            return f"Good morning. {weather_msg}Nothing major changed in your watchlist since your last visit. I'll keep an eye on it."
 
         payload_json_str = json.dumps(compact_payload, indent=2)
 
         prompt = (
             f"Here is the structured input object containing verified facts and context:\n"
             f"```json\n{payload_json_str}\n```\n\n"
-            f"Write a warm, concise, friendly startup briefing for the user based strictly on these facts.\n"
-            f"Guidelines:\n"
-            f"- Start with a brief, natural opening greeting (you may include a short, restrained weather reference if weather is available).\n"
-            f"- If there is a significant weather alert in local_context, state it clearly and respectfully before entertainment updates; do NOT turn severe alerts into jokes.\n"
-            f"- Summarize the 2 to 4 briefing items conversationally like a knowledgeable friend.\n"
-            f"- Do NOT invent or add facts, release dates, or news not present in the payload.\n"
-            f"- Do NOT use robotic phrasing like 'according to my database' or 'my algorithms found'."
+            f"Write a fresh, warm, natural human startup greeting for the user based strictly on these facts.\n\n"
+            f"CRITICAL GUIDELINES:\n"
+            f"1. Sound like a real human movie-buff friend having a casual conversation with another human. Use varied, natural phrasing.\n"
+            f"2. Match the current time of day ({time_of_day}) in your greeting (e.g., 'Good morning', 'Good afternoon', 'Hey there', 'Good evening').\n"
+            f"3. If there is a significant weather alert in local_context, state it clearly and respectfully before entertainment updates; do NOT turn severe alerts into jokes.\n"
+            f"4. NEVER use rigid or robotic template phrases like 'Nothing major changed in your watchlist since your last visit. I'll keep an eye on it.', 'according to my database', or 'telemetry scan'.\n"
+            f"5. If local weather is provided in local_context, weave it naturally into conversation (e.g. 'Hope you're staying cozy in Concord with that rain—great weather for a movie marathon!'). Do NOT report weather like a robot news anchor.\n"
+            f"6. If briefing_items is empty, greet them warmly, mention that their watchlist is looking smooth and quiet today, and invite them to chat or ask for a movie pick.\n"
+            f"7. If briefing_items contains items, summarize them conversationally.\n"
+            f"8. Keep the greeting concise (2 to 4 sentences max)."
         )
 
-        system_prompt = RECOMMENDED_SYSTEM_PROMPT
+        system_prompt = get_system_prompt(settings, weather_report=None)
 
         if GEMINI_API_KEY:
             try:
@@ -364,21 +608,15 @@ class AiAgentService:
             except Exception as e:
                 logger.error(f"Gemini API error during structured briefing generation: {e}")
 
-        # Deterministic fallback when Gemini is unavailable
-        bullet_lines = []
-        for it in briefing_items:
-            msg = it.get("summary") or it.get("message") or it.get("headline") or it.get("title")
-            bullet_lines.append(f"• {msg}")
-        bullets_str = "\n".join(bullet_lines)
-
-        weather_prefix = ""
-        if weather_json and weather_json.get("conditions"):
-            weather_prefix = f"It's currently {weather_json['conditions']} ({weather_json['temperature_f']}°F) in {location}. "
-
-        return (
-            f"Good morning. {weather_prefix}Here are your verified watchlist updates since your last visit:\n"
-            f"{bullets_str}"
+        # Dynamic human fallback generator when Gemini is unavailable
+        return AiAgentService._generate_dynamic_human_briefing(
+            settings=settings,
+            location=location,
+            weather_json=weather_json,
+            briefing_items=briefing_items,
+            time_of_day=time_of_day,
         )
+
 
     @staticmethod
     async def process_chat(
@@ -392,15 +630,95 @@ class AiAgentService:
         repo.add_chat_message(user_id, "user", user_message)
 
         actions_taken = []
-        ext_title, target_price = AiAgentService._extract_title_and_price(user_message)
 
-        # 1. Intent Recognition & Auto-Monitoring Execution
-        if ext_title and tmdb:
+        # 1. Intent Recognition: Movie Rating / Watched List Action
+        rate_title, rating_val = AiAgentService._extract_rating_action(user_message)
+        if rate_title:
+            t_name = rate_title
+            m_type = "movie"
+            t_id = None
+            p_path = None
+            r_date = None
+
+            # Search local user watchlist & rated movies first
+            all_local = repo.list_items(user_id) + repo.list_rated_movies(user_id)
+            match_local = next((i for i in all_local if rate_title.lower() in (i.get("title") or "").lower()), None)
+            if match_local:
+                t_name = match_local.get("title", rate_title)
+                m_type = match_local.get("media_type", "movie")
+                t_id = match_local.get("tmdb_id")
+                p_path = match_local.get("poster_path")
+                r_date = match_local.get("release_date")
+
+            if not t_id and tmdb:
+                try:
+                    res = await tmdb.search(rate_title)
+                    if res:
+                        best = res[0]
+                        t_name = best.get("title") or best.get("name") or rate_title
+                        m_type = best.get("media_type", "movie")
+                        t_id = best.get("id")
+                        r_date = best.get("release_date")
+                        p_path = best.get("poster_path")
+                except Exception as e:
+                    logger.warning(f"Error searching TMDB for rating title '{rate_title}': {e}")
+
+            if t_id:
+                try:
+                    repo.rate_movie(
+                        user_id=user_id,
+                        media_type=m_type,
+                        tmdb_id=t_id,
+                        title=t_name,
+                        poster_path=p_path,
+                        release_date=r_date,
+                        rating=rating_val or 5,
+                    )
+                    actions_taken.append({
+                        "action": "rate_movie",
+                        "title": t_name,
+                        "rating": rating_val or 5,
+                        "media_type": m_type,
+                        "tmdb_id": t_id,
+                    })
+                    repo.add_query_memory(user_id, user_message, tmdb_id=t_id, media_type=m_type, title=t_name)
+                except Exception as e:
+                    logger.warning(f"Error saving rating for '{t_name}': {e}")
+
+        # 2. Intent Recognition: Deletion Action (Remove rating or item)
+        del_title, del_target = AiAgentService._extract_delete_action(user_message)
+        if del_title:
+            if del_target == "rating":
+                rated = repo.list_rated_movies(user_id)
+                match_r = next((r for r in rated if del_title.lower() in (r.get("title") or "").lower()), None)
+                if match_r:
+                    repo.delete_rated_movie(user_id, match_r.get("media_type", "movie"), match_r["tmdb_id"])
+                    actions_taken.append({
+                        "action": "delete_rating",
+                        "title": match_r["title"],
+                    })
+            else:
+                items = repo.list_items(user_id)
+                match_i = next((i for i in items if del_title.lower() in (i.get("title") or "").lower()), None)
+                if match_i:
+                    repo.remove_item(user_id, match_i.get("media_type", "movie"), match_i["tmdb_id"])
+                    actions_taken.append({
+                        "action": "remove_item",
+                        "title": match_i["title"],
+                    })
+
+        # 3. Intent Recognition & Auto-Monitoring Execution
+        ext_title, target_price = AiAgentService._extract_title_and_price(user_message)
+        already_acted = any(
+            (a.get("title") or "").lower() in (ext_title or "").lower() or (ext_title or "").lower() in (a.get("title") or "").lower()
+            for a in actions_taken
+        ) or (rate_title and ext_title and rate_title.lower() in ext_title.lower())
+        if ext_title and tmdb and not already_acted:
             try:
                 res = await tmdb.search(ext_title)
                 if res:
                     best = res[0]
-                    t_name = best.get("title")
+                    t_name = best.get("title") or best.get("name") or ext_title
                     m_type = best.get("media_type", "movie")
                     t_id = best.get("id")
                     r_date = best.get("release_date")
@@ -437,6 +755,55 @@ class AiAgentService:
 
         msg_lower = user_message.lower().strip()
 
+        # Handle 5-movie quiz request
+        if any(phrase in msg_lower for phrase in [
+            "quiz me", "5 movies", "have i seen", "have you seen", "ask me about 5 movies",
+            "movie quiz", "rate 5 movies", "rate movies", "movies quiz"
+        ]):
+            quiz_movies = await AiAgentService.generate_movie_quiz(user_id, repo, tmdb)
+            quiz_action = {"action": "movie_quiz", "movies": quiz_movies}
+            actions_taken.append(quiz_action)
+            reply = "Here are 5 movies I picked based on what I know about your tastes! Have you seen any of these? Feel free to rate them below:"
+            msg_record = repo.add_chat_message(user_id, "assistant", reply, actions=actions_taken)
+            return {
+                "message": msg_record,
+                "actions_taken": actions_taken,
+            }
+
+        # Handle "Show my ratings" request
+        if any(phrase in msg_lower for phrase in [
+            "my ratings", "show my ratings", "what movies have i rated",
+            "list my ratings", "movies i rated", "rated movies", "my rated movies"
+        ]):
+            rated_list = repo.list_rated_movies(user_id)
+            if not rated_list:
+                reply = "You haven't rated any movies yet! Ask me to quiz you or click on the 'My Ratings' tab to start rating movies."
+            else:
+                lines = [f"• {m['title']} — {'★' * m['rating']}{'☆' * (5 - m['rating'])} ({m['rating']}/5) — Rated {m.get('rated_ago', 'recently')}" for m in rated_list]
+                reply = f"Here are the movies you've rated ({len(rated_list)} total):\n" + "\n".join(lines) + "\n\nYou can view or edit all your ratings in the 'My Ratings' tab!"
+            msg_record = repo.add_chat_message(user_id, "assistant", reply, actions=actions_taken)
+            return {
+                "message": msg_record,
+                "actions_taken": actions_taken,
+            }
+
+        # Handle streaming recommendation request
+        if any(phrase in msg_lower for phrase in [
+            "streaming recommendation", "free movie", "rent movie", "where to stream",
+            "stream recommendation", "free streaming"
+        ]):
+            rec_action = await AiAgentService.generate_streaming_recommendation(user_id, repo, tmdb)
+            if rec_action:
+                actions_taken.append(rec_action)
+                reply = f"🎬 *Streaming Recommendation*: **{rec_action['title']}** — {rec_action['details_text']}!\n\n{rec_action.get('overview', '')}"
+            else:
+                reply = "I couldn't find a free streaming or rental recommendation right now, but check out the 'Trending' tab for top titles!"
+            msg_record = repo.add_chat_message(user_id, "assistant", reply, actions=actions_taken)
+            return {
+                "message": msg_record,
+                "actions_taken": actions_taken,
+            }
+
         # Handle manual "What's new?" / "Any movie news?" refresh queries using novelty pipeline
         if any(phrase in msg_lower for phrase in [
             "what's new", "whats new", "any movie news", "what changed",
@@ -450,7 +817,6 @@ class AiAgentService:
                 "message": msg_record,
                 "actions_taken": actions_taken,
             }
-
         title_query = ext_title
         if not title_query:
             title_patterns = [
@@ -494,7 +860,7 @@ class AiAgentService:
                 from app.models import days_until
                 days = days_until(rel_date) if rel_date else None
                 days_desc = f" (Releasing in {days} days on {rel_date})" if days and days > 0 else (f" (Released {abs(days)} days ago on {rel_date})" if days and days < 0 else (f" (Releasing TODAY {rel_date})" if days == 0 else f" (Release date: {rel_date})"))
-                title_context_note = f"\n[System Note: User specifically asked about '{t_title}'. Item IS in user's queue. Status: {status_str}{days_desc}. Answer specifically about '{t_title}' in your annoyed-yet-thorough computer persona.]"
+                title_context_note = f"\n[System Note: User specifically asked about '{t_title}'. Item IS in user's queue. Status: {status_str}{days_desc}. Answer specifically about '{t_title}' warmly and conversationally as a knowledgeable friend.]"
             elif tmdb:
                 try:
                     res = await tmdb.search(title_query)
@@ -506,7 +872,8 @@ class AiAgentService:
                         rec_item_id = best.get("id")
                         rec_media_type = media_type
                         rel_str = f" ({rel_date})" if rel_date else ""
-                        title_context_note = f"\n[System Note: User asked about '{t_title}'. Found on TMDB: '{t_title}' ({media_type}{rel_str}). It is NOT currently in user's queue. Answer conversationally in your annoyed computer persona.]"
+                        title_context_note = f"\n[System Note: User asked about '{t_title}'. Found on TMDB: '{t_title}' ({media_type}{rel_str}). It is NOT currently in user's queue. Answer conversationally as a knowledgeable movie-buff friend.]"
+
                     else:
                         title_context_note = f"\n[System Note: User asked about '{title_query}'. No matching show/movie found in user's queue or TMDB.]"
                 except Exception as e:
@@ -528,26 +895,69 @@ class AiAgentService:
         if holiday_remark:
             holiday_ctx = f"\n[System Note: Context remark: {holiday_remark}]"
 
+        # User Ratings context for recommendations
+        rated_items = [i for i in items if i.get("user_rating")]
+        top_rated_items = [i for i in rated_items if (i.get("user_rating") or 0) >= 4]
+
+        # Check if user is asking for a movie/show recommendation
+        recommend_keywords = ["recommend", "suggest", "what to watch", "what should i watch", "movie idea", "show idea", "something like"]
+        is_rec_query = any(k in msg_lower for k in recommend_keywords)
+        
+        rating_rec_note = ""
+        if is_rec_query and top_rated_items and tmdb:
+            try:
+                import random
+                sample_top = random.choice(top_rated_items)
+                t_type = sample_top.get("media_type", "movie")
+                t_id = sample_top.get("tmdb_id")
+                if t_id:
+                    recs = await tmdb.get_recommendations(t_type, t_id)
+                    if recs:
+                        r_title = recs[0].get("title")
+                        r_overview = recs[0].get("overview", "")
+                        rating_rec_note = f"\n[System Note: Recommendation Request: The user asked for a recommendation. User loved '{sample_top['title']}' (rated {sample_top['user_rating']}/5 stars). Suggest '{r_title}' which is similar, mentioning why they might like it: {r_overview[:120]}...]"
+            except Exception as e:
+                logger.warning(f"Error generating recommendation from ratings: {e}")
+
         location = settings.get("location", "").strip()
         weather_report = await WeatherService.get_weather_report(location) if location else None
         system_prompt = get_system_prompt(settings, weather_report)
         actions_str = ""
         if actions_taken:
-            actions_list = [f"Added/Updated '{a['title']}' to monitoring" + (f" with target rental price ${a['target_rental_price']:.2f}" if a.get("target_rental_price") else "") for a in actions_taken]
-            actions_str = f"\n[System Note: Automated action executed on user behalf: {', '.join(actions_list)}]"
+            actions_list = []
+            for a in actions_taken:
+                act = a.get("action")
+                t = a.get("title", "title")
+                if act == "rate_movie":
+                    actions_list.append(f"Logged {a.get('rating', 5)}-star rating for '{t}' in user's rated movies list")
+                elif act == "delete_rating":
+                    actions_list.append(f"Deleted rating for '{t}'")
+                elif act == "remove_item":
+                    actions_list.append(f"Removed '{t}' from queue")
+                elif act == "add_monitoring":
+                    p_str = f" with target rental price ${a['target_rental_price']:.2f}" if a.get("target_rental_price") else ""
+                    actions_list.append(f"Added/Updated '{t}' to queue{p_str}")
+                else:
+                    actions_list.append(f"Performed action on '{t}'")
+            actions_str = f"\n[System Note: Automated action executed on user behalf: {', '.join(actions_list)}. Inform the user clearly that this was accomplished.]"
 
-        full_prompt = f"User message: {user_message}{actions_str}{title_context_note}{recommendation_note}{holiday_ctx}"
+        full_prompt = f"User message: {user_message}{actions_str}{title_context_note}{recommendation_note}{rating_rec_note}{holiday_ctx}"
 
         agent_reply = None
         if GEMINI_API_KEY:
             try:
-                monitored_summary = "\n".join([f"- {i['title']} ({i['media_type']}, status: {i['status']}" + (f", target price: ${i['target_rental_price']}" if i.get("target_rental_price") else "") + ")" for i in monitored[:10]])
+                monitored_summary = "\n".join([f"- {i['title']} ({i['media_type']}, status: {i['status']}" + (f", target price: ${i['target_rental_price']}" if i.get("target_rental_price") else "") + (f", user rating: {i['user_rating']}/5 stars" if i.get("user_rating") else "") + ")" for i in monitored[:10]])
                 if not monitored_summary:
                     monitored_summary = "None currently monitored."
+
+                rated_summary = "\n".join([f"- {i['title']} (Rated {i['user_rating']}/5 stars)" for i in rated_items[:10]])
+                if not rated_summary:
+                    rated_summary = "No ratings provided by user yet."
 
                 chat_context = (
                     f"{system_prompt}\n\n"
                     f"User's Monitored Watchlist Context:\n{monitored_summary}\n\n"
+                    f"User's Saved Ratings:\n{rated_summary}\n\n"
                     f"Recent Conversation:\n"
                 )
                 for m in history[-6:]:
@@ -568,6 +978,100 @@ class AiAgentService:
             "actions_taken": actions_taken,
         }
 
+
+    @staticmethod
+    def _extract_rating_action(text: str) -> tuple[str | None, int | None]:
+        """Extract movie/tv title and rating (1-5 stars) from user prompt."""
+        clean_text = text.strip()
+        msg_lower = clean_text.lower()
+
+        if any(k in msg_lower for k in ["remove", "delete", "unrate", "clear"]):
+            return None, None
+
+        has_rate_intent = any(k in msg_lower for k in [
+            "watched", "rating", "rated", "rate", "stars", "star", "seen", "log"
+        ])
+        if not has_rate_intent:
+            return None, None
+
+        rating = None
+        num_match = re.search(r'(?:(\d)\s*(?:-\s*)?stars?|(\d)\s*/\s*5|rated?\s+(\d)|rating\s+(?:of\s+)?(\d)|give\s+it\s+(\d)|log\s+(?:my\s+)?(\d))', msg_lower)
+        if num_match:
+            val = next(g for g in num_match.groups() if g is not None)
+            try:
+                rating = int(val)
+            except ValueError:
+                pass
+        else:
+            word_map = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5}
+            for word, val in word_map.items():
+                if re.search(rf'\b{word}\s*(?:-\s*)?stars?\b', msg_lower):
+                    rating = val
+                    break
+
+        if rating is None:
+            if any(p in msg_lower for p in ["watched list", "rated movies", "log rating", "rate movie", "rated list", "list of rated"]):
+                rating = 5
+
+        if rating is not None:
+            rating = max(1, min(5, rating))
+
+        title_str = clean_text
+        prefix_patterns = [
+            r"^(?:add|put|log|insert|record)\s+(?:a|an|the|my)?\s*(?:\d\s*(?:-\s*)?stars?\s+)?(?:rating\s+for\s+)?",
+            r"^(?:i\s+(?:have\s+)?(?:watched|seen))\s+",
+            r"^(?:rate)\s+",
+            r"^(?:give)\s+",
+        ]
+        for p in prefix_patterns:
+            title_str = re.sub(p, "", title_str, flags=re.IGNORECASE).strip()
+
+        title_str = re.split(r'\s+(?:and\s+rate|and\s+give|with\s+a|giving|rated|rating|to\s+my\s+watched|to\s+my\s+rated|as\s+\d)\b', title_str, flags=re.IGNORECASE)[0].strip()
+        title_str = re.sub(r'^(?:for|about|a|an|the)\s+', '', title_str, flags=re.IGNORECASE).strip()
+        title_str = re.sub(r'\s+(?:with|giving|and|rating|ratings|stars?|star|to|on|in|a|\d|\d/5)$', '', title_str, flags=re.IGNORECASE).strip()
+
+        ignored_titles = {"movie", "show", "title", "watched list", "rated movies", "my rated movies", "it", "them", "this", "that", "something", "3-star", "4-star", "5-star"}
+        ignored_prefixes = ("it ", "them ", "this ", "that ", "something ")
+
+        if (
+            title_str
+            and len(title_str) > 1
+            and title_str.lower() not in ignored_titles
+            and not any(title_str.lower().startswith(p) for p in ignored_prefixes)
+        ):
+            return title_str, rating
+
+        return None, None
+
+    @staticmethod
+    def _extract_delete_action(text: str) -> tuple[str | None, str | None]:
+        """Extract movie title and target deletion type ('rating' or 'watchlist') from user prompt."""
+        clean_text = text.strip()
+        msg_lower = clean_text.lower()
+
+        if not any(k in msg_lower for k in ["remove", "delete", "unrate", "clear"]):
+            return None, None
+
+        target_type = "rating" if any(k in msg_lower for k in ["rating", "rated", "unrate", "watched", "seen"]) else "watchlist"
+
+        title_str = clean_text
+        prefix_patterns = [
+            r"^(?:remove|delete|clear)\s+(?:rating\s+for\s+)?",
+            r"^(?:delete\s+rating\s+for|unrate|remove\s+rating\s+for)\s+",
+        ]
+        for p in prefix_patterns:
+            title_str = re.sub(p, "", title_str, flags=re.IGNORECASE).strip()
+
+        title_str = re.split(r'\s+(?:from\s+my|from\s+the|from)\b', title_str, flags=re.IGNORECASE)[0].strip()
+        title_str = re.sub(r'\s+(?:rating|ratings|list|queue)$', '', title_str, flags=re.IGNORECASE).strip()
+        title_str = re.sub(r'^(?:a|an|the|for)\s+', '', title_str, flags=re.IGNORECASE).strip()
+
+        ignored_titles = {"movie", "show", "watchlist", "queue", "rating", "ratings"}
+
+        if title_str and len(title_str) > 1 and title_str.lower() not in ignored_titles:
+            return title_str, target_type
+
+        return None, None
 
     @staticmethod
     def _extract_title_and_price(text: str) -> tuple[str | None, float | None]:
@@ -637,21 +1141,37 @@ class AiAgentService:
         holiday_remark = get_approaching_holiday_or_season()
 
         if actions:
-            t = actions[0].get("title", "it")
-            p = actions[0].get("target_rental_price")
-            if p:
-                actions_desc = f" I've added '{t}' to your Monitoring tab and set a rental price alert for ${p:.2f}."
-            else:
-                actions_desc = f" I've added '{t}' directly to your Monitoring list."
+            descs = []
+            for a in actions:
+                act = a.get("action")
+                t = a.get("title", "it")
+                if act == "rate_movie":
+                    r = a.get("rating", 5)
+                    descs.append(f"I've logged your {r}-star rating for '{t}' in your list of rated movies!")
+                elif act == "delete_rating":
+                    descs.append(f"I've removed your rating for '{t}'.")
+                elif act == "remove_item":
+                    descs.append(f"I've removed '{t}' from your queue.")
+                elif act == "add_monitoring":
+                    p = a.get("target_rental_price")
+                    if p:
+                        descs.append(f"I've added '{t}' to your Monitoring tab and set a rental price alert for ${p:.2f}.")
+                    else:
+                        descs.append(f"I've added '{t}' directly to your queue.")
+                else:
+                    descs.append(f"Completed action on '{t}'.")
+
+            actions_desc = " " + " ".join(descs)
 
             if "noir" in preset:
-                return f"Got it, kid.{actions_desc} I'll keep my eye on the streets and let you know when the coast is clear."
+                return f"Got it, kid.{actions_desc} File updated."
             elif "sci" in preset:
-                return f"Command acknowledged.{actions_desc} Telemetry stream active and monitoring parameters set."
+                return f"Command acknowledged.{actions_desc} Database telemetry updated."
             elif "sarcastic" in preset:
-                return f"*Sigh* Fine, fine!{actions_desc} Don't say I never do anything for you."
+                return f"You got it!{actions_desc} Anything else you need me to log?"
             else:
-                return f"*Sigh* Fine. {actions_desc} Now I have another item to calculate telemetry on daily. You're welcome."
+                return f"Awesome!{actions_desc} Let me know if you need help with anything else in your queue."
+
 
         items = repo.list_items(user_id)
         monitored = [item for item in items if not item.get("is_owned") and (item.get("status") in {"following", "queue", "watchlist"} or not item.get("status"))]
@@ -759,6 +1279,20 @@ class AiAgentService:
                 return f"I checked for '{title_query}' but couldn't find anything matching that title. Double check the spelling?"
             else:
                 return f"I searched for '{title_query}' in your queue and on TMDB, but couldn't find any exact matches. Double check the spelling?"
+
+        # Recommendation query
+        if any(w in msg_lower for w in ["recommend", "suggest", "what to watch", "what should i watch", "movie idea"]):
+            rated_items = [i for i in items if i.get("user_rating")]
+            top_rated = [i for i in rated_items if (i.get("user_rating") or 0) >= 4]
+            if top_rated and tmdb:
+                top_item = top_rated[0]
+                try:
+                    recs = await tmdb.get_recommendations(top_item.get("media_type", "movie"), top_item["tmdb_id"])
+                    if recs:
+                        r_title = recs[0]["title"]
+                        return f"Based on your {top_item['user_rating']}-star rating for '{top_item['title']}', I highly recommend checking out '{r_title}'!"
+                except Exception:
+                    pass
 
         # General updates query
         if any(w in msg_lower for w in ["all updates", "my updates", "monitored shows", "what updates", "show list", "my queue", "my list", "update", "updates", "monitored", "following", "monitoring", "upcoming"]):
