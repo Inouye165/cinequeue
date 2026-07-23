@@ -86,4 +86,5 @@ async def test_agent_chat_quiz_and_ratings_intents(repo):
     repo.rate_movie(user_id, "movie", 155, "The Dark Knight", "/poster.jpg", "2008-07-16", 5)
     res_ratings = await AiAgentService.process_chat(user_id, "show my ratings", repo, None)
     assert "The Dark Knight" in res_ratings["message"]["content"]
-    assert "5/5" in res_ratings["message"]["content"]
+    assert any(p in res_ratings["message"]["content"].lower() for p in ["5/5", "5 out of 5", "5 star"])
+

@@ -107,4 +107,6 @@ async def test_live_gemini_provider_integration():
         "What is the capital of France? Answer in one short sentence."
     )
     assert res is not None
-    assert "Paris" in res
+    text_out = res.text if hasattr(res, "text") else str(res)
+    assert "Paris" in text_out
+
