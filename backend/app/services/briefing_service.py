@@ -27,6 +27,18 @@ def generate_item_key(item_type: str, title_id: str, detail_suffix: str) -> str:
     return f"{clean_type}:{clean_title}:{clean_suffix}"
 
 
+def _ensure_briefing_in_chat_history(user_id: str, briefing_text: str | None, repo: WatchlistRepository) -> None:
+    """Ensure the startup briefing greeting is recorded in assistant chat history."""
+    if not briefing_text or not briefing_text.strip():
+        return
+    try:
+        recent_msgs = repo.list_chat_messages(user_id, limit=5)
+        if not recent_msgs or recent_msgs[-1].get("content") != briefing_text:
+            repo.add_chat_message(user_id, "assistant", briefing_text)
+    except Exception as e:
+        logger.warning(f"Error ensuring briefing in chat history: {e}")
+
+
 class BriefingService:
     @staticmethod
     async def evaluate_startup_briefing(
@@ -51,8 +63,10 @@ class BriefingService:
                 b_text = cached.get("briefing") or ""
                 if "Nothing major changed in your watchlist" not in b_text:
                     logger.info(f"Returning session-cached briefing for session_id={session_id}")
+                    _ensure_briefing_in_chat_history(user_id, b_text, repo)
                     return cached
                 logger.info(f"Invalidating stale hardcoded briefing for session_id={session_id}")
+
 
 
         # Step 3: Capture reference timestamps BEFORE updating login or presentation state
@@ -378,12 +392,7 @@ class BriefingService:
             repo.save_agent_session(user_id, session_id, briefing_data)
 
         # Save briefing into chat history so startup chat is available in Chat AI
-        if briefing_text:
-            try:
-                recent_msgs = repo.list_chat_messages(user_id, limit=5)
-                if not recent_msgs or recent_msgs[-1].get("content") != briefing_text:
-                    repo.add_chat_message(user_id, "assistant", briefing_text)
-            except Exception as e:
-                logger.warning(f"Error adding briefing to chat history: {e}")
+        _ensure_briefing_in_chat_history(user_id, briefing_text, repo)
 
         return briefing_data
+

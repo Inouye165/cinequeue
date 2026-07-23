@@ -74,7 +74,7 @@ async def test_call_gemini_api_non_200_and_timeout(monkeypatch):
     monkeypatch.setattr("app.services.agent_service.GEMINI_API_KEY", "fake_key")
 
     # Rate limited 429
-    def mock_post_429(url, **kwargs):
+    def mock_post_429(*args, **kwargs):
         return httpx.Response(429, json={"error": "Rate limit exceeded"})
 
     monkeypatch.setattr(httpx.AsyncClient, "post", mock_post_429)
@@ -84,8 +84,9 @@ async def test_call_gemini_api_non_200_and_timeout(monkeypatch):
     assert result_429.http_status == 429
 
     # Timeout
-    def mock_post_timeout(url, **kwargs):
+    def mock_post_timeout(*args, **kwargs):
         raise httpx.TimeoutException("Connection timed out")
+
 
     monkeypatch.setattr(httpx.AsyncClient, "post", mock_post_timeout)
     result_timeout = await AiAgentService._call_gemini_api("sys", [], "hello")

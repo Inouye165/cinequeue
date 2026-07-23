@@ -891,15 +891,25 @@ class AiAgentService:
                                 text_out = parts[0].get("text", "").strip()
                                 if text_out:
                                     logger.info(
-                                        f"Gemini API call succeeded with model '{model_name}'",
+                                        f"[AI LLM Call] Model requested: '{GEMINI_PRIMARY_MODEL}' | Model used: '{model_name}' | Provider: gemini | Duration: {duration_ms}ms\n"
+                                        f"--- PROMPT SENT TO GEMINI ---\n{json.dumps(payload, indent=2)}\n"
+                                        f"--- RAW RESPONSE FROM GEMINI ({model_name}) ---\n{text_out}",
                                         extra=sanitize_log_data({
+                                            "ai_event": "gemini_generation",
                                             "provider": "gemini",
                                             "model_requested": GEMINI_PRIMARY_MODEL,
                                             "model_used": model_name,
                                             "http_status": 200,
                                             "duration_ms": duration_ms,
+                                            "prompt_system_instruction": system_instruction,
+                                            "prompt_recent_history": recent_history,
+                                            "prompt_user_message": user_message,
+                                            "prompt_context_notes": context_notes,
+                                            "full_payload_sent": payload,
+                                            "raw_gemini_response": text_out,
                                         })
                                     )
+
                                     return AgentResult(
                                         text=text_out,
                                         provider="gemini",
