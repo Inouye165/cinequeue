@@ -253,6 +253,98 @@ export const api = {
     );
   },
 
+  // Agent Decisions Admin API
+  adminAgentDecisionLogs: (params: { limit?: number; offset?: number; user_id?: string; candidate_type?: string; fallback_only?: boolean; model?: string; start_date?: string; end_date?: string }, token?: string, signal?: AbortSignal) => {
+    const query = new URLSearchParams();
+    if (params.limit) query.set("limit", String(params.limit));
+    if (params.offset) query.set("offset", String(params.offset));
+    if (params.user_id) query.set("user_id", params.user_id);
+    if (params.candidate_type) query.set("candidate_type", params.candidate_type);
+    if (params.fallback_only) query.set("fallback_only", "true");
+    if (params.model) query.set("model", params.model);
+    if (params.start_date) query.set("start_date", params.start_date);
+    if (params.end_date) query.set("end_date", params.end_date);
+
+    const headers: Record<string, string> = {};
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+
+    return request<{ total: number; logs: any[]; limit: number; offset: number }>(
+      `/api/admin/agent/decision-logs?${query.toString()}`,
+      { headers, signal }
+    );
+  },
+
+  adminAgentDecisionLogDetail: (logId: string, token?: string) => {
+    const headers: Record<string, string> = {};
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+    return request<any>(`/api/admin/agent/decision-logs/${encodeURIComponent(logId)}`, { headers });
+  },
+
+  adminAgentDecisionConfig: (token?: string) => {
+    const headers: Record<string, string> = {};
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+    return request<any>("/api/admin/agent/config", { headers });
+  },
+
+  adminUpdateAgentDecisionConfig: (config: any, changeNote: string, token?: string) => {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+    return request<any>("/api/admin/agent/config", {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ config, change_note: changeNote }),
+    });
+  },
+
+  adminResetAgentDecisionConfig: (token?: string) => {
+    const headers: Record<string, string> = {};
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+    return request<any>("/api/admin/agent/config/reset", {
+      method: "POST",
+      headers,
+    });
+  },
+
+  adminAgentPromptVersions: (token?: string) => {
+    const headers: Record<string, string> = {};
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+    return request<{ versions: any[]; active_version: any }>("/api/admin/agent/prompts", { headers });
+  },
+
+  adminSaveAgentPromptVersion: (systemInstruction: string, wordingInstruction: string, changeNote: string, token?: string) => {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+    return request<any>("/api/admin/agent/prompts", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        system_instruction_template: systemInstruction,
+        wording_instruction: wordingInstruction,
+        change_note: changeNote,
+      }),
+    });
+  },
+
+  adminRestoreAgentPromptVersion: (version: number, token?: string) => {
+    const headers: Record<string, string> = {};
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+    return request<any>(`/api/admin/agent/prompts/${version}/restore`, {
+      method: "POST",
+      headers,
+    });
+  },
+
+  adminPreviewAgentDecision: (params: any, token?: string) => {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+    return request<any>("/api/admin/agent/preview", {
+      method: "POST",
+      headers,
+      body: JSON.stringify(params),
+    });
+  },
+
+
   // Watchlist & movies endpoints
   search: (q: string) => request<MediaItem[]>(`/api/search?q=${encodeURIComponent(q)}`),
   upcoming: () => request<MediaItem[]>("/api/upcoming"),

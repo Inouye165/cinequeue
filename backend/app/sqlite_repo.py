@@ -261,6 +261,109 @@ class SqliteWatchlistRepository(WatchlistRepository):
                 """
             )
 
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS agent_decision_logs (
+                    log_id TEXT PRIMARY KEY,
+                    event_type TEXT NOT NULL DEFAULT 'startup_briefing_decision',
+                    timestamp TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    session_id TEXT,
+                    model_requested TEXT,
+                    model_used TEXT,
+                    gemini_called INTEGER DEFAULT 1,
+                    fallback_used INTEGER DEFAULT 0,
+                    fallback_reason TEXT,
+                    decision_config_version INTEGER DEFAULT 1,
+                    prompt_version INTEGER DEFAULT 1,
+                    required_candidates_json TEXT,
+                    optional_candidates_json TEXT,
+                    selected_candidates_json TEXT,
+                    excluded_candidates_json TEXT,
+                    random_rolls_json TEXT,
+                    cooldowns_applied_json TEXT,
+                    selection_summary TEXT,
+                    sanitized_prompt TEXT,
+                    raw_model_response TEXT,
+                    final_response TEXT,
+                    request_duration_ms REAL DEFAULT 0.0
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS agent_decision_configs (
+                    version INTEGER PRIMARY KEY,
+                    updated_at TEXT NOT NULL,
+                    updated_by TEXT NOT NULL,
+                    change_note TEXT,
+                    config_json TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS agent_prompt_versions (
+                    version INTEGER PRIMARY KEY,
+                    updated_at TEXT NOT NULL,
+                    updated_by TEXT NOT NULL,
+                    change_note TEXT,
+                    prompt_json TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS trivia_facts (
+                    fact_id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    tmdb_id INTEGER,
+                    media_type TEXT DEFAULT 'movie',
+                    fact_text TEXT NOT NULL,
+                    source TEXT DEFAULT 'verified_archive',
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS trivia_presentation_history (
+                    user_id TEXT NOT NULL,
+                    fact_id TEXT NOT NULL,
+                    presented_at TEXT NOT NULL,
+                    PRIMARY KEY (user_id, fact_id)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS news_presentation_history (
+                    user_id TEXT NOT NULL,
+                    story_cluster_id TEXT NOT NULL,
+                    content_fingerprint TEXT NOT NULL,
+                    presented_at TEXT NOT NULL,
+                    PRIMARY KEY (user_id, story_cluster_id)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS entertainment_news (
+                    story_id TEXT PRIMARY KEY,
+                    story_cluster_id TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    news_category TEXT DEFAULT 'official_announcement',
+                    is_major INTEGER DEFAULT 1,
+                    is_rumor INTEGER DEFAULT 0,
+                    published_at TEXT NOT NULL,
+                    content_fingerprint TEXT NOT NULL
+                )
+                """
+            )
+
+
 
     @contextmanager
     def _connection(self):
@@ -947,5 +1050,309 @@ class SqliteWatchlistRepository(WatchlistRepository):
                 (user_id, media_type, tmdb_id),
             )
             return cursor.rowcount > 0
+
+    # -- Decision Engine Repository Extensions --------------------------------
+
+    def add_decision_log(self, log_dict: dict[str, Any]) -> dict[str, Any]:
+        with self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO agent_decision_logs (
+                    log_id, event_type, timestamp, user_id, session_id,
+                    model_requested, model_used, gemini_called, fallback_used, fallback_reason,
+                    decision_config_version, prompt_version, required_candidates_json,
+                    optional_candidates_json, selected_candidates_json, excluded_candidates_json,
+                    random_rolls_json, cooldowns_applied_json, selection_summary,
+                    sanitized_prompt, raw_model_response, final_response, request_duration_ms
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    log_dict["log_id"],
+                    log_dict.get("event_type", "startup_briefing_decision"),
+                    log_dict["timestamp"],
+                    log_dict["user_id"],
+                    log_dict.get("session_id"),
+                    log_dict.get("model_requested"),
+                    log_dict.get("model_used"),
+                    1 if log_dict.get("gemini_called", True) else 0,
+                    1 if log_dict.get("fallback_used", False) else 0,
+                    log_dict.get("fallback_reason"),
+                    log_dict.get("decision_config_version", 1),
+                    log_dict.get("prompt_version", 1),
+                    json.dumps(log_dict.get("required_candidates", [])),
+                    json.dumps(log_dict.get("optional_candidates", [])),
+                    json.dumps(log_dict.get("selected_candidates", [])),
+                    json.dumps(log_dict.get("excluded_candidates", [])),
+                    json.dumps(log_dict.get("random_rolls", {})),
+                    json.dumps(log_dict.get("cooldowns_applied", [])),
+                    log_dict.get("selection_summary", ""),
+                    log_dict.get("sanitized_prompt", ""),
+                    log_dict.get("raw_model_response", ""),
+                    log_dict.get("final_response", ""),
+                    log_dict.get("request_duration_ms", 0.0),
+                ),
+            )
+        return log_dict
+
+    def list_decision_logs(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        user_id: str | None = None,
+        candidate_type: str | None = None,
+        required_only: bool | None = None,
+        fallback_only: bool | None = None,
+        model: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ) -> dict[str, Any]:
+        conditions = []
+        params = []
+
+        if user_id:
+            conditions.append("user_id = ?")
+            params.append(user_id)
+
+        if fallback_only:
+            conditions.append("fallback_used = 1")
+
+        if model:
+            conditions.append("(model_requested = ? OR model_used = ?)")
+            params.extend([model, model])
+
+        if start_date:
+            conditions.append("timestamp >= ?")
+            params.append(start_date)
+
+        if end_date:
+            conditions.append("timestamp <= ?")
+            params.append(end_date)
+
+        if candidate_type:
+            conditions.append("(selected_candidates_json LIKE ? OR optional_candidates_json LIKE ? OR required_candidates_json LIKE ?)")
+            pat = f"%{candidate_type}%"
+            params.extend([pat, pat, pat])
+
+        where_clause = " WHERE " + " AND ".join(conditions) if conditions else ""
+
+        with self._connection() as conn:
+            total = conn.execute(f"SELECT COUNT(*) FROM agent_decision_logs{where_clause}", params).fetchone()[0]
+            query = f"SELECT * FROM agent_decision_logs{where_clause} ORDER BY timestamp DESC LIMIT ? OFFSET ?"
+            rows = conn.execute(query, params + [limit, offset]).fetchall()
+
+        logs = []
+        for r in rows:
+            d = dict(r)
+            d["gemini_called"] = bool(d.get("gemini_called"))
+            d["fallback_used"] = bool(d.get("fallback_used"))
+            d["required_candidates"] = json.loads(d.get("required_candidates_json") or "[]")
+            d["optional_candidates"] = json.loads(d.get("optional_candidates_json") or "[]")
+            d["selected_candidates"] = json.loads(d.get("selected_candidates_json") or "[]")
+            d["excluded_candidates"] = json.loads(d.get("excluded_candidates_json") or "[]")
+            d["random_rolls"] = json.loads(d.get("random_rolls_json") or "{}")
+            d["cooldowns_applied"] = json.loads(d.get("cooldowns_applied_json") or "[]")
+            logs.append(d)
+
+        return {"total": total, "logs": logs, "limit": limit, "offset": offset}
+
+    def get_decision_log(self, log_id: str) -> dict[str, Any] | None:
+        with self._connection() as conn:
+            row = conn.execute("SELECT * FROM agent_decision_logs WHERE log_id = ?", (log_id,)).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["gemini_called"] = bool(d.get("gemini_called"))
+        d["fallback_used"] = bool(d.get("fallback_used"))
+        d["required_candidates"] = json.loads(d.get("required_candidates_json") or "[]")
+        d["optional_candidates"] = json.loads(d.get("optional_candidates_json") or "[]")
+        d["selected_candidates"] = json.loads(d.get("selected_candidates_json") or "[]")
+        d["excluded_candidates"] = json.loads(d.get("excluded_candidates_json") or "[]")
+        d["random_rolls"] = json.loads(d.get("random_rolls_json") or "{}")
+        d["cooldowns_applied"] = json.loads(d.get("cooldowns_applied_json") or "[]")
+        return d
+
+    def get_active_decision_config(self) -> dict[str, Any]:
+        with self._connection() as conn:
+            row = conn.execute("SELECT config_json FROM agent_decision_configs ORDER BY version DESC LIMIT 1").fetchone()
+        if row and row["config_json"]:
+            try:
+                return json.loads(row["config_json"])
+            except Exception:
+                pass
+        from app.decision_models import DEFAULT_DECISION_CONFIG
+        return DEFAULT_DECISION_CONFIG.to_dict()
+
+    def save_decision_config(self, config_dict: dict[str, Any], updated_by: str, change_note: str) -> dict[str, Any]:
+        with self._connection() as conn:
+            max_row = conn.execute("SELECT MAX(version) FROM agent_decision_configs").fetchone()
+            new_ver = (max_row[0] or 0) + 1 if max_row else 1
+            config_dict["version"] = new_ver
+            config_dict["updated_at"] = self.utc_now_iso()
+            config_dict["updated_by"] = updated_by
+            config_dict["change_note"] = change_note
+
+            conn.execute(
+                """
+                INSERT INTO agent_decision_configs (version, updated_at, updated_by, change_note, config_json)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (new_ver, config_dict["updated_at"], updated_by, change_note, json.dumps(config_dict)),
+            )
+        return config_dict
+
+    def get_active_prompt_version(self) -> dict[str, Any]:
+        with self._connection() as conn:
+            row = conn.execute("SELECT prompt_json FROM agent_prompt_versions ORDER BY version DESC LIMIT 1").fetchone()
+        if row and row["prompt_json"]:
+            try:
+                return json.loads(row["prompt_json"])
+            except Exception:
+                pass
+        from app.decision_models import DEFAULT_PROMPT_VERSION
+        return DEFAULT_PROMPT_VERSION.to_dict()
+
+    def list_prompt_versions(self) -> list[dict[str, Any]]:
+        with self._connection() as conn:
+            rows = conn.execute("SELECT prompt_json FROM agent_prompt_versions ORDER BY version DESC").fetchall()
+        results = []
+        for r in rows:
+            if r["prompt_json"]:
+                try:
+                    results.append(json.loads(r["prompt_json"]))
+                except Exception:
+                    pass
+        if not results:
+            from app.decision_models import DEFAULT_PROMPT_VERSION
+            results = [DEFAULT_PROMPT_VERSION.to_dict()]
+        return results
+
+    def save_prompt_version(self, prompt_dict: dict[str, Any], updated_by: str, change_note: str) -> dict[str, Any]:
+        with self._connection() as conn:
+            max_row = conn.execute("SELECT MAX(version) FROM agent_prompt_versions").fetchone()
+            new_ver = (max_row[0] or 0) + 1 if max_row else 1
+            prompt_dict["version"] = new_ver
+            prompt_dict["updated_at"] = self.utc_now_iso()
+            prompt_dict["updated_by"] = updated_by
+            prompt_dict["change_note"] = change_note
+
+            conn.execute(
+                """
+                INSERT INTO agent_prompt_versions (version, updated_at, updated_by, change_note, prompt_json)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (new_ver, prompt_dict["updated_at"], updated_by, change_note, json.dumps(prompt_dict)),
+            )
+        return prompt_dict
+
+    def is_trivia_presented(self, user_id: str, fact_id: str) -> bool:
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM trivia_presentation_history WHERE user_id = ? AND fact_id = ?",
+                (user_id, fact_id),
+            ).fetchone()
+        return bool(row)
+
+    def record_trivia_presentation(self, user_id: str, fact_id: str) -> None:
+        now = self.utc_now_iso()
+        with self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO trivia_presentation_history (user_id, fact_id, presented_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(user_id, fact_id) DO UPDATE SET presented_at = excluded.presented_at
+                """,
+                (user_id, fact_id, now),
+            )
+
+    def get_news_presentation(self, user_id: str, story_cluster_id: str) -> dict[str, Any] | None:
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM news_presentation_history WHERE user_id = ? AND story_cluster_id = ?",
+                (user_id, story_cluster_id),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def record_news_presentation(self, user_id: str, story_cluster_id: str, content_fingerprint: str) -> None:
+        now = self.utc_now_iso()
+        with self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO news_presentation_history (user_id, story_cluster_id, content_fingerprint, presented_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(user_id, story_cluster_id) DO UPDATE SET
+                    content_fingerprint = excluded.content_fingerprint,
+                    presented_at = excluded.presented_at
+                """,
+                (user_id, story_cluster_id, content_fingerprint, now),
+            )
+
+    def list_verified_trivia(self, title: str | None = None, tmdb_id: int | None = None) -> list[dict[str, Any]]:
+        with self._connection() as conn:
+            if tmdb_id:
+                rows = conn.execute("SELECT * FROM trivia_facts WHERE tmdb_id = ?", (tmdb_id,)).fetchall()
+            elif title:
+                rows = conn.execute("SELECT * FROM trivia_facts WHERE LOWER(title) LIKE ?", (f"%{title.lower()}%",)).fetchall()
+            else:
+                rows = conn.execute("SELECT * FROM trivia_facts LIMIT 50").fetchall()
+        return [dict(r) for r in rows]
+
+    def add_verified_trivia(self, fact_dict: dict[str, Any]) -> dict[str, Any]:
+        now = self.utc_now_iso()
+        fact_id = fact_dict.get("fact_id") or f"trivia:{fact_dict.get('tmdb_id', 'gen')}:{hash(fact_dict.get('fact_text'))}"
+        with self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO trivia_facts (fact_id, title, tmdb_id, media_type, fact_text, source, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(fact_id) DO UPDATE SET fact_text = excluded.fact_text
+                """,
+                (
+                    fact_id,
+                    fact_dict["title"],
+                    fact_dict.get("tmdb_id"),
+                    fact_dict.get("media_type", "movie"),
+                    fact_dict["fact_text"],
+                    fact_dict.get("source", "verified_archive"),
+                    now,
+                ),
+            )
+        fact_dict["fact_id"] = fact_id
+        return fact_dict
+
+    def list_major_news(self) -> list[dict[str, Any]]:
+        with self._connection() as conn:
+            rows = conn.execute("SELECT * FROM entertainment_news WHERE is_major = 1 ORDER BY published_at DESC LIMIT 20").fetchall()
+        return [dict(r) for r in rows]
+
+    def add_major_news(self, news_dict: dict[str, Any]) -> dict[str, Any]:
+        now = self.utc_now_iso()
+        story_id = news_dict.get("story_id") or f"news:{news_dict.get('story_cluster_id', 'c')}:{hash(news_dict.get('title'))}"
+        with self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO entertainment_news (
+                    story_id, story_cluster_id, title, summary, source,
+                    news_category, is_major, is_rumor, published_at, content_fingerprint
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(story_id) DO UPDATE SET
+                    summary = excluded.summary,
+                    content_fingerprint = excluded.content_fingerprint
+                """,
+                (
+                    story_id,
+                    news_dict["story_cluster_id"],
+                    news_dict["title"],
+                    news_dict["summary"],
+                    news_dict.get("source", "verified_media"),
+                    news_dict.get("news_category", "official_announcement"),
+                    1 if news_dict.get("is_major", True) else 0,
+                    1 if news_dict.get("is_rumor", False) else 0,
+                    news_dict.get("published_at", now),
+                    news_dict.get("content_fingerprint", news_dict["title"]),
+                ),
+            )
+        news_dict["story_id"] = story_id
+        return news_dict
+
 
 

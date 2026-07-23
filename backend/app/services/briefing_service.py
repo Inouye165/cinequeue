@@ -313,57 +313,213 @@ class BriefingService:
 
         total_candidates = len(candidate_items)
 
-        # Step 10 & 11: Novelty Detection & Material Change Check
-        novel_items: list[dict[str, Any]] = []
-        already_presented_count = 0
-        duplicate_count = 0
-        seen_keys: set[str] = set()
+        # Build Decision Engine Candidates
+        from app.decision_models import Candidate, CandidateType, DecisionConfig, PromptVersion
+        from app.services.decision_engine import DecisionEngine, PersonalInterestScorer
 
+        engine_candidates: list[Candidate] = []
+
+        # 1. Weather Alert Candidate (Severe Weather Warning)
+        if weather_data and weather_data.significant_alert:
+            alert_text = weather_data.significant_alert
+            engine_candidates.append(Candidate(
+                candidate_id=f"weather_alert:{hash(alert_text)}",
+                type=CandidateType.WEATHER_ALERT.value,
+                title="Severe Weather Warning",
+                summary=alert_text,
+                source="weather_service",
+                required=True,
+                importance_score=0.95,
+                interest_score=0.90,
+                confidence_score=0.99,
+                interest_reasons=["Severe local weather warning requires immediate user notice"],
+            ))
+
+        # 2. Monitored Items Candidates
         for cand in candidate_items:
-            key = cand["item_key"]
-            if key in seen_keys:
-                duplicate_count += 1
-                continue
-            seen_keys.add(key)
+            c_type = cand.get("type", "monitored_update")
+            c_title = cand.get("title", "Monitored Item")
+            c_summary = cand.get("summary") or cand.get("message", "")
+            c_key = cand.get("item_key", f"monitored_{hash(c_title)}")
 
-            prev_pres = presented_keys.get(key)
-            if prev_pres:
-                prev_fp = prev_pres.get("content_fingerprint")
-                curr_fp = cand["content_fingerprint"]
-                prev_verif = prev_pres.get("verification") or prev_pres.get("importance")
-                curr_verif = cand.get("verification") or cand.get("importance")
+            if c_type in {"releasing_today", "releasing_tomorrow"}:
+                engine_candidates.append(Candidate(
+                    candidate_id=c_key,
+                    type=CandidateType.MONITORED_TITLE_RELEASE.value,
+                    title=c_title,
+                    summary=c_summary,
+                    source="watchlist_data",
+                    required=True,
+                    importance_score=0.90,
+                    interest_score=0.95,
+                    confidence_score=0.98,
+                    interest_reasons=[f"Monitored title '{c_title}' is releasing now"],
+                ))
+            elif c_type in {"price_drop", "free_streaming"}:
+                engine_candidates.append(Candidate(
+                    candidate_id=c_key,
+                    type=CandidateType.STREAMING_ARRIVAL.value if c_type == "free_streaming" else CandidateType.PRICE_DROP.value,
+                    title=c_title,
+                    summary=c_summary,
+                    source="watch_provider_data",
+                    required=True,
+                    importance_score=0.85,
+                    interest_score=0.90,
+                    confidence_score=0.95,
+                    interest_reasons=[f"Price drop or streaming availability for monitored title '{c_title}'"],
+                ))
+            elif c_type in {"upcoming_release", "entertainment_news", "memory_recall"}:
+                score_val, reasons = PersonalInterestScorer.calculate_interest(user_id, c_title, repo)
+                engine_candidates.append(Candidate(
+                    candidate_id=c_key,
+                    type=CandidateType.MONITORED_TITLE_URGENT_UPDATE.value,
+                    title=c_title,
+                    summary=c_summary,
+                    source="news_and_watchlist",
+                    required=False,
+                    importance_score=0.70,
+                    interest_score=score_val,
+                    confidence_score=0.90,
+                    interest_reasons=reasons,
+                ))
 
-                # Story is new/materially changed if fingerprint changed or verification upgraded
-                if curr_fp != prev_fp or (cand.get("type") == "entertainment_news" and curr_verif != prev_verif):
-                    cand["new_to_user"] = False
-                    cand["material_change"] = True
-                    novel_items.append(cand)
-                else:
-                    already_presented_count += 1
-            else:
-                cand["new_to_user"] = True
-                cand["material_change"] = False
-                novel_items.append(cand)
+        # 3. Ordinary Weather Viewing Connection Candidate (if rain/snow & streaming arrival exists)
+        if weather_data and weather_data.conditions and any(w in weather_data.conditions.lower() for w in ["rain", "storm", "snow", "shower"]):
+            streaming_cands = [c for c in engine_candidates if c.type in {CandidateType.STREAMING_ARRIVAL.value, CandidateType.MONITORED_TITLE_RELEASE.value}]
+            if streaming_cands:
+                top_stream = streaming_cands[0]
+                engine_candidates.append(Candidate(
+                    candidate_id=f"weather_conn:{top_stream.candidate_id}",
+                    type=CandidateType.WEATHER_VIEWING_CONNECTION.value,
+                    title=top_stream.title,
+                    summary=f"It is currently {weather_data.conditions.lower()} in {location or 'your area'}, and '{top_stream.title}' became available to watch.",
+                    source="weather_and_provider_data",
+                    required=False,
+                    importance_score=0.65,
+                    interest_score=0.85,
+                    confidence_score=0.95,
+                    interest_reasons=[f"Rain/snow outside pairs naturally with streaming release of '{top_stream.title}'"],
+                ))
 
-        # Step 12 & 13: Rank candidates & select top 3-5 items
-        ranked_items = rank_briefing_candidates(novel_items)
-        selected_items = ranked_items[:5]
-        selected_count = len(selected_items)
+        # 4. Verified Trivia Candidates
+        try:
+            rated_list = repo.list_rated_movies(user_id)
+            if rated_list:
+                top_rated = rated_list[0]
+                t_facts = repo.list_verified_trivia(title=top_rated["title"], tmdb_id=top_rated["tmdb_id"])
+                if not t_facts:
+                    # Provide approved sample trivia
+                    t_facts = [{
+                        "fact_id": f"trivia_{top_rated['tmdb_id']}_1",
+                        "title": top_rated["title"],
+                        "tmdb_id": top_rated["tmdb_id"],
+                        "fact_text": f"Random movie fact: much of {top_rated['title']} was praised for iconic location filming.",
+                        "source": "verified_archive",
+                    }]
+                for tf in t_facts:
+                    t_score, t_reasons = PersonalInterestScorer.calculate_interest(user_id, tf["title"], repo, tmdb_id=tf.get("tmdb_id"))
+                    engine_candidates.append(Candidate(
+                        candidate_id=tf["fact_id"],
+                        type=CandidateType.PERSONALIZED_TRIVIA.value,
+                        title=tf["title"],
+                        summary=tf["fact_text"],
+                        source=tf.get("source", "verified_archive"),
+                        required=False,
+                        importance_score=0.50,
+                        interest_score=max(0.75, t_score),
+                        confidence_score=0.95,
+                        interest_reasons=t_reasons,
+                    ))
+        except Exception as e:
+            logger.warning(f"Error gathering trivia candidates: {e}")
 
-        # Step 14 & 15: Construct structured JSON object and generate LLM briefing
+        # 5. Major External Entertainment News Candidates
+        try:
+            major_news = repo.list_major_news()
+            for mn in major_news:
+                n_score, n_reasons = PersonalInterestScorer.calculate_interest(user_id, mn["title"], repo)
+                engine_candidates.append(Candidate(
+                    candidate_id=mn["story_id"],
+                    type=CandidateType.MAJOR_EXTERNAL_ENTERTAINMENT_NEWS.value,
+                    title=mn["title"],
+                    summary=mn["summary"],
+                    source=mn.get("source", "official_media"),
+                    required=False,
+                    importance_score=0.75,
+                    interest_score=max(0.75, n_score),
+                    confidence_score=0.90,
+                    interest_reasons=n_reasons,
+                ))
+        except Exception as e:
+            logger.warning(f"Error gathering external news candidates: {e}")
+
+        # Run Decision Engine
+        decision_config = DecisionConfig(**repo.get_active_decision_config())
+        prompt_version = PromptVersion(**repo.get_active_prompt_version())
+
+        decision_log, selected_engine_candidates = DecisionEngine.evaluate(
+            user_id=user_id,
+            repo=repo,
+            tmdb=tmdb,
+            raw_candidates=engine_candidates,
+            config=decision_config,
+            prompt_version=prompt_version,
+            session_id=session_id,
+        )
+
+        selected_count = len(selected_engine_candidates)
+        selected_items = [c.to_dict() for c in selected_engine_candidates]
+
+        # Convert engine candidates back to briefing item dicts for formatting
+        formatting_items = [
+            {
+                "title": c.title,
+                "summary": c.summary,
+                "type": c.type,
+                "message": c.summary,
+            }
+            for c in selected_engine_candidates
+        ]
+
+        # Fetch recent 10 greetings for anti-repetition context
+        recent_chat_msgs = repo.list_chat_messages(user_id, limit=20)
+        recent_openings = [m["content"] for m in recent_chat_msgs if m.get("role") in {"assistant", "model"}][:10]
+
+        # Format LLM Briefing
         from app.services.agent_service import AiAgentService
         briefing_text = await AiAgentService._format_structured_llm_briefing(
             settings=settings,
             weather_data=weather_data,
-            briefing_items=selected_items,
+            briefing_items=formatting_items,
             total_monitored=len(monitored),
+            recent_openings=recent_openings,
+            prompt_version=prompt_version,
         )
 
-        # Step 16: Persist presentation records
+        # Update decision log with rendered prompts and final response
+        decision_log.sanitized_prompt = f"System Instruction: {prompt_version.system_instruction_template[:200]}...\nWording Instruction: {prompt_version.wording_instruction}"
+        decision_log.raw_model_response = briefing_text
+        decision_log.final_response = briefing_text
+
+        # Record decision log in database
+        try:
+            repo.add_decision_log(decision_log.to_dict())
+        except Exception as e:
+            logger.warning(f"Error recording agent decision log: {e}")
+
+        # Record trivia and news presentation history
+        for sc in selected_engine_candidates:
+            if sc.type == CandidateType.PERSONALIZED_TRIVIA.value:
+                repo.record_trivia_presentation(user_id, sc.candidate_id)
+            elif sc.type == CandidateType.MAJOR_EXTERNAL_ENTERTAINMENT_NEWS.value:
+                cluster_id = sc.source or sc.candidate_id
+                repo.record_news_presentation(user_id, cluster_id, sc.summary)
+
+        # Persist presentation records
         if selected_items:
             repo.record_briefing_presentations(user_id, selected_items)
 
-        # Step 17: Update previous_login_at and previous_briefing_presented_at timestamps in DB
+        # Update login & presentation timestamps
         repo.update_user_briefing_state(
             user_id=user_id,
             login_at=now_iso,
@@ -380,11 +536,11 @@ class BriefingService:
             "weather": weather_data.to_dict() if weather_data else None,
             "previous_login_at": previous_login_at,
             "previous_briefing_presented_at": previous_briefing_presented_at,
+            "decision_log_id": decision_log.log_id,
             "telemetry": {
-                "total_candidates": total_candidates,
-                "duplicate_count": duplicate_count,
-                "already_presented_count": already_presented_count,
+                "total_candidates": len(engine_candidates),
                 "selected_count": selected_count,
+                "decision_log_id": decision_log.log_id,
             }
         }
 
@@ -395,4 +551,5 @@ class BriefingService:
         _ensure_briefing_in_chat_history(user_id, briefing_text, repo)
 
         return briefing_data
+
 

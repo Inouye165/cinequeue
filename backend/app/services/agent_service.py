@@ -345,6 +345,7 @@ class AiAgentService:
         location: str,
         weather_json: dict[str, Any] | None,
         recent_openings: list[str] | None = None,
+        prompt_version: Any = None,
     ) -> str:
         items_payload = json.dumps(briefing_items, indent=2)
         weather_str = ""
@@ -353,15 +354,20 @@ class AiAgentService:
 
         recent_str = ""
         if recent_openings and len(recent_openings) > 0:
-            recent_str = f"\nRecent Openings (Do NOT repeat these phrasing patterns):\n" + "\n".join([f"- {o}" for o in recent_openings[-3:]])
+            recent_str = f"\nRecent Openings (Do NOT repeat these phrasing patterns):\n" + "\n".join([f"- {o}" for o in recent_openings[-10:]])
+
+        wording_instruction = getattr(prompt_version, "wording_instruction", None) or (
+            "Create a brief, natural opening using only the supplied facts. Mention the most useful new or time-sensitive item first. "
+            "It is acceptable to give only a simple greeting when nothing meaningful has changed. Do not invent activity merely to fill space. "
+            "Do not repeat wording from recent greetings."
+        )
 
         instruction = (
-            f"Create a brief, natural opening using only the supplied facts. Mention the most useful new or time-sensitive item first. "
-            f"It is acceptable to give only a simple greeting when nothing meaningful has changed. Do not invent activity merely to fill space. "
-            f"Do not repeat wording from recent greetings.\n\n"
-            f"Time of day: {time_of_day}\n"
-            f"Location: {location or 'Not specified'}{weather_str}{recent_str}\n\n"
-            f"Briefing items:\n```json\n{items_payload}\n```"
+            f"Selected Verified Facts:\n```json\n{items_payload}\n```\n\n"
+            f"Context Info:\n"
+            f"- Time of day: {time_of_day}\n"
+            f"- Location: {location or 'Not specified'}{weather_str}{recent_str}\n\n"
+            f"Wording Instruction:\n{wording_instruction}"
         )
         return instruction
 
@@ -387,6 +393,7 @@ class AiAgentService:
         briefing_items: list[dict[str, Any]],
         total_monitored: int = 0,
         recent_openings: list[str] | None = None,
+        prompt_version: Any = None,
     ) -> str:
         location = settings.get("location", "").strip()
         time_of_day = AiAgentService._get_time_of_day()
@@ -406,9 +413,10 @@ class AiAgentService:
             location=location,
             weather_json=weather_json,
             recent_openings=recent_openings,
+            prompt_version=prompt_version,
         )
 
-        system_prompt = get_system_prompt(settings, weather_report=None)
+        system_prompt = getattr(prompt_version, "system_instruction_template", None) or get_system_prompt(settings, weather_report=None)
 
         result = await AiAgentService._call_gemini_api(
             system_instruction=system_prompt,
@@ -427,6 +435,7 @@ class AiAgentService:
             briefing_items=briefing_items,
             time_of_day=time_of_day,
         )
+
 
     @staticmethod
     async def process_chat(

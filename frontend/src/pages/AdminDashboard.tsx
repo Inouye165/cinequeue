@@ -1,9 +1,11 @@
 import { FormEvent, useState } from "react";
+import { AiAgentDecisionsTab } from "../components/admin/AiAgentDecisionsTab";
 
 interface AdminDashboardProps {
   adminUsername: string;
   approvals: any[];
   loginLogs: any[];
+  authToken?: string;
   onLogout: () => void;
   onApprove: (email: string) => void;
   onDeny: (email: string) => void;
@@ -14,13 +16,14 @@ export function AdminDashboard({
   adminUsername,
   approvals,
   loginLogs,
+  authToken,
   onLogout,
   onApprove,
   onDeny,
   onInvite,
 }: AdminDashboardProps) {
   const [inviteEmail, setInviteEmail] = useState("");
-  const [adminTab, setAdminTab] = useState<"requests" | "users" | "logs">("requests");
+  const [adminTab, setAdminTab] = useState<"requests" | "users" | "logs" | "decisions">("requests");
 
   const handleInviteSubmit = (e: FormEvent) => {
     e.preventDefault();
@@ -64,7 +67,18 @@ export function AdminDashboard({
         >
           Security Audit Logs ({loginLogs.length})
         </button>
+        <button
+          className={`admin-tab ${adminTab === "decisions" ? "active" : ""}`}
+          onClick={() => setAdminTab("decisions")}
+        >
+          🤖 AI Agent Decisions
+        </button>
       </div>
+
+      {adminTab === "decisions" && (
+        <AiAgentDecisionsTab authToken={authToken} />
+      )}
+
 
       {adminTab === "requests" && (
         <div className="admin-card">
