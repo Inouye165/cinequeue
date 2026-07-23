@@ -470,6 +470,7 @@ class BriefingService:
                 "summary": c.summary,
                 "type": c.type,
                 "message": c.summary,
+                "category": c.type,
             }
             for c in selected_engine_candidates
         ]
@@ -523,7 +524,7 @@ class BriefingService:
             "enabled": True,
             "briefing": briefing_text,
             "updates_count": selected_count,
-            "updates": selected_items,
+            "updates": formatting_items,
             "personality_preset": settings.get("personality_preset", "cinephile"),
             "location": location,
             "weather": weather_data.to_dict() if weather_data else None,
@@ -533,9 +534,11 @@ class BriefingService:
             "telemetry": {
                 "total_candidates": len(engine_candidates),
                 "selected_count": selected_count,
+                "already_presented_count": len(decision_log.cooldowns_applied) + len(decision_log.excluded_candidates),
                 "decision_log_id": decision_log.log_id,
             }
         }
+
 
         if session_id:
             repo.save_agent_session(user_id, session_id, briefing_data)
