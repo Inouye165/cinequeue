@@ -342,10 +342,15 @@ class BriefingService:
             c_summary = cand.get("summary") or cand.get("message", "")
             c_key = cand.get("item_key", f"monitored_{hash(c_title)}")
 
-            if c_type in {"releasing_today", "releasing_tomorrow"}:
+            if c_type in {"releasing_today", "releasing_tomorrow", "released_recently", "upcoming_release", "price_drop", "free_streaming", "memory_recall"}:
+                cand_type = (
+                    CandidateType.MONITORED_TITLE_RELEASE.value
+                    if any(k in c_type for k in ["release", "today", "tomorrow", "recently"])
+                    else (CandidateType.PRICE_DROP.value if c_type == "price_drop" else CandidateType.MONITORED_TITLE_URGENT_UPDATE.value)
+                )
                 engine_candidates.append(Candidate(
                     candidate_id=c_key,
-                    type=CandidateType.MONITORED_TITLE_RELEASE.value,
+                    type=cand_type,
                     title=c_title,
                     summary=c_summary,
                     source="watchlist_data",
@@ -353,22 +358,9 @@ class BriefingService:
                     importance_score=0.90,
                     interest_score=0.95,
                     confidence_score=0.98,
-                    interest_reasons=[f"Monitored title '{c_title}' is releasing now"],
+                    interest_reasons=[f"Monitored item in user's queue ({c_type})"],
                 ))
-            elif c_type in {"price_drop", "free_streaming"}:
-                engine_candidates.append(Candidate(
-                    candidate_id=c_key,
-                    type=CandidateType.STREAMING_ARRIVAL.value if c_type == "free_streaming" else CandidateType.PRICE_DROP.value,
-                    title=c_title,
-                    summary=c_summary,
-                    source="watch_provider_data",
-                    required=True,
-                    importance_score=0.85,
-                    interest_score=0.90,
-                    confidence_score=0.95,
-                    interest_reasons=[f"Price drop or streaming availability for monitored title '{c_title}'"],
-                ))
-            elif c_type in {"upcoming_release", "entertainment_news", "memory_recall"}:
+            elif c_type == "entertainment_news":
                 score_val, reasons = PersonalInterestScorer.calculate_interest(user_id, c_title, repo)
                 engine_candidates.append(Candidate(
                     candidate_id=c_key,
@@ -378,10 +370,11 @@ class BriefingService:
                     source="news_and_watchlist",
                     required=False,
                     importance_score=0.70,
-                    interest_score=score_val,
+                    interest_score=max(0.75, score_val),
                     confidence_score=0.90,
                     interest_reasons=reasons,
                 ))
+
 
         # 3. Ordinary Weather Viewing Connection Candidate (if rain/snow & streaming arrival exists)
         if weather_data and weather_data.conditions and any(w in weather_data.conditions.lower() for w in ["rain", "storm", "snow", "shower"]):
