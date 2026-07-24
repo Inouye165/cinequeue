@@ -16,6 +16,8 @@ class AgentSettingsPayload(BaseModel):
     personality_preset: str = "cinephile"
     custom_prompt: str = ""
     location: str = ""
+    timezone: str | None = None
+    user_timezone: str | None = None
     notify_on_login: bool = True
     auto_add_mentioned: bool = True
     track_price_drops: bool = True
@@ -35,11 +37,14 @@ async def get_agent_briefing(
     force_refresh: bool = False,
     current_user: CurrentUser = Depends(get_current_user),
 ) -> dict[str, Any]:
-    logger.info("Fetching agent briefing for user: %s (session_id=%s, force_refresh=%s)", current_user.uid, session_id, force_refresh)
+    import uuid
+    request_id = request.headers.get("x-request-id") or f"req_{uuid.uuid4().hex[:12]}"
+    briefing_run_id = f"run_{uuid.uuid4().hex[:12]}"
+    logger.info("Fetching agent briefing for user: %s (session_id=%s, force_refresh=%s, run_id=%s)", current_user.uid, session_id, force_refresh, briefing_run_id)
     repo = request.app.state.watchlist_repo
     tmdb = getattr(request.app.state, "tmdb", None)
     return await BriefingService.evaluate_startup_briefing(
-        current_user.uid, repo, tmdb, session_id=session_id, force_refresh=force_refresh
+        current_user.uid, repo, tmdb, session_id=session_id, force_refresh=force_refresh, briefing_run_id=briefing_run_id, request_id=request_id
     )
 
 
@@ -97,3 +102,30 @@ async def clear_chat_history(
     repo = request.app.state.watchlist_repo
     repo.clear_chat_messages(current_user.uid)
     return {"status": "cleared"}
+
+
+@router.get("/logs")
+async def get_agent_logs(
+    request: Request,
+    limit: int = 50,
+    current_user: CurrentUser = Depends(get_current_user),
+) -> dict[str, Any]:
+    repo = request.app.state.watchlist_repo
+    logs_data = repo.list_decision_logs(user_id=current_user.uid, limit=limit)
+    logs = logs_data.get("logs", [])
+    total_calls = len(logs)
+    total_duration_ms = sum(l.get("request_duration_ms", 0.0) or 0.0 for l in logs)
+    avg_duration_ms = round(total_duration_ms / total_calls, 1) if total_calls > 0 else 0.0
+    fallback_count = sum(1 for l in logs if l.get("fallback_used"))
+
+    return {
+        "total": logs_data.get("total", 0),
+        "limit": limit,
+        "logs": logs,
+        "summary": {
+            "total_calls": total_calls,
+            "avg_duration_ms": avg_duration_ms,
+            "fallback_count": fallback_count,
+            "success_rate_percent": round((1 - (fallback_count / total_calls)) * 100, 1) if total_calls > 0 else 100.0,
+        },
+    }

@@ -8,6 +8,27 @@ from app.services.agent_service import AiAgentService, RECOMMENDED_SYSTEM_PROMPT
 
 
 @pytest.fixture
+def mock_gemini():
+    from unittest.mock import AsyncMock, patch
+    from app.services.agent_service import AgentResult
+    mock_res = AgentResult(
+        text="Welcome back! Here are your updates.",
+        provider="gemini",
+        model_requested="gemini-2.5-flash",
+        model_used="gemini-2.5-flash",
+        gemini_called=True,
+        fallback_used=False,
+        fallback_reason=None,
+        http_status=200,
+        request_duration_ms=100.0,
+        actions_taken=[],
+    )
+    with patch.object(AiAgentService, "_call_gemini_api", new_callable=AsyncMock) as m:
+        m.return_value = mock_res
+        yield m
+
+
+@pytest.fixture
 def repo(tmp_path, monkeypatch):
     db_file = tmp_path / "test_briefing_novelty.db"
     monkeypatch.setattr("app.sqlite_repo.DB_PATH", db_file)
@@ -44,14 +65,14 @@ async def test_first_time_user_and_returning_user_novelty(repo):
     presented = repo.get_presented_briefing_keys(user_id)
     assert len(presented) >= 1
 
-    # Second login: No changes occurred
-    briefing2 = await BriefingService.evaluate_startup_briefing(user_id, repo, None, session_id="sess_2")
+    # Second login: No changes occurred (force_refresh=True to test novelty re-evaluation)
+    briefing2 = await BriefingService.evaluate_startup_briefing(user_id, repo, None, session_id="sess_2", force_refresh=True)
     assert briefing2["telemetry"]["already_presented_count"] >= 1
     assert briefing2["updates_count"] == 0
 
-    # Third login: Title B added as newly available
+    # Third login: Title B added as newly available (force_refresh=True to test novelty re-evaluation)
     repo.add_item(user_id=user_id, media_type="movie", tmdb_id=2, title="Title B", poster_path=None, release_date=available_date, status="queue")
-    briefing3 = await BriefingService.evaluate_startup_briefing(user_id, repo, None, session_id="sess_3")
+    briefing3 = await BriefingService.evaluate_startup_briefing(user_id, repo, None, session_id="sess_3", force_refresh=True)
     assert briefing3["updates_count"] == 1
     assert briefing3["updates"][0]["title"] == "Title B"
 

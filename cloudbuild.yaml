@@ -3,6 +3,7 @@
 
 options:
   logging: CLOUD_LOGGING_ONLY
+  substitution_option: ALLOW_LOOSE
 
 substitutions:
   _REGION: us-west1
@@ -19,7 +20,7 @@ steps:
       - -c
       - |
         python -m pip install --no-cache-dir -r backend/requirements.txt
-        python -m pytest backend/tests/ -v
+        PYTHONPATH=backend python -m pytest backend/tests/ -v
     dir: "."
 
   # B. Install and run frontend tests

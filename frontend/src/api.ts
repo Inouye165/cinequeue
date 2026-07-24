@@ -396,10 +396,13 @@ export const api = {
     }),
 
   // AI Agent Endpoints
-  agentBriefing: (sessionId?: string) =>
-    request<import("./types").AgentBriefing>(
-      `/api/agent/briefing${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`
-    ),
+  agentBriefing: (sessionId?: string, forceRefresh: boolean = false) => {
+    const params = new URLSearchParams();
+    if (sessionId) params.set("session_id", sessionId);
+    if (forceRefresh) params.set("force_refresh", "true");
+    const q = params.toString();
+    return request<import("./types").AgentBriefing>(`/api/agent/briefing${q ? `?${q}` : ""}`);
+  },
   agentSettings: () => request<import("./types").AgentSettings>("/api/agent/settings"),
   saveAgentSettings: (settings: Partial<import("./types").AgentSettings>) =>
     request<import("./types").AgentSettings>("/api/agent/settings", {
@@ -418,6 +421,8 @@ export const api = {
     request<{ status: string }>("/api/agent/chat", {
       method: "DELETE",
     }),
+  getAgentLogs: (limit = 50) =>
+    request<import("./types").AgentLogsResponse>(`/api/agent/logs?limit=${limit}`),
 
   // Ratings endpoints
   getRatings: () => request<import("./types").RatedMovie[]>("/api/ratings"),
@@ -438,6 +443,16 @@ export const api = {
     request<{ success: boolean }>(`/api/ratings/${mediaType}/${tmdbId}`, {
       method: "DELETE",
     }),
+  rateMoviesBatch: async (items: Array<{
+    media_type: string;
+    tmdb_id: number;
+    title: string;
+    poster_path?: string | null;
+    release_date?: string | null;
+    rating: number;
+  }>) => {
+    return Promise.all(items.map((item) => api.rateMovie(item)));
+  },
 };
 
 

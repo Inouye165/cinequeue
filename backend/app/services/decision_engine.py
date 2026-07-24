@@ -272,18 +272,40 @@ class DecisionEngine:
 
         selection_summary = "\n".join(explanations)
 
+        # Candidate signature calculation
+        import hashlib, json
+        all_titles = sorted([c.title for c in raw_candidates if c.title])
+        cand_sig = hashlib.md5(json.dumps(all_titles).encode("utf-8")).hexdigest()[:8]
+
         # 4. Construct DecisionLog record
         duration_ms = round((datetime.datetime.now(datetime.timezone.utc) - start_time).total_seconds() * 1000.0, 2)
 
+        from app.decision_models import get_current_run_context
+        run_ctx = get_current_run_context()
+        if run_ctx:
+            run_ctx.candidate_signature = cand_sig
+            run_ctx.add_timeline_event(
+                stage="candidate_decision",
+                status="completed",
+                duration_ms=duration_ms,
+                result={
+                    "selected_count": len(selected_candidates),
+                    "candidate_signature": cand_sig,
+                },
+            )
+
         log = DecisionLog(
             log_id=log_id,
-            event_type="startup_briefing_decision",
+            event_type="startup_briefing_candidate_decision",
+            telemetry_version=2,
             timestamp=start_time.isoformat(),
             user_id=user_id,
             session_id=session_id,
+            briefing_run_id=run_ctx.briefing_run_id if run_ctx else None,
+            request_id=run_ctx.request_id if run_ctx else None,
             model_requested="gemini-3.6-flash",
-            model_used="gemini-3.6-flash",
-            gemini_called=True,
+            model_used=None,
+            gemini_called=False,
             fallback_used=False,
             fallback_reason=None,
             decision_config_version=cfg.version,
@@ -294,7 +316,15 @@ class DecisionEngine:
             excluded_candidates=[c.to_dict() for c in excluded_candidates],
             random_rolls=random_rolls,
             cooldowns_applied=cooldowns_applied,
+            candidate_count_required=len(required_candidates),
+            candidate_count_optional=len(optional_candidates),
+            candidate_count_selected=len(selected_candidates),
+            candidate_count_excluded=len(excluded_candidates),
+            candidate_signature=cand_sig,
+            decision_duration_ms=duration_ms,
             selection_summary=selection_summary,
+            raw_model_response="",
+            final_response="",
             request_duration_ms=duration_ms,
         )
 

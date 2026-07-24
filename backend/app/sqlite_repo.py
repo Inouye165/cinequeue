@@ -165,6 +165,10 @@ class SqliteWatchlistRepository(WatchlistRepository):
                 conn.execute("ALTER TABLE agent_settings ADD COLUMN auto_speak_briefing INTEGER DEFAULT 0")
             except sqlite3.OperationalError:
                 pass
+            try:
+                conn.execute("ALTER TABLE agent_settings ADD COLUMN timezone TEXT DEFAULT 'America/Los_Angeles'")
+            except sqlite3.OperationalError:
+                pass
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS agent_conversations (
@@ -245,6 +249,17 @@ class SqliteWatchlistRepository(WatchlistRepository):
             )
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS daily_greetings (
+                    user_id TEXT NOT NULL,
+                    date_str TEXT NOT NULL,
+                    briefing_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (user_id, date_str)
+                )
+                """
+            )
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS rated_movies (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_id TEXT NOT NULL DEFAULT 'local_test_user',
@@ -265,13 +280,13 @@ class SqliteWatchlistRepository(WatchlistRepository):
                 """
                 CREATE TABLE IF NOT EXISTS agent_decision_logs (
                     log_id TEXT PRIMARY KEY,
-                    event_type TEXT NOT NULL DEFAULT 'startup_briefing_decision',
+                    event_type TEXT NOT NULL DEFAULT 'startup_briefing_candidate_decision',
                     timestamp TEXT NOT NULL,
                     user_id TEXT NOT NULL,
                     session_id TEXT,
                     model_requested TEXT,
                     model_used TEXT,
-                    gemini_called INTEGER DEFAULT 1,
+                    gemini_called INTEGER DEFAULT 0,
                     fallback_used INTEGER DEFAULT 0,
                     fallback_reason TEXT,
                     decision_config_version INTEGER DEFAULT 1,
@@ -286,10 +301,59 @@ class SqliteWatchlistRepository(WatchlistRepository):
                     sanitized_prompt TEXT,
                     raw_model_response TEXT,
                     final_response TEXT,
-                    request_duration_ms REAL DEFAULT 0.0
+                    request_duration_ms REAL DEFAULT 0.0,
+                    daily_cache_key TEXT,
+                    attempt_number INTEGER,
+                    is_fallback_attempt INTEGER,
+                    http_status INTEGER,
+                    success INTEGER,
+                    error_type TEXT,
+                    gemini_request_id TEXT,
+                    model_attempted TEXT
                 )
                 """
             )
+
+            existing_cols = {col[1] for col in conn.execute("PRAGMA table_info(agent_decision_logs)").fetchall()}
+            new_cols = [
+                ("daily_cache_key", "TEXT"),
+                ("attempt_number", "INTEGER"),
+                ("is_fallback_attempt", "INTEGER"),
+                ("http_status", "INTEGER"),
+                ("success", "INTEGER"),
+                ("error_type", "TEXT"),
+                ("gemini_request_id", "TEXT"),
+                ("model_attempted", "TEXT"),
+                ("telemetry_version", "INTEGER DEFAULT 1"),
+                ("briefing_run_id", "TEXT"),
+                ("request_id", "TEXT"),
+                ("started_at", "TEXT"),
+                ("completed_at", "TEXT"),
+                ("total_duration_ms", "REAL"),
+                ("force_refresh", "INTEGER"),
+                ("user_timezone", "TEXT"),
+                ("resolved_local_date", "TEXT"),
+                ("server_date", "TEXT"),
+                ("result_source", "TEXT"),
+                ("final_status", "TEXT"),
+                ("response_text_length", "INTEGER"),
+                ("daily_cache_result", "TEXT"),
+                ("daily_cache_backend", "TEXT"),
+                ("candidate_signature", "TEXT"),
+                ("gemini_attempt_count", "INTEGER"),
+                ("fallback_attempted", "INTEGER"),
+                ("fallback_trigger", "TEXT"),
+                ("final_model", "TEXT"),
+                ("external_attempt_counts_json", "TEXT"),
+                ("external_cache_hit_counts_json", "TEXT"),
+                ("timeline_json", "TEXT"),
+            ]
+            for col_name, col_type in new_cols:
+                if col_name not in existing_cols:
+                    try:
+                        conn.execute(f"ALTER TABLE agent_decision_logs ADD COLUMN {col_name} {col_type}")
+                    except sqlite3.OperationalError:
+                        pass
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS agent_decision_configs (
@@ -660,6 +724,8 @@ class SqliteWatchlistRepository(WatchlistRepository):
                 "personality_preset": "cinephile",
                 "custom_prompt": "",
                 "location": "",
+                "timezone": "America/Los_Angeles",
+                "user_timezone": "America/Los_Angeles",
                 "notify_on_login": True,
                 "auto_add_mentioned": True,
                 "track_price_drops": True,
@@ -667,11 +733,14 @@ class SqliteWatchlistRepository(WatchlistRepository):
                 "updated_at": self.utc_now_iso(),
             }
         keys = row.keys()
+        tz = (row["timezone"] if ("timezone" in keys and row["timezone"]) else (row["user_timezone"] if ("user_timezone" in keys and row["user_timezone"]) else "America/Los_Angeles"))
         return {
             "user_id": row["user_id"],
             "personality_preset": row["personality_preset"],
             "custom_prompt": row["custom_prompt"] or "",
             "location": row["location"] if ("location" in keys and row["location"]) else "",
+            "timezone": tz,
+            "user_timezone": tz,
             "notify_on_login": bool(row["notify_on_login"]),
             "auto_add_mentioned": bool(row["auto_add_mentioned"]),
             "track_price_drops": bool(row["track_price_drops"]),
@@ -684,6 +753,7 @@ class SqliteWatchlistRepository(WatchlistRepository):
         preset = settings.get("personality_preset", "cinephile")
         custom_prompt = settings.get("custom_prompt", "")
         location = settings.get("location", "").strip()
+        tz = (settings.get("timezone") or settings.get("user_timezone") or "America/Los_Angeles").strip()
         notify_on_login = 1 if settings.get("notify_on_login", True) else 0
         auto_add_mentioned = 1 if settings.get("auto_add_mentioned", True) else 0
         track_price_drops = 1 if settings.get("track_price_drops", True) else 0
@@ -693,19 +763,20 @@ class SqliteWatchlistRepository(WatchlistRepository):
         with self._connection() as conn:
             conn.execute(
                 """
-                INSERT INTO agent_settings (user_id, personality_preset, custom_prompt, location, notify_on_login, auto_add_mentioned, track_price_drops, auto_speak_briefing, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO agent_settings (user_id, personality_preset, custom_prompt, location, timezone, notify_on_login, auto_add_mentioned, track_price_drops, auto_speak_briefing, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(user_id) DO UPDATE SET
                     personality_preset = excluded.personality_preset,
                     custom_prompt = excluded.custom_prompt,
                     location = excluded.location,
+                    timezone = excluded.timezone,
                     notify_on_login = excluded.notify_on_login,
                     auto_add_mentioned = excluded.auto_add_mentioned,
                     track_price_drops = excluded.track_price_drops,
                     auto_speak_briefing = excluded.auto_speak_briefing,
                     updated_at = excluded.updated_at
                 """,
-                (user_id, preset, custom_prompt, location, notify_on_login, auto_add_mentioned, track_price_drops, auto_speak_briefing, now),
+                (user_id, preset, custom_prompt, location, tz, notify_on_login, auto_add_mentioned, track_price_drops, auto_speak_briefing, now),
             )
         return self.get_agent_settings(user_id)
 
@@ -726,10 +797,12 @@ class SqliteWatchlistRepository(WatchlistRepository):
         with self._connection() as conn:
             rows = conn.execute(
                 """
-                SELECT * FROM agent_conversations
-                WHERE user_id = ?
-                ORDER BY created_at ASC
-                LIMIT ?
+                SELECT * FROM (
+                    SELECT * FROM agent_conversations
+                    WHERE user_id = ?
+                    ORDER BY id DESC
+                    LIMIT ?
+                ) ORDER BY id ASC
                 """,
                 (user_id, limit),
             ).fetchall()
@@ -938,6 +1011,91 @@ class SqliteWatchlistRepository(WatchlistRepository):
             )
         return briefing_data
 
+    def get_daily_greeting(self, user_id: str, date_str: str) -> dict[str, Any] | None:
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT briefing_json FROM daily_greetings WHERE user_id = ? AND date_str = ?",
+                (user_id, date_str),
+            ).fetchone()
+        if row and row["briefing_json"]:
+            try:
+                return json.loads(row["briefing_json"])
+            except Exception:
+                pass
+        return None
+
+    def claim_daily_greeting_generation(
+        self, user_id: str, date_str: str, lease_seconds: int = 30, force_refresh: bool = False
+    ) -> tuple[bool, dict[str, Any] | None]:
+        from datetime import datetime, timezone, timedelta
+        now_dt = datetime.now(timezone.utc)
+        now_iso = now_dt.isoformat()
+        lease_exp = (now_dt + timedelta(seconds=lease_seconds)).isoformat()
+
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT briefing_json FROM daily_greetings WHERE user_id = ? AND date_str = ?",
+                (user_id, date_str),
+            ).fetchone()
+
+            if row and row["briefing_json"] and not force_refresh:
+                try:
+                    data = json.loads(row["briefing_json"])
+                    status = data.get("status", "completed")
+                    exp_str = data.get("lease_expires_at")
+
+                    if status == "completed":
+                        return False, data
+
+                    if status == "generating" and exp_str:
+                        try:
+                            exp_dt = datetime.fromisoformat(exp_str)
+                            if exp_dt > now_dt:
+                                return False, data
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+            claiming_record = {
+                "user_id": user_id,
+                "date_str": date_str,
+                "status": "generating",
+                "lease_expires_at": lease_exp,
+                "created_at": now_iso,
+            }
+            claiming_json = json.dumps(claiming_record)
+
+            conn.execute(
+                """
+                INSERT INTO daily_greetings (user_id, date_str, briefing_json, created_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(user_id, date_str) DO UPDATE SET
+                    briefing_json = excluded.briefing_json,
+                    created_at = excluded.created_at
+                """,
+                (user_id, date_str, claiming_json, now_iso),
+            )
+
+        return True, None
+
+    def save_daily_greeting(self, user_id: str, date_str: str, briefing_data: dict[str, Any]) -> dict[str, Any]:
+        now = self.utc_now_iso()
+        briefing_data.setdefault("status", "completed")
+        briefing_json = json.dumps(briefing_data)
+        with self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO daily_greetings (user_id, date_str, briefing_json, created_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(user_id, date_str) DO UPDATE SET
+                    briefing_json = excluded.briefing_json,
+                    created_at = excluded.created_at
+                """,
+                (user_id, date_str, briefing_json, now),
+            )
+        return briefing_data
+
     def list_rated_movies(self, user_id: str) -> list[dict[str, Any]]:
         from app.models import poster_url
         from datetime import datetime, timezone
@@ -1044,55 +1202,124 @@ class SqliteWatchlistRepository(WatchlistRepository):
                 "DELETE FROM rated_movies WHERE user_id = ? AND media_type = ? AND tmdb_id = ?",
                 (user_id, media_type, tmdb_id),
             )
-            # Reset user_rating in watchlist if present
-            conn.execute(
-                "UPDATE watchlist SET user_rating = 0 WHERE user_id = ? AND media_type = ? AND tmdb_id = ?",
+            row = conn.execute(
+                "SELECT * FROM watchlist WHERE user_id = ? AND media_type = ? AND tmdb_id = ?",
                 (user_id, media_type, tmdb_id),
-            )
-            return cursor.rowcount > 0
+            ).fetchone()
+            if row:
+                if not bool(row["is_owned"]) and (row["status"] == "watched" or not row["status"]):
+                    conn.execute(
+                        "DELETE FROM watchlist WHERE user_id = ? AND media_type = ? AND tmdb_id = ?",
+                        (user_id, media_type, tmdb_id),
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE watchlist SET user_rating = 0 WHERE user_id = ? AND media_type = ? AND tmdb_id = ?",
+                        (user_id, media_type, tmdb_id),
+                    )
+            return cursor.rowcount > 0 or (row is not None)
 
     # -- Decision Engine Repository Extensions --------------------------------
 
     def add_decision_log(self, log_dict: dict[str, Any]) -> dict[str, Any]:
-        with self._connection() as conn:
-            conn.execute(
-                """
-                INSERT INTO agent_decision_logs (
-                    log_id, event_type, timestamp, user_id, session_id,
-                    model_requested, model_used, gemini_called, fallback_used, fallback_reason,
-                    decision_config_version, prompt_version, required_candidates_json,
-                    optional_candidates_json, selected_candidates_json, excluded_candidates_json,
-                    random_rolls_json, cooldowns_applied_json, selection_summary,
-                    sanitized_prompt, raw_model_response, final_response, request_duration_ms
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    log_dict["log_id"],
-                    log_dict.get("event_type", "startup_briefing_decision"),
-                    log_dict["timestamp"],
-                    log_dict["user_id"],
-                    log_dict.get("session_id"),
-                    log_dict.get("model_requested"),
-                    log_dict.get("model_used"),
-                    1 if log_dict.get("gemini_called", True) else 0,
-                    1 if log_dict.get("fallback_used", False) else 0,
-                    log_dict.get("fallback_reason"),
-                    log_dict.get("decision_config_version", 1),
-                    log_dict.get("prompt_version", 1),
-                    json.dumps(log_dict.get("required_candidates", [])),
-                    json.dumps(log_dict.get("optional_candidates", [])),
-                    json.dumps(log_dict.get("selected_candidates", [])),
-                    json.dumps(log_dict.get("excluded_candidates", [])),
-                    json.dumps(log_dict.get("random_rolls", {})),
-                    json.dumps(log_dict.get("cooldowns_applied", [])),
-                    log_dict.get("selection_summary", ""),
-                    log_dict.get("sanitized_prompt", ""),
-                    log_dict.get("raw_model_response", ""),
-                    log_dict.get("final_response", ""),
-                    log_dict.get("request_duration_ms", 0.0),
-                ),
-            )
-        return log_dict
+        from app.decision_models import scrub_secrets
+        clean_dict = scrub_secrets(log_dict)
+        try:
+            with self._connection() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO agent_decision_logs (
+                        log_id, event_type, timestamp, user_id, session_id,
+                        model_requested, model_used, gemini_called, fallback_used, fallback_reason,
+                        decision_config_version, prompt_version, required_candidates_json,
+                        optional_candidates_json, selected_candidates_json, excluded_candidates_json,
+                        random_rolls_json, cooldowns_applied_json, selection_summary,
+                        sanitized_prompt, raw_model_response, final_response, request_duration_ms,
+                        daily_cache_key, attempt_number, is_fallback_attempt, http_status,
+                        success, error_type, gemini_request_id, model_attempted,
+                        telemetry_version, briefing_run_id, request_id, started_at, completed_at,
+                        total_duration_ms, force_refresh, user_timezone, resolved_local_date,
+                        server_date, result_source, final_status, response_text_length,
+                        daily_cache_result, daily_cache_backend, candidate_signature,
+                        gemini_attempt_count, fallback_attempted, fallback_trigger, final_model,
+                        external_attempt_counts_json, external_cache_hit_counts_json, timeline_json
+                    ) VALUES (
+                        ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?,
+                        ?, ?, ?,
+                        ?, ?, ?,
+                        ?, ?, ?,
+                        ?, ?, ?, ?,
+                        ?, ?, ?, ?,
+                        ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?,
+                        ?, ?, ?, ?,
+                        ?, ?, ?,
+                        ?, ?, ?, ?,
+                        ?, ?, ?
+                    )
+                    """,
+                    (
+                        clean_dict["log_id"],
+                        clean_dict.get("event_type", "startup_briefing_candidate_decision"),
+                        clean_dict["timestamp"],
+                        clean_dict["user_id"],
+                        clean_dict.get("session_id"),
+                        clean_dict.get("model_requested"),
+                        clean_dict.get("model_used"),
+                        1 if clean_dict.get("gemini_called") is True else 0,
+                        1 if clean_dict.get("fallback_used", False) else 0,
+                        clean_dict.get("fallback_reason"),
+                        clean_dict.get("decision_config_version", 1),
+                        clean_dict.get("prompt_version", 1),
+                        json.dumps(clean_dict.get("required_candidates", [])),
+                        json.dumps(clean_dict.get("optional_candidates", [])),
+                        json.dumps(clean_dict.get("selected_candidates", [])),
+                        json.dumps(clean_dict.get("excluded_candidates", [])),
+                        json.dumps(clean_dict.get("random_rolls", {})),
+                        json.dumps(clean_dict.get("cooldowns_applied", [])),
+                        clean_dict.get("selection_summary", ""),
+                        clean_dict.get("sanitized_prompt", ""),
+                        clean_dict.get("raw_model_response", ""),
+                        clean_dict.get("final_response", ""),
+                        clean_dict.get("request_duration_ms", 0.0),
+                        clean_dict.get("daily_cache_key"),
+                        clean_dict.get("attempt_number"),
+                        1 if clean_dict.get("is_fallback_attempt") is True else (0 if clean_dict.get("is_fallback_attempt") is False else None),
+                        clean_dict.get("http_status"),
+                        1 if clean_dict.get("success") is True else (0 if clean_dict.get("success") is False else None),
+                        clean_dict.get("error_type"),
+                        clean_dict.get("gemini_request_id"),
+                        clean_dict.get("model_attempted"),
+                        clean_dict.get("telemetry_version", 2),
+                        clean_dict.get("briefing_run_id"),
+                        clean_dict.get("request_id"),
+                        clean_dict.get("started_at"),
+                        clean_dict.get("completed_at"),
+                        clean_dict.get("total_duration_ms"),
+                        1 if clean_dict.get("force_refresh") is True else 0,
+                        clean_dict.get("user_timezone", "UTC"),
+                        clean_dict.get("resolved_local_date"),
+                        clean_dict.get("server_date"),
+                        clean_dict.get("result_source"),
+                        clean_dict.get("final_status"),
+                        clean_dict.get("response_text_length", 0),
+                        clean_dict.get("daily_cache_result"),
+                        clean_dict.get("daily_cache_backend", "sqlite"),
+                        clean_dict.get("candidate_signature"),
+                        clean_dict.get("gemini_attempt_count", 0),
+                        1 if clean_dict.get("fallback_attempted") is True else 0,
+                        clean_dict.get("fallback_trigger"),
+                        clean_dict.get("final_model"),
+                        json.dumps(clean_dict.get("external_attempt_counts", {})),
+                        json.dumps(clean_dict.get("external_cache_hit_counts", {})),
+                        json.dumps(clean_dict.get("timeline", [])),
+                    ),
+                )
+        except Exception as e:
+            logger.warning(f"Failed to persist decision log '{clean_dict.get('log_id')}': {e}")
+        return clean_dict
 
     def list_decision_logs(
         self,
@@ -1140,36 +1367,56 @@ class SqliteWatchlistRepository(WatchlistRepository):
             query = f"SELECT * FROM agent_decision_logs{where_clause} ORDER BY timestamp DESC LIMIT ? OFFSET ?"
             rows = conn.execute(query, params + [limit, offset]).fetchall()
 
-        logs = []
-        for r in rows:
-            d = dict(r)
-            d["gemini_called"] = bool(d.get("gemini_called"))
-            d["fallback_used"] = bool(d.get("fallback_used"))
-            d["required_candidates"] = json.loads(d.get("required_candidates_json") or "[]")
-            d["optional_candidates"] = json.loads(d.get("optional_candidates_json") or "[]")
-            d["selected_candidates"] = json.loads(d.get("selected_candidates_json") or "[]")
-            d["excluded_candidates"] = json.loads(d.get("excluded_candidates_json") or "[]")
-            d["random_rolls"] = json.loads(d.get("random_rolls_json") or "{}")
-            d["cooldowns_applied"] = json.loads(d.get("cooldowns_applied_json") or "[]")
-            logs.append(d)
-
+        logs = [self._format_decision_log_row(dict(r)) for r in rows]
         return {"total": total, "logs": logs, "limit": limit, "offset": offset}
+
+    def _format_decision_log_row(self, d: dict[str, Any]) -> dict[str, Any]:
+        d["gemini_called"] = bool(d.get("gemini_called"))
+        d["fallback_used"] = bool(d.get("fallback_used"))
+        d["is_fallback_attempt"] = bool(d.get("is_fallback_attempt")) if d.get("is_fallback_attempt") is not None else None
+        d["success"] = bool(d.get("success")) if d.get("success") is not None else None
+        d["force_refresh"] = bool(d.get("force_refresh"))
+        d["fallback_attempted"] = bool(d.get("fallback_attempted"))
+
+        for json_col, default in [
+            ("required_candidates_json", []),
+            ("optional_candidates_json", []),
+            ("selected_candidates_json", []),
+            ("excluded_candidates_json", []),
+            ("random_rolls_json", {}),
+            ("cooldowns_applied_json", []),
+            ("external_attempt_counts_json", {}),
+            ("external_cache_hit_counts_json", {}),
+            ("timeline_json", []),
+        ]:
+            key = json_col.replace("_json", "")
+            raw_val = d.get(json_col)
+            if raw_val:
+                try:
+                    d[key] = json.loads(raw_val)
+                except Exception:
+                    d[key] = default
+            else:
+                if key not in d or d[key] is None:
+                    d[key] = default
+
+        t_ver = d.get("telemetry_version")
+        if t_ver != 2 or d.get("event_type") == "startup_briefing_decision":
+            d["is_legacy"] = True
+            summary = d.get("selection_summary", "")
+            if "Legacy Candidate Decision — Gemini Call Unverified" not in summary:
+                d["selection_summary"] = f"Legacy Candidate Decision — Gemini Call Unverified: {summary}".strip(": ")
+        else:
+            d["is_legacy"] = False
+
+        return d
 
     def get_decision_log(self, log_id: str) -> dict[str, Any] | None:
         with self._connection() as conn:
             row = conn.execute("SELECT * FROM agent_decision_logs WHERE log_id = ?", (log_id,)).fetchone()
         if not row:
             return None
-        d = dict(row)
-        d["gemini_called"] = bool(d.get("gemini_called"))
-        d["fallback_used"] = bool(d.get("fallback_used"))
-        d["required_candidates"] = json.loads(d.get("required_candidates_json") or "[]")
-        d["optional_candidates"] = json.loads(d.get("optional_candidates_json") or "[]")
-        d["selected_candidates"] = json.loads(d.get("selected_candidates_json") or "[]")
-        d["excluded_candidates"] = json.loads(d.get("excluded_candidates_json") or "[]")
-        d["random_rolls"] = json.loads(d.get("random_rolls_json") or "{}")
-        d["cooldowns_applied"] = json.loads(d.get("cooldowns_applied_json") or "[]")
-        return d
+        return self._format_decision_log_row(dict(row))
 
     def get_active_decision_config(self) -> dict[str, Any]:
         with self._connection() as conn:

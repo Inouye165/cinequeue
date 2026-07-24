@@ -41,7 +41,7 @@ async def list_watchlist(
         repo = request.app.state.watchlist_repo
         rows = repo.list_items(current_user.uid)
 
-        tmdb: TmdbClient = request.app.state.tmdb
+        tmdb: TmdbClient | None = getattr(request.app.state, "tmdb", None)
 
         async def enrich_item(item: dict[str, Any]) -> dict[str, Any]:
             enriched = dict(item)
@@ -81,16 +81,17 @@ async def list_watchlist(
 
                 if details:
                     # Stale cache is available, schedule background task
-                    background_tasks.add_task(
-                        refresh_cache_in_background,
-                        repo,
-                        current_user.uid,
-                        enriched["media_type"],
-                        enriched["tmdb_id"],
-                        tmdb,
-                    )
-                else:
-                    # No cache available, fetch synchronously
+                    if tmdb:
+                        background_tasks.add_task(
+                            refresh_cache_in_background,
+                            repo,
+                            current_user.uid,
+                            enriched["media_type"],
+                            enriched["tmdb_id"],
+                            tmdb,
+                        )
+                elif tmdb:
+                    # No cache available, fetch synchronously if tmdb is available
                     try:
                         details = await tmdb.get_details(enriched["media_type"], enriched["tmdb_id"])
                         try:
@@ -107,6 +108,11 @@ async def list_watchlist(
                     except Exception as exc:
                         logger.warning(f"Failed to fetch details for {enriched['media_type']}/{enriched['tmdb_id']}: {exc}")
                         details = {}
+                else:
+                    details = {}
+
+            if not details:
+                details = {}
 
             rel_date = details.get("release_date") or enriched.get("release_date")
             days = days_until(rel_date)
@@ -122,7 +128,7 @@ async def list_watchlist(
                 is_on_sale_alert = True
 
             next_season = None
-            if enriched["media_type"] == "tv" and details.get("seasons"):
+            if enriched["media_type"] == "tv" and details.get("seasons") and tmdb:
                 next_season = tmdb.get_next_season(details["seasons"])
 
             enriched.update(
@@ -224,8 +230,35 @@ async def add_to_watchlist(request: Request, body: dict[str, Any], current_user:
             "watch_on_sale_buy": added.get("watch_on_sale_buy", False),
             "user_rating": added.get("user_rating"),
         }
-    except DuplicateItemError:
-        logger.warning(f"Item already on watchlist: {media_type}/{tmdb_id}")
+        logger.info(f"Item already on watchlist, updating status to {status}: {media_type}/{tmdb_id}")
+        updated = repo.update_item(
+            current_user.uid,
+            media_type,
+            tmdb_id,
+            status=status,
+            is_owned=is_owned,
+            owned_format=owned_format,
+            watch_free_streaming=watch_free_streaming,
+            watch_on_sale_buy=watch_on_sale_buy,
+            user_rating=user_rating,
+        )
+        if updated:
+            days = days_until(release_date)
+            return {
+                "media_type": media_type,
+                "tmdb_id": tmdb_id,
+                "title": title,
+                "release_date": release_date,
+                "days_away": days,
+                "days_label": days_label(days),
+                "poster_url": poster_url(poster_path),
+                "is_owned": updated.get("is_owned", False),
+                "owned_format": updated.get("owned_format"),
+                "status": updated.get("status", "queue"),
+                "watch_free_streaming": updated.get("watch_free_streaming", False),
+                "watch_on_sale_buy": updated.get("watch_on_sale_buy", False),
+                "user_rating": updated.get("user_rating"),
+            }
         raise HTTPException(status_code=409, detail="Already on watchlist")
     except HTTPException:
         raise

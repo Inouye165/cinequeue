@@ -249,6 +249,25 @@ class WatchlistRepository(ABC):
         ...
 
     @abstractmethod
+    def get_daily_greeting(self, user_id: str, date_str: str) -> dict[str, Any] | None:
+        """Get cached daily greeting/briefing for a specific date (YYYY-MM-DD)."""
+        ...
+
+    @abstractmethod
+    def save_daily_greeting(self, user_id: str, date_str: str, briefing_data: dict[str, Any]) -> dict[str, Any]:
+        """Save or cache daily briefing output for a specific date (YYYY-MM-DD)."""
+        ...
+
+    @abstractmethod
+    def claim_daily_greeting_generation(
+        self, user_id: str, date_str: str, lease_seconds: int = 30, force_refresh: bool = False
+    ) -> tuple[bool, dict[str, Any] | None]:
+        """Atomically claim generation ownership for a stable daily key.
+        Returns tuple of (acquired_boolean, existing_record_dict_if_any).
+        """
+        ...
+
+    @abstractmethod
     def get_user_briefing_state(self, user_id: str) -> dict[str, Any]:
         """Get previous_login_at and previous_briefing_presented_at reference timestamps."""
         ...
@@ -285,5 +304,31 @@ class WatchlistRepository(ABC):
     @abstractmethod
     def delete_rated_movie(self, user_id: str, media_type: str, tmdb_id: int) -> bool:
         """Remove user rating for a movie/tv item."""
+        ...
+
+    @abstractmethod
+    def add_decision_log(self, log_dict: dict[str, Any]) -> dict[str, Any]:
+        """Add or store an AI decision or telemetry log record."""
+        ...
+
+    @abstractmethod
+    def list_decision_logs(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        user_id: str | None = None,
+        candidate_type: str | None = None,
+        required_only: bool | None = None,
+        fallback_only: bool | None = None,
+        model: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ) -> dict[str, Any]:
+        """List decision and telemetry log records with filtering."""
+        ...
+
+    @abstractmethod
+    def get_decision_log(self, log_id: str) -> dict[str, Any] | None:
+        """Get a specific decision or telemetry log record by ID."""
         ...
 

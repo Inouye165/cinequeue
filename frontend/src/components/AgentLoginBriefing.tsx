@@ -20,6 +20,7 @@ export function AgentLoginBriefing({ onOpenChat }: AgentLoginBriefingProps) {
   const [loading, setLoading] = useState(true);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const hasRequestedBriefingRef = useRef(false);
 
   const speakText = (text: string) => {
     if (!("speechSynthesis" in window)) return;
@@ -39,16 +40,16 @@ export function AgentLoginBriefing({ onOpenChat }: AgentLoginBriefingProps) {
     window.speechSynthesis.speak(utterance);
   };
 
-  const loadBriefing = async (forceNewSession: boolean = false) => {
+  const loadBriefing = async (forceRefresh: boolean = false) => {
     setLoading(true);
     try {
-      let sessionId = forceNewSession ? null : sessionStorage.getItem("cinequeue_briefing_session_id");
-      if (!sessionId || forceNewSession) {
+      let sessionId = sessionStorage.getItem("cinequeue_briefing_session_id");
+      if (!sessionId) {
         sessionId = "sess_" + Date.now() + "_" + Math.random().toString(36).substring(2, 9);
         sessionStorage.setItem("cinequeue_briefing_session_id", sessionId);
       }
 
-      const data = await api.agentBriefing(sessionId);
+      const data = await api.agentBriefing(sessionId, forceRefresh);
       if (data && data.enabled && data.briefing) {
         setBriefing(data);
 
@@ -68,8 +69,10 @@ export function AgentLoginBriefing({ onOpenChat }: AgentLoginBriefingProps) {
   };
 
   useEffect(() => {
-    // Generate fresh session on initial page load
-    void loadBriefing(true);
+    if (!hasRequestedBriefingRef.current) {
+      hasRequestedBriefingRef.current = true;
+      void loadBriefing(false); // Normal startup - forceRefresh=false
+    }
 
     return () => {
       if (timerRef.current) clearTimeout(timerRef.current);
@@ -123,6 +126,14 @@ export function AgentLoginBriefing({ onOpenChat }: AgentLoginBriefingProps) {
           title="Listen to the startup briefing again"
         >
           {isSpeaking ? "🔊 Speaking..." : "🔊 Listen"}
+        </button>
+        <button
+          className="refresh-briefing-btn"
+          onClick={() => void loadBriefing(true)}
+          title="Manually refresh today's briefing"
+          style={{ background: "#333", color: "#fff", border: "1px solid #555", borderRadius: "4px", padding: "6px 12px", cursor: "pointer" }}
+        >
+          🔄 Refresh
         </button>
         <button className="chat-briefing-btn" onClick={onOpenChat}>
           💬 Chat with AI

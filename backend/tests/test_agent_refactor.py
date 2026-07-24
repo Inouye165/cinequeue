@@ -118,7 +118,7 @@ async def test_primary_model_fallback_model_attempt(monkeypatch):
     result = await AiAgentService._call_gemini_api("sys", [], "hello")
 
     assert attempted_models == ["gemini-3.6-flash", "gemini-3.5-flash"]
-    assert result.fallback_used is False
+    assert result.fallback_used is True
     assert result.model_requested == "gemini-3.6-flash"
     assert result.model_used == "gemini-3.5-flash"
     assert result.text == "Success from 3.5 flash"
@@ -143,7 +143,7 @@ async def test_what_dreams_may_come_context_focused(repo, monkeypatch):
 
     captured_context = []
 
-    async def mock_call_gemini(system_instruction, recent_history=[], user_message="", context_notes=None):
+    async def mock_call_gemini(system_instruction, recent_history=[], user_message="", context_notes=None, **kwargs):
         if context_notes:
             captured_context.extend(context_notes)
         from app.services.agent_service import AgentResult

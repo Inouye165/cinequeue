@@ -46,6 +46,13 @@ def days_label(days: int | None) -> str:
 def poster_url(path: str | None, size: str = "w342") -> str | None:
     if not path:
         return None
+    if path.startswith("http://") or path.startswith("https://"):
+        import re
+        path = re.sub(r"^https?://image\.tmdb\.org/t/p/w\d+", "", path)
+        if path.startswith("http://") or path.startswith("https://"):
+            return path
+    if not path.startswith("/"):
+        path = "/" + path
     return f"https://image.tmdb.org/t/p/{size}{path}"
 
 

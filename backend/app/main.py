@@ -116,7 +116,7 @@ app.add_middleware(
 async def add_security_headers(request, call_next):
     response = await call_next(request)
     
-    is_auth_proxy = request.url.path.startswith("/__/auth/")
+    is_auth_proxy = request.url.path.startswith("/__/auth/") or request.url.path.startswith("/api/auth/")
     
     if not is_auth_proxy:
         response.headers["X-Content-Type-Options"] = "nosniff"
@@ -155,9 +155,11 @@ async def check_tmdb_key(request, call_next):
         request.url.path.startswith("/api")
         and not request.url.path.startswith("/api/auth")
         and not request.url.path.startswith("/api/agent")
+        and not request.url.path.startswith("/api/ratings")
+        and not request.url.path.startswith("/api/watchlist")
         and request.url.path != "/api/health"
     ):
-        if not app.state.tmdb:
+        if not getattr(app.state, "tmdb", None):
             from fastapi.responses import JSONResponse
 
             return JSONResponse(

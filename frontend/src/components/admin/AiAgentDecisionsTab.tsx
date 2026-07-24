@@ -44,6 +44,9 @@ export const AiAgentDecisionsTab: React.FC<AiAgentDecisionsTabProps> = ({ authTo
   const [previewSeed, setPreviewSeed] = useState<number>(42);
   const [previewResult, setPreviewResult] = useState<any | null>(null);
   const [previewLoading, setPreviewLoading] = useState<boolean>(false);
+  void configLoading;
+  void setPreviewIsStreaming;
+  void setPreviewInterest;
 
   const showCopyToast = (msg: string) => {
     setCopiedMsg(msg);
@@ -301,32 +304,73 @@ export const AiAgentDecisionsTab: React.FC<AiAgentDecisionsTabProps> = ({ authTo
                 <tr style={{ background: "rgba(255,255,255,0.08)", textAlign: "left" }}>
                   <th style={{ padding: "10px" }}>Date & Time</th>
                   <th style={{ padding: "10px" }}>User</th>
-                  <th style={{ padding: "10px" }}>Selected Type</th>
-                  <th style={{ padding: "10px" }}>Model</th>
-                  <th style={{ padding: "10px" }}>Provider</th>
+                  <th style={{ padding: "10px" }}>Event Type / Run ID</th>
+                  <th style={{ padding: "10px" }}>Result Source / Status</th>
+                  <th style={{ padding: "10px" }}>External Calls / Hits</th>
                   <th style={{ padding: "10px" }}>Duration</th>
                   <th style={{ padding: "10px" }}>Action</th>
                 </tr>
               </thead>
               <tbody>
                 {logs.map((l) => {
-                  const selTypes = l.selected_candidates?.map((c: any) => c.type).join(", ") || "None (Short Greeting)";
+                  const isRunSummary = l.event_type === "startup_briefing_run_completed" || l.event_type === "startup_briefing_run_failed";
+                  const isCandidateDecision = l.event_type === "startup_briefing_candidate_decision";
+                  const isGeminiAttempt = l.event_type?.startsWith("gemini_http_attempt");
+                  const isCacheEvent = l.event_type?.startsWith("daily_greeting_cache");
+
+                  let eventBadgeBg = "#555";
+                  if (isRunSummary) eventBadgeBg = "#7b1fa2";
+                  else if (isCandidateDecision) eventBadgeBg = "#1976d2";
+                  else if (isGeminiAttempt) eventBadgeBg = "#e65100";
+                  else if (isCacheEvent) eventBadgeBg = "#00796b";
+
+                  const extCalls = l.external_attempt_counts ? Object.values(l.external_attempt_counts as Record<string, number>).reduce((a, b) => a + b, 0) : 0;
+                  const extHits = l.external_cache_hit_counts ? Object.values(l.external_cache_hit_counts as Record<string, number>).reduce((a, b) => a + b, 0) : 0;
+
                   return (
                     <tr key={l.log_id} style={{ borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
                       <td style={{ padding: "10px" }}>{new Date(l.timestamp).toLocaleString()}</td>
                       <td style={{ padding: "10px" }}>{l.user_id}</td>
                       <td style={{ padding: "10px" }}>
-                        <span style={{ background: l.selected_candidates?.length ? "#2e7d32" : "#555", padding: "2px 8px", borderRadius: "4px", fontSize: "0.8rem" }}>
-                          {selTypes}
+                        <span style={{ background: eventBadgeBg, padding: "2px 8px", borderRadius: "4px", fontSize: "0.75rem", fontWeight: "bold", marginRight: "6px" }}>
+                          {l.event_type}
                         </span>
+                        {l.is_legacy && (
+                          <span style={{ background: "#d32f2f", padding: "2px 6px", borderRadius: "4px", fontSize: "0.7rem", fontWeight: "bold", color: "#fff" }}>
+                            UNVERIFIED LEGACY
+                          </span>
+                        )}
+                        {l.briefing_run_id && (
+                          <div style={{ fontSize: "0.75rem", color: "#aaa", marginTop: "2px" }}>
+                            Run: {l.briefing_run_id}
+                          </div>
+                        )}
                       </td>
-                      <td style={{ padding: "10px" }}>{l.model_used || l.model_requested}</td>
                       <td style={{ padding: "10px" }}>
-                        <span style={{ color: l.fallback_used ? "#ff9800" : "#4caf50" }}>
-                          {l.fallback_used ? `Fallback (${l.fallback_reason})` : "Gemini API"}
-                        </span>
+                        {isRunSummary ? (
+                          <span style={{ background: "#2e7d32", padding: "3px 8px", borderRadius: "4px", fontSize: "0.8rem", fontWeight: "bold" }}>
+                            Source: {l.result_source || "unknown"}
+                          </span>
+                        ) : !l.gemini_called ? (
+                          <span style={{ color: "#aaa" }}>
+                            {isCandidateDecision ? "Local Candidate Scoring" : "Local System Event"}
+                          </span>
+                        ) : (
+                          <span style={{ color: l.fallback_used ? "#ff9800" : "#4caf50" }}>
+                            {l.fallback_used ? `Fallback (${l.fallback_reason || l.fallback_trigger || "error"})` : "Gemini HTTP Call"}
+                          </span>
+                        )}
                       </td>
-                      <td style={{ padding: "10px" }}>{l.request_duration_ms}ms</td>
+                      <td style={{ padding: "10px", fontSize: "0.85rem" }}>
+                        {isRunSummary ? (
+                          <span>
+                            📡 Calls: <strong>{extCalls}</strong> | ⚡ Hits: <strong>{extHits}</strong>
+                          </span>
+                        ) : (
+                          <span style={{ color: "#888" }}>—</span>
+                        )}
+                      </td>
+                      <td style={{ padding: "10px" }}>{l.total_duration_ms || l.request_duration_ms || 0}ms</td>
                       <td style={{ padding: "10px" }}>
                         <button onClick={() => setSelectedLog(l)} style={{ padding: "4px 10px", background: "#2196f3", color: "#fff", border: "none", borderRadius: "4px", cursor: "pointer" }}>
                           Inspect Log
@@ -348,6 +392,13 @@ export const AiAgentDecisionsTab: React.FC<AiAgentDecisionsTabProps> = ({ authTo
                   <button onClick={() => setSelectedLog(null)} style={{ background: "transparent", color: "#fff", border: "none", fontSize: "1.5rem", cursor: "pointer" }}>✕</button>
                 </div>
 
+                {/* Legacy Warning */}
+                {selectedLog.is_legacy && (
+                  <div style={{ background: "#b71c1c", color: "#fff", padding: "10px 14px", borderRadius: "6px", marginBottom: "16px", fontWeight: "bold" }}>
+                    ⚠️ Legacy Log Record — Created before V2 truthful instrumentation. `gemini_called` was set during local candidate scoring and does not prove an outbound HTTP call was made.
+                  </div>
+                )}
+
                 {/* Clipboard Actions Bar */}
                 <div style={{ display: "flex", gap: "8px", marginBottom: "16px", flexWrap: "wrap" }}>
                   <button onClick={() => copyToClipboard(generateDiagnosticBundle(selectedLog), "Markdown Diagnostic Bundle")} style={{ padding: "8px 14px", background: "#e50914", color: "#fff", border: "none", borderRadius: "4px", cursor: "pointer", fontWeight: "bold" }}>
@@ -356,13 +407,36 @@ export const AiAgentDecisionsTab: React.FC<AiAgentDecisionsTabProps> = ({ authTo
                   <button onClick={() => copyToClipboard(selectedLog.selection_summary, "Explanation")} style={{ padding: "8px 14px", background: "#333", color: "#fff", border: "none", borderRadius: "4px", cursor: "pointer" }}>
                     Copy Explanation
                   </button>
-                  <button onClick={() => copyToClipboard(selectedLog.sanitized_prompt, "Sanitized Prompt")} style={{ padding: "8px 14px", background: "#333", color: "#fff", border: "none", borderRadius: "4px", cursor: "pointer" }}>
-                    Copy Prompt
-                  </button>
-                  <button onClick={() => copyToClipboard(selectedLog.raw_model_response, "Raw Response")} style={{ padding: "8px 14px", background: "#333", color: "#fff", border: "none", borderRadius: "4px", cursor: "pointer" }}>
-                    Copy Raw Response
-                  </button>
+                  {selectedLog.sanitized_prompt && (
+                    <button onClick={() => copyToClipboard(selectedLog.sanitized_prompt, "Sanitized Prompt")} style={{ padding: "8px 14px", background: "#333", color: "#fff", border: "none", borderRadius: "4px", cursor: "pointer" }}>
+                      Copy Prompt
+                    </button>
+                  )}
+                  {selectedLog.raw_model_response && (
+                    <button onClick={() => copyToClipboard(selectedLog.raw_model_response, "Raw Response")} style={{ padding: "8px 14px", background: "#333", color: "#fff", border: "none", borderRadius: "4px", cursor: "pointer" }}>
+                      Copy Raw Response
+                    </button>
+                  )}
                 </div>
+
+                {/* Summary Record Pipeline Timeline */}
+                {selectedLog.timeline && selectedLog.timeline.length > 0 && (
+                  <div style={{ background: "rgba(255,255,255,0.04)", padding: "14px", borderRadius: "8px", marginBottom: "16px" }}>
+                    <h4 style={{ margin: "0 0 10px", color: "#9c27b0" }}>⚡ Pipeline Execution Timeline (Sequence Ordered):</h4>
+                    <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                      {selectedLog.timeline.map((step: any) => (
+                        <div key={step.sequence} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "#111", padding: "6px 12px", borderRadius: "4px", fontSize: "0.85rem" }}>
+                          <span>
+                            <strong>#{step.sequence}</strong> <code style={{ color: "#2196f3" }}>{step.stage}</code>
+                          </span>
+                          <span style={{ color: step.status === "hit" ? "#4caf50" : (step.status === "completed" ? "#81c784" : "#ff9800"), fontWeight: "bold" }}>
+                            {step.status.toUpperCase()} ({step.duration_ms}ms)
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
 
                 {/* Explanation Card */}
                 <div style={{ background: "rgba(255,255,255,0.04)", padding: "14px", borderRadius: "8px", marginBottom: "16px" }}>
@@ -371,49 +445,55 @@ export const AiAgentDecisionsTab: React.FC<AiAgentDecisionsTabProps> = ({ authTo
                 </div>
 
                 {/* Candidates Evaluation Table */}
-                <h4 style={{ marginBottom: "8px" }}>Candidates Evaluated:</h4>
-                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.85rem", marginBottom: "16px" }}>
-                  <thead>
-                    <tr style={{ background: "rgba(255,255,255,0.08)", textAlign: "left" }}>
-                      <th style={{ padding: "6px" }}>Title / Type</th>
-                      <th style={{ padding: "6px" }}>Scores (Imp/Int/Nov/Conf = Comb)</th>
-                      <th style={{ padding: "6px" }}>Status</th>
-                      <th style={{ padding: "6px" }}>Reasons / Exclusion</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {[...(selectedLog.selected_candidates || []), ...(selectedLog.excluded_candidates || [])].map((c: any, idx: number) => (
-                      <tr key={idx} style={{ borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
-                        <td style={{ padding: "6px" }}>
-                          <strong>{c.title}</strong>
-                          <br />
-                          <span style={{ fontSize: "0.75rem", color: "#aaa" }}>{c.type}</span>
-                        </td>
-                        <td style={{ padding: "6px" }}>
-                          {c.importance_score} / {c.interest_score} / {c.novelty_score} / {c.confidence_score} = <strong>{c.combined_score}</strong>
-                        </td>
-                        <td style={{ padding: "6px" }}>
-                          <span style={{ color: c.selected ? "#4caf50" : "#f44336" }}>{c.selected ? "SELECTED" : "EXCLUDED"}</span>
-                        </td>
-                        <td style={{ padding: "6px", fontSize: "0.8rem" }}>
-                          {c.selected ? (c.interest_reasons?.join("; ") || "Selection criteria satisfied") : c.exclusion_reason}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+                {(selectedLog.selected_candidates?.length > 0 || selectedLog.excluded_candidates?.length > 0) && (
+                  <>
+                    <h4 style={{ marginBottom: "8px" }}>Candidates Evaluated:</h4>
+                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.85rem", marginBottom: "16px" }}>
+                      <thead>
+                        <tr style={{ background: "rgba(255,255,255,0.08)", textAlign: "left" }}>
+                          <th style={{ padding: "6px" }}>Title / Type</th>
+                          <th style={{ padding: "6px" }}>Scores (Imp/Int/Nov/Conf = Comb)</th>
+                          <th style={{ padding: "6px" }}>Status</th>
+                          <th style={{ padding: "6px" }}>Reasons / Exclusion</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {[...(selectedLog.selected_candidates || []), ...(selectedLog.excluded_candidates || [])].map((c: any, idx: number) => (
+                          <tr key={idx} style={{ borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
+                            <td style={{ padding: "6px" }}>
+                              <strong>{c.title}</strong>
+                              <br />
+                              <span style={{ fontSize: "0.75rem", color: "#aaa" }}>{c.type}</span>
+                            </td>
+                            <td style={{ padding: "6px" }}>
+                              {c.importance_score} / {c.interest_score} / {c.novelty_score} / {c.confidence_score} = <strong>{c.combined_score}</strong>
+                            </td>
+                            <td style={{ padding: "6px" }}>
+                              <span style={{ color: c.selected ? "#4caf50" : "#f44336" }}>{c.selected ? "SELECTED" : "EXCLUDED"}</span>
+                            </td>
+                            <td style={{ padding: "6px", fontSize: "0.8rem" }}>
+                              {c.selected ? (c.interest_reasons?.join("; ") || "Selection criteria satisfied") : c.exclusion_reason}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </>
+                )}
 
                 {/* Sanitized Prompt & Raw Response */}
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" }}>
-                  <div>
-                    <h4 style={{ margin: "0 0 6px" }}>Sanitized Gemini Prompt:</h4>
-                    <textarea readOnly value={selectedLog.sanitized_prompt} style={{ width: "100%", height: "120px", background: "#111", color: "#ddd", border: "1px solid #444", borderRadius: "4px", padding: "8px", fontSize: "0.8rem" }} />
+                {(selectedLog.sanitized_prompt || selectedLog.raw_model_response) && (
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" }}>
+                    <div>
+                      <h4 style={{ margin: "0 0 6px" }}>Sanitized Gemini Prompt:</h4>
+                      <textarea readOnly value={selectedLog.sanitized_prompt || "N/A"} style={{ width: "100%", height: "120px", background: "#111", color: "#ddd", border: "1px solid #444", borderRadius: "4px", padding: "8px", fontSize: "0.8rem" }} />
+                    </div>
+                    <div>
+                      <h4 style={{ margin: "0 0 6px" }}>Raw Gemini Response:</h4>
+                      <textarea readOnly value={selectedLog.raw_model_response || "N/A"} style={{ width: "100%", height: "120px", background: "#111", color: "#ddd", border: "1px solid #444", borderRadius: "4px", padding: "8px", fontSize: "0.8rem" }} />
+                    </div>
                   </div>
-                  <div>
-                    <h4 style={{ margin: "0 0 6px" }}>Raw Gemini Response:</h4>
-                    <textarea readOnly value={selectedLog.raw_model_response} style={{ width: "100%", height: "120px", background: "#111", color: "#ddd", border: "1px solid #444", borderRadius: "4px", padding: "8px", fontSize: "0.8rem" }} />
-                  </div>
-                </div>
+                )}
               </div>
             </div>
           )}
