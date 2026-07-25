@@ -622,6 +622,65 @@ class FirestoreWatchlistRepository(WatchlistRepository):
             "created_at": now,
         }, merge=True)
         return briefing_data
+
+    def claim_daily_greeting_generation(
+        self, user_id: str, date_str: str, lease_seconds: int = 30, force_refresh: bool = False
+    ) -> tuple[bool, dict[str, Any] | None]:
+        from datetime import datetime, timezone, timedelta
+        doc_ref = self._db.collection("users").document(user_id).collection("daily_greetings").document(date_str)
+
+        try:
+            @firestore.transactional
+            def _in_transaction(transaction, ref):
+                snapshot = ref.get(transaction=transaction)
+                now_dt = datetime.now(timezone.utc)
+                now_iso = now_dt.isoformat()
+                lease_exp = (now_dt + timedelta(seconds=lease_seconds)).isoformat()
+
+                if snapshot.exists and not force_refresh:
+                    d = snapshot.to_dict() or {}
+                    b_data = d.get("briefing_data", d)
+                    status = b_data.get("status", d.get("status", "completed"))
+                    exp_str = b_data.get("lease_expires_at", d.get("lease_expires_at"))
+
+                    if status == "completed":
+                        return False, b_data
+
+                    if status == "generating" and exp_str:
+                        try:
+                            exp_dt = datetime.fromisoformat(exp_str)
+                            if exp_dt > now_dt:
+                                return False, b_data
+                        except Exception:
+                            pass
+
+                claiming_record = {
+                    "user_id": user_id,
+                    "date_str": date_str,
+                    "status": "generating",
+                    "lease_expires_at": lease_exp,
+                    "created_at": now_iso,
+                }
+                transaction.set(ref, {"user_id": user_id, "date_str": date_str, "briefing_data": claiming_record, "created_at": now_iso}, merge=True)
+                return True, None
+
+            transaction = self._db.transaction()
+            return _in_transaction(transaction, doc_ref)
+        except Exception as e:
+            logger.warning(f"Firestore claim_daily_greeting_generation error: {e}")
+            return True, None
+
+    def save_daily_greeting(self, user_id: str, date_str: str, briefing_data: dict[str, Any]) -> dict[str, Any]:
+        now = self.utc_now_iso()
+        briefing_data.setdefault("status", "completed")
+        doc_ref = self._db.collection("users").document(user_id).collection("daily_greetings").document(date_str)
+        doc_ref.set({
+            "user_id": user_id,
+            "date_str": date_str,
+            "briefing_data": briefing_data,
+            "created_at": now,
+        }, merge=True)
+        return briefing_data
     def list_rated_movies(self, user_id: str) -> list[dict[str, Any]]:
         try:
             col = self._db.collection("users").document(user_id).collection("rated_movies")
