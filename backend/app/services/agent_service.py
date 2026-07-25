@@ -568,7 +568,6 @@ class AiAgentService:
         return instruction
 
     @staticmethod
-    @staticmethod
     def _get_time_of_day() -> str:
         import datetime
         hour = datetime.datetime.now().hour
@@ -658,7 +657,24 @@ class AiAgentService:
         else:
             bullet_lines = []
             for it in briefing_items:
-                msg = it.get("summary") or it.get("message") or it.get("headline") or it.get("title")
+                raw_title = it.get("title") or it.get("name")
+                norm_title = normalize_display_title(raw_title) if raw_title else ""
+                msg = it.get("summary") or it.get("message") or it.get("headline") or it.get("title") or ""
+                if msg:
+                    msg = msg.strip()
+                    if raw_title and norm_title:
+                        msg = msg.replace(f"'{raw_title}'", norm_title).replace(f'"{raw_title}"', norm_title)
+                        if raw_title in msg and raw_title != norm_title:
+                            msg = msg.replace(raw_title, norm_title)
+                    if norm_title and norm_title.lower() not in msg.lower():
+                        if msg.lower().startswith("it is "):
+                            msg = f"{norm_title} is " + msg[6:]
+                        elif msg.lower().startswith("it was "):
+                            msg = f"{norm_title} was " + msg[7:]
+                        elif msg.lower().startswith("it "):
+                            msg = f"{norm_title} " + msg[3:]
+                        else:
+                            msg = f"{norm_title}: {msg}"
                 bullet_lines.append(f"• {msg}")
             bullets_str = "\n".join(bullet_lines)
             intro_options = [
