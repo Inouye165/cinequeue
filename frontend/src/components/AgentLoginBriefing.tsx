@@ -191,11 +191,6 @@ export function AgentLoginBriefing({ onOpenChat }: AgentLoginBriefingProps) {
                 </div>
               )}
             </div>
-            <div className="updates-modal-footer">
-              <button className="updates-modal-done-btn" onClick={() => setShowUpdatesModal(false)}>
-                Got it
-              </button>
-            </div>
           </div>
         </div>
       )}

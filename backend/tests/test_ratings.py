@@ -137,5 +137,3 @@ def test_delete_rating_and_readd_to_queue(repo):
     items = repo.list_items(user_id)
     assert len(items) == 1
     assert items[0]["status"] == "queue"
-
-

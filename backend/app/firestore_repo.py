@@ -621,7 +621,6 @@ class FirestoreWatchlistRepository(WatchlistRepository):
             "created_at": now,
         }, merge=True)
         return briefing_data
-
     def list_rated_movies(self, user_id: str) -> list[dict[str, Any]]:
         col = self._db.collection("users").document(user_id).collection("rated_movies")
         docs = col.order_by("updated_at", direction=firestore.Query.DESCENDING).stream()

@@ -631,20 +631,10 @@ async def test_explicit_title_ignores_previous_history(repo):
     )
 
     actions = res["actions_taken"]
-    assert len(actions) == 2  # Chamber of Secrets & Prisoner of Azkaban (2nd and 3rd)
+    assert len(actions) == 2
     action_titles = [a["title"] for a in actions]
-    assert "Stuart Fails to Save the Universe" not in action_titles
-    assert "Spider-Man: Brand New Day" not in action_titles
     assert "Harry Potter and the Chamber of Secrets" in action_titles
     assert "Harry Potter and the Prisoner of Azkaban" in action_titles
-
-
-
-
-
-
-
-
 
 
 

@@ -436,8 +436,6 @@ class SqliteWatchlistRepository(WatchlistRepository):
                 """
             )
 
-
-
     @contextmanager
     def _connection(self):
         conn = sqlite3.connect(DB_PATH)
@@ -771,7 +769,6 @@ class SqliteWatchlistRepository(WatchlistRepository):
         notify_on_login = 1 if settings.get("notify_on_login", True) else 0
         auto_add_mentioned = 1 if settings.get("auto_add_mentioned", True) else 0
         track_price_drops = 1 if settings.get("track_price_drops", True) else 0
-
         auto_speak_briefing = 1 if settings.get("auto_speak_briefing", False) else 0
 
         with self._connection() as conn:
@@ -1614,6 +1611,5 @@ class SqliteWatchlistRepository(WatchlistRepository):
             )
         news_dict["story_id"] = story_id
         return news_dict
-
 
 

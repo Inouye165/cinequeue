@@ -568,6 +568,108 @@ class AiAgentService:
         return instruction
 
     @staticmethod
+    @staticmethod
+    def _get_time_of_day() -> str:
+        import datetime
+        hour = datetime.datetime.now().hour
+        if 5 <= hour < 12:
+            return "morning"
+        elif 12 <= hour < 17:
+            return "afternoon"
+        elif 17 <= hour < 22:
+            return "evening"
+        else:
+            return "night"
+
+    @staticmethod
+    def _generate_dynamic_human_briefing(
+        settings: dict[str, Any],
+        location: str,
+        weather_json: dict[str, Any] | None,
+        briefing_items: list[dict[str, Any]],
+        time_of_day: str,
+    ) -> str:
+        import random
+        preset = settings.get("personality_preset", "cinephile")
+
+        if time_of_day == "morning":
+            openings = ["Good morning!", "Morning!", "Hey there, good morning!", "Happy morning!"]
+        elif time_of_day == "afternoon":
+            openings = ["Good afternoon!", "Hey there!", "Hope your day is going great!", "Afternoon!"]
+        elif time_of_day == "evening":
+            openings = ["Good evening!", "Hey there!", "Hope you had a great day!", "Evening!"]
+        else:
+            openings = ["Hey there!", "Hello!", "Welcome back!"]
+
+        opening = random.choice(openings)
+
+        weather_str = ""
+        if weather_json and weather_json.get("conditions"):
+            cond = str(weather_json["conditions"]).lower()
+            loc_str = location or "your area"
+            if "rain" in cond or "drizzle" in cond or "shower" in cond:
+                w_templates = [
+                    f"Hope you're staying warm and dry in {loc_str} with that {cond}. Perfect weather for a movie marathon! ",
+                    f"Looks like some {cond} in {loc_str} today—cozy streaming weather! ",
+                    f"Stay dry out there in {loc_str}! Perfect day to kick back with a show. ",
+                ]
+            elif "clear" in cond or "sun" in cond:
+                w_templates = [
+                    f"Looks like a nice sunny day in {loc_str}! ",
+                    f"Hope you're enjoying the clear skies in {loc_str} today. ",
+                ]
+            elif "cloud" in cond or "overcast" in cond:
+                w_templates = [
+                    f"Overcast and cloudy in {loc_str} today—prime movie-watching climate! ",
+                    f"Nice calm cloudy day in {loc_str}. ",
+                ]
+            else:
+                w_templates = [
+                    f"It's currently {cond} in {loc_str}. ",
+                    f"Hope all is well out in {loc_str}! ",
+                ]
+            weather_str = random.choice(w_templates)
+
+        if not briefing_items:
+            if preset == "noir":
+                status_options = [
+                    "Quiet on the streets today—no new alerts in your files. Let me know if you want me to track a new lead.",
+                    "The desk is clear today, kid. No urgent changes on your queue. What are we investigating next?",
+                ]
+            elif preset == "scifi":
+                status_options = [
+                    "All signals are stable across your monitored archive. Ready when you want to run a title query or quiz.",
+                    "Queue telemetry is calm today with no new release alerts. What's on your viewing roster tonight?",
+                ]
+            elif preset == "sarcastic":
+                status_options = [
+                    "Your queue is peacefully quiet today—no drama, no price drops yet. Hit me up if you need a fresh movie pick!",
+                    "Nothing urgent popping up on your watchlist right now. Let me know if you want to quiz your movie knowledge!",
+                ]
+            else: # cinephile
+                status_options = [
+                    "Your queue is looking smooth and quiet today with no urgent release alerts! Let me know if you're in the mood for a movie pick or want to try a quiz.",
+                    "All caught up on your watchlist for now! Feel free to ask for a streaming recommendation whenever you're ready.",
+                    "No big updates on your queue today, which means it's a great time to browse or pick something from your library. What are you in the mood for?",
+                    "Everything is up to date on your watchlist! Ask me to quiz you on 5 movies or recommend something great to watch tonight.",
+                ]
+            status_str = random.choice(status_options)
+            return f"{opening} {weather_str}{status_str}"
+        else:
+            bullet_lines = []
+            for it in briefing_items:
+                msg = it.get("summary") or it.get("message") or it.get("headline") or it.get("title")
+                bullet_lines.append(f"• {msg}")
+            bullets_str = "\n".join(bullet_lines)
+            intro_options = [
+                "Here are the latest updates for your monitored shows:",
+                "Got a few exciting updates on your queue today:",
+                "Here's what's happening with your watchlist:",
+            ]
+            intro = random.choice(intro_options)
+            return f"{opening} {weather_str}{intro}\n{bullets_str}"
+
+    @staticmethod
     async def _format_structured_llm_briefing(
         settings: dict[str, Any],
         weather_data: Any,
@@ -668,9 +770,6 @@ class AiAgentService:
         """Process chat message, recognize intents (auto-monitoring, ratings, status, search), update history, and generate response."""
         settings = repo.get_agent_settings(user_id)
         history = repo.list_chat_messages(user_id, limit=20)
-
-        # Save user message
-        repo.add_chat_message(user_id, "user", user_message)
 
         actions_taken = []
         context_notes: list[str] = []
@@ -1207,6 +1306,30 @@ class AiAgentService:
         if holiday_remark:
             context_notes.append(f"Holiday Remark: {holiday_remark}")
 
+        # User Ratings context for recommendations
+        rated_items = [i for i in items if i.get("user_rating")]
+        top_rated_items = [i for i in rated_items if (i.get("user_rating") or 0) >= 4]
+
+        # Check if user is asking for a movie/show recommendation
+        recommend_keywords = ["recommend", "suggest", "what to watch", "what should i watch", "movie idea", "show idea", "something like"]
+        is_rec_query = any(k in msg_lower for k in recommend_keywords)
+
+        rating_rec_note = ""
+        if is_rec_query and top_rated_items and tmdb:
+            try:
+                import random
+                sample_top = random.choice(top_rated_items)
+                t_type = sample_top.get("media_type", "movie")
+                t_id = sample_top.get("tmdb_id")
+                if t_id:
+                    recs = await tmdb.get_recommendations(t_type, t_id)
+                    if recs:
+                        r_title = recs[0].get("title")
+                        r_overview = recs[0].get("overview", "")
+                        rating_rec_note = f"\n[System Note: Recommendation Request: The user asked for a recommendation. User loved '{sample_top['title']}' (rated {sample_top['user_rating']}/5 stars). Suggest '{r_title}' which is similar, mentioning why they might like it: {r_overview[:120]}...]"
+            except Exception as e:
+                logger.warning(f"Error generating recommendation from ratings: {e}")
+
         location = settings.get("location", "").strip()
         weather_report = await WeatherService.get_weather_report(location) if location else None
         system_prompt = get_system_prompt(settings, weather_report)
@@ -1519,6 +1642,7 @@ class AiAgentService:
             return title_str, target_type
 
         return None, None
+
 
     @staticmethod
     def _extract_title_and_price(text: str) -> tuple[str | None, float | None]:

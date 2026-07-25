@@ -331,4 +331,3 @@ class WatchlistRepository(ABC):
     def get_decision_log(self, log_id: str) -> dict[str, Any] | None:
         """Get a specific decision or telemetry log record by ID."""
         ...
-
