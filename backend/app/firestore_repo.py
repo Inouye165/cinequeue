@@ -1,6 +1,7 @@
 """Firestore-backed watchlist repository."""
 
 import logging
+from datetime import datetime, timezone
 from typing import Any
 
 from google.cloud import firestore  # type: ignore[import-untyped]
@@ -621,48 +622,120 @@ class FirestoreWatchlistRepository(WatchlistRepository):
             "created_at": now,
         }, merge=True)
         return briefing_data
+
+    def claim_daily_greeting_generation(
+        self, user_id: str, date_str: str, lease_seconds: int = 30, force_refresh: bool = False
+    ) -> tuple[bool, dict[str, Any] | None]:
+        from datetime import datetime, timezone, timedelta
+        doc_ref = self._db.collection("users").document(user_id).collection("daily_greetings").document(date_str)
+
+        try:
+            @firestore.transactional
+            def _in_transaction(transaction, ref):
+                snapshot = ref.get(transaction=transaction)
+                now_dt = datetime.now(timezone.utc)
+                now_iso = now_dt.isoformat()
+                lease_exp = (now_dt + timedelta(seconds=lease_seconds)).isoformat()
+
+                if snapshot.exists and not force_refresh:
+                    d = snapshot.to_dict() or {}
+                    b_data = d.get("briefing_data", d)
+                    status = b_data.get("status", d.get("status", "completed"))
+                    exp_str = b_data.get("lease_expires_at", d.get("lease_expires_at"))
+
+                    if status == "completed":
+                        return False, b_data
+
+                    if status == "generating" and exp_str:
+                        try:
+                            exp_dt = datetime.fromisoformat(exp_str)
+                            if exp_dt > now_dt:
+                                return False, b_data
+                        except Exception:
+                            pass
+
+                claiming_record = {
+                    "user_id": user_id,
+                    "date_str": date_str,
+                    "status": "generating",
+                    "lease_expires_at": lease_exp,
+                    "created_at": now_iso,
+                }
+                transaction.set(ref, {"user_id": user_id, "date_str": date_str, "briefing_data": claiming_record, "created_at": now_iso}, merge=True)
+                return True, None
+
+            transaction = self._db.transaction()
+            return _in_transaction(transaction, doc_ref)
+        except Exception as e:
+            logger.warning(f"Firestore claim_daily_greeting_generation error: {e}")
+            return True, None
+
+    def save_daily_greeting(self, user_id: str, date_str: str, briefing_data: dict[str, Any]) -> dict[str, Any]:
+        now = self.utc_now_iso()
+        briefing_data.setdefault("status", "completed")
+        doc_ref = self._db.collection("users").document(user_id).collection("daily_greetings").document(date_str)
+        doc_ref.set({
+            "user_id": user_id,
+            "date_str": date_str,
+            "briefing_data": briefing_data,
+            "created_at": now,
+        }, merge=True)
+        return briefing_data
     def list_rated_movies(self, user_id: str) -> list[dict[str, Any]]:
-        col = self._db.collection("users").document(user_id).collection("rated_movies")
-        docs = col.order_by("updated_at", direction=firestore.Query.DESCENDING).stream()
-        res = []
-        now = datetime.now(timezone.utc)
-        from app.models import poster_url
-        for doc in docs:
-            d = doc.to_dict()
-            if d:
-                d["id"] = doc.id
-                p_path = d.get("poster_path")
-                d["poster_url"] = poster_url(p_path) if p_path else None
-                rated_at_str = d.get("updated_at") or d.get("rated_at")
-                rated_ago = "recently"
-                if rated_at_str:
-                    try:
-                        dt = datetime.fromisoformat(rated_at_str)
-                        if dt.tzinfo is None:
-                            dt = dt.replace(tzinfo=timezone.utc)
-                        seconds = int((now - dt).total_seconds())
-                        if seconds < 60:
-                            rated_ago = "just now"
-                        elif seconds < 3600:
-                            mins = seconds // 60
-                            rated_ago = f"{mins} min{'s' if mins > 1 else ''} ago"
-                        elif seconds < 86400:
-                            hrs = seconds // 3600
-                            rated_ago = f"{hrs} hour{'s' if hrs > 1 else ''} ago"
-                        elif seconds < 2592000:
-                            days = seconds // 86400
-                            rated_ago = f"{days} day{'s' if days > 1 else ''} ago"
-                        elif seconds < 31536000:
-                            months = seconds // 2592000
-                            rated_ago = f"{months} month{'s' if months > 1 else ''} ago"
-                        else:
-                            yrs = seconds // 31536000
-                            rated_ago = f"{yrs} year{'s' if yrs > 1 else ''} ago"
-                    except Exception:
-                        rated_ago = "recently"
-                d["rated_ago"] = rated_ago
-                res.append(d)
-        return res
+        try:
+            col = self._db.collection("users").document(user_id).collection("rated_movies")
+            try:
+                docs = list(col.order_by("updated_at", direction=firestore.Query.DESCENDING).stream())
+            except Exception as order_err:
+                logger.warning("Firestore order_by updated_at query failed (%s), falling back to unordered stream", order_err)
+                docs = list(col.stream())
+                docs.sort(
+                    key=lambda d: (d.to_dict() or {}).get("updated_at", "") or (d.to_dict() or {}).get("rated_at", ""),
+                    reverse=True,
+                )
+
+            res = []
+            now = datetime.now(timezone.utc)
+            from app.models import poster_url
+            for doc in docs:
+                d = doc.to_dict()
+                if d:
+                    d["id"] = doc.id
+                    p_path = d.get("poster_path")
+                    d["poster_url"] = poster_url(p_path) if p_path else None
+                    rated_at_str = d.get("updated_at") or d.get("rated_at")
+                    rated_ago = "recently"
+                    if rated_at_str:
+                        try:
+                            dt = datetime.fromisoformat(rated_at_str)
+                            if dt.tzinfo is None:
+                                dt = dt.replace(tzinfo=timezone.utc)
+                            seconds = int((now - dt).total_seconds())
+                            if seconds < 60:
+                                rated_ago = "just now"
+                            elif seconds < 3600:
+                                mins = seconds // 60
+                                rated_ago = f"{mins} min{'s' if mins > 1 else ''} ago"
+                            elif seconds < 86400:
+                                hrs = seconds // 3600
+                                rated_ago = f"{hrs} hour{'s' if hrs > 1 else ''} ago"
+                            elif seconds < 2592000:
+                                days = seconds // 86400
+                                rated_ago = f"{days} day{'s' if days > 1 else ''} ago"
+                            elif seconds < 31536000:
+                                months = seconds // 2592000
+                                rated_ago = f"{months} month{'s' if months > 1 else ''} ago"
+                            else:
+                                yrs = seconds // 31536000
+                                rated_ago = f"{yrs} year{'s' if yrs > 1 else ''} ago"
+                        except Exception:
+                            rated_ago = "recently"
+                    d["rated_ago"] = rated_ago
+                    res.append(d)
+            return res
+        except Exception as e:
+            logger.error("Error listing rated movies in Firestore: %s", e, exc_info=True)
+            return []
 
     def rate_movie(
         self,
@@ -674,40 +747,61 @@ class FirestoreWatchlistRepository(WatchlistRepository):
         release_date: str | None,
         rating: int,
     ) -> dict[str, Any]:
-        doc_id = f"{media_type}_{tmdb_id}"
-        doc_ref = self._db.collection("users").document(user_id).collection("rated_movies").document(doc_id)
-        now = self.utc_now_iso()
-        rating = max(1, min(5, int(rating)))
-        data = {
-            "user_id": user_id,
-            "media_type": media_type,
-            "tmdb_id": tmdb_id,
-            "title": title,
-            "poster_path": poster_path,
-            "release_date": release_date,
-            "rating": rating,
-            "updated_at": now,
-        }
-        existing = doc_ref.get()
-        if not existing.exists:
-            data["rated_at"] = now
-        doc_ref.set(data, merge=True)
+        try:
+            doc_id = f"{media_type}_{tmdb_id}"
+            doc_ref = self._db.collection("users").document(user_id).collection("rated_movies").document(doc_id)
+            now = self.utc_now_iso()
+            rating = max(1, min(5, int(rating)))
+            data = {
+                "user_id": user_id,
+                "media_type": media_type,
+                "tmdb_id": tmdb_id,
+                "title": title,
+                "poster_path": poster_path,
+                "release_date": release_date,
+                "rating": rating,
+                "updated_at": now,
+            }
+            existing = doc_ref.get()
+            if not existing.exists:
+                data["rated_at"] = now
+            doc_ref.set(data, merge=True)
 
-        from app.models import poster_url
-        data["id"] = doc_id
-        data["rated_ago"] = "just now"
-        if poster_path:
-            data["poster_url"] = poster_url(poster_path)
-        return data
+            from app.models import poster_url
+            data["id"] = doc_id
+            data["rated_ago"] = "just now"
+            if poster_path:
+                data["poster_url"] = poster_url(poster_path)
+            return data
+        except Exception as e:
+            logger.error("Error rating movie in Firestore: %s", e, exc_info=True)
+            from app.models import poster_url
+            return {
+                "id": f"{media_type}_{tmdb_id}",
+                "user_id": user_id,
+                "media_type": media_type,
+                "tmdb_id": tmdb_id,
+                "title": title,
+                "poster_path": poster_path,
+                "poster_url": poster_url(poster_path) if poster_path else None,
+                "release_date": release_date,
+                "rating": max(1, min(5, int(rating))),
+                "updated_at": self.utc_now_iso(),
+                "rated_ago": "just now",
+            }
 
     def delete_rated_movie(self, user_id: str, media_type: str, tmdb_id: int) -> bool:
-        doc_id = f"{media_type}_{tmdb_id}"
-        doc_ref = self._db.collection("users").document(user_id).collection("rated_movies").document(doc_id)
-        doc = doc_ref.get()
-        if doc.exists:
-            doc_ref.delete()
-            return True
-        return False
+        try:
+            doc_id = f"{media_type}_{tmdb_id}"
+            doc_ref = self._db.collection("users").document(user_id).collection("rated_movies").document(doc_id)
+            doc = doc_ref.get()
+            if doc.exists:
+                doc_ref.delete()
+                return True
+            return False
+        except Exception as e:
+            logger.error("Error deleting rated movie in Firestore: %s", e, exc_info=True)
+            return False
 
     def add_decision_log(self, log_dict: dict[str, Any]) -> dict[str, Any]:
         from app.decision_models import scrub_secrets

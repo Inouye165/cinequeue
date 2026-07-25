@@ -137,3 +137,32 @@ def test_delete_rating_and_readd_to_queue(repo):
     items = repo.list_items(user_id)
     assert len(items) == 1
     assert items[0]["status"] == "queue"
+
+
+def test_firestore_rate_movie_crud_and_fallback(monkeypatch):
+    from unittest.mock import MagicMock
+    from app.firestore_repo import FirestoreWatchlistRepository
+
+    mock_db = MagicMock()
+    mock_doc = MagicMock()
+    mock_doc.exists = True
+    mock_doc.to_dict.return_value = {
+        "user_id": "fs_user",
+        "media_type": "movie",
+        "tmdb_id": 27205,
+        "title": "Inception",
+        "rating": 5,
+        "updated_at": "2026-07-24T12:00:00+00:00",
+    }
+    mock_col = MagicMock()
+    mock_col.order_by.side_effect = Exception("Missing index")
+    mock_col.stream.return_value = [mock_doc]
+    mock_db.collection.return_value.document.return_value.collection.return_value = mock_col
+
+    monkeypatch.setattr("google.cloud.firestore.Client", lambda project=None: mock_db)
+    fs_repo = FirestoreWatchlistRepository()
+
+    rated = fs_repo.list_rated_movies("fs_user")
+    assert len(rated) == 1
+    assert rated[0]["title"] == "Inception"
+    assert rated[0]["rating"] == 5

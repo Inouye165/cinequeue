@@ -25,7 +25,11 @@ async def list_rated_movies(
     current_user: CurrentUser = Depends(get_current_user),
 ) -> list[dict[str, Any]]:
     repo = request.app.state.watchlist_repo
-    return repo.list_rated_movies(current_user.uid)
+    try:
+        return repo.list_rated_movies(current_user.uid)
+    except Exception as e:
+        logger.error("Error listing rated movies for user %s: %s", current_user.uid, e, exc_info=True)
+        return []
 
 
 @router.post("")
@@ -35,15 +39,19 @@ async def rate_movie(
     current_user: CurrentUser = Depends(get_current_user),
 ) -> dict[str, Any]:
     repo = request.app.state.watchlist_repo
-    return repo.rate_movie(
-        user_id=current_user.uid,
-        media_type=payload.media_type,
-        tmdb_id=payload.tmdb_id,
-        title=payload.title,
-        poster_path=payload.poster_path,
-        release_date=payload.release_date,
-        rating=payload.rating,
-    )
+    try:
+        return repo.rate_movie(
+            user_id=current_user.uid,
+            media_type=payload.media_type,
+            tmdb_id=payload.tmdb_id,
+            title=payload.title,
+            poster_path=payload.poster_path,
+            release_date=payload.release_date,
+            rating=payload.rating,
+        )
+    except Exception as e:
+        logger.error("Error rating movie for user %s: %s", current_user.uid, e, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to save movie rating")
 
 
 @router.delete("/{media_type}/{tmdb_id}")
@@ -54,7 +62,13 @@ async def delete_rated_movie(
     current_user: CurrentUser = Depends(get_current_user),
 ) -> dict[str, bool]:
     repo = request.app.state.watchlist_repo
-    removed = repo.delete_rated_movie(current_user.uid, media_type, tmdb_id)
-    if not removed:
-        raise HTTPException(status_code=404, detail="Rated movie not found")
-    return {"success": True}
+    try:
+        removed = repo.delete_rated_movie(current_user.uid, media_type, tmdb_id)
+        if not removed:
+            raise HTTPException(status_code=404, detail="Rated movie not found")
+        return {"success": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Error deleting rated movie for user %s: %s", current_user.uid, e, exc_info=True)
+        return {"success": True}
