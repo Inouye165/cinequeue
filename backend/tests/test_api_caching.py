@@ -46,7 +46,7 @@ async def test_daily_greeting_caching():
 @pytest.mark.asyncio
 async def test_tmdb_metadata_caching():
     import os
-    with patch.dict(os.environ, {"TMDB_API_KEY": "test_tmdb_key_for_ci"}):
+    with patch("app.services.tmdb.TMDB_API_KEY", "test_tmdb_key_for_ci"), patch.dict(os.environ, {"TMDB_API_KEY": "test_tmdb_key_for_ci"}):
         tmdb = TmdbClient()
 
     with patch.object(tmdb, "_get", new_callable=AsyncMock) as mock_get:

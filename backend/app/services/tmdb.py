@@ -1,6 +1,7 @@
 from datetime import date
 import asyncio
 import logging
+import os
 import re
 from typing import Any
 
@@ -19,11 +20,12 @@ import time
 
 class TmdbClient:
     def __init__(self) -> None:
-        if not TMDB_API_KEY:
+        api_key = os.getenv("TMDB_API_KEY") or TMDB_API_KEY
+        if not api_key:
             raise RuntimeError("TMDB_API_KEY is not set")
         self._client = httpx.AsyncClient(
             base_url=TMDB_BASE_URL,
-            params={"api_key": TMDB_API_KEY},
+            params={"api_key": api_key},
             timeout=20.0,
         )
         self._cache: dict[str, tuple[float, Any]] = {}
