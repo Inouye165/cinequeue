@@ -76,7 +76,7 @@ async def test_1_first_successful_gemini_startup(repo):
         assert res["briefing"] == "Welcome back! The Odyssey was released on July 17 and is now available in theaters."
         assert mock_gemini.call_count == 1
 
-        local_date, _ = resolve_user_local_date("America/Los_Angeles")
+        local_date = resolve_user_local_date("America/Los_Angeles")[0]
         expected_key = build_stable_daily_cache_key(user_id, local_date, STARTUP_BRIEFING_CACHE_VERSION)
         cached_rec = repo.get_daily_greeting(user_id, expected_key)
         assert cached_rec is not None
@@ -175,7 +175,7 @@ async def test_4_failed_gemini_generation_saves_and_reuses_local_fallback(repo):
         assert "The Odyssey" in res1["briefing"]
 
         # Check completed record in repo
-        local_date, _ = resolve_user_local_date("America/Los_Angeles")
+        local_date = resolve_user_local_date("America/Los_Angeles")[0]
         key = build_stable_daily_cache_key(user_id, local_date, STARTUP_BRIEFING_CACHE_VERSION)
         rec = repo.get_daily_greeting(user_id, key)
         assert rec is not None
@@ -259,7 +259,7 @@ async def test_6_concurrent_startup_requests(repo):
 async def test_7_generation_lease_recovery(repo):
     """Test 7: An expired generating record is atomically recovered by the next request."""
     user_id = "user_test_7"
-    local_date, _ = resolve_user_local_date("America/Los_Angeles")
+    local_date = resolve_user_local_date("America/Los_Angeles")[0]
     key = build_stable_daily_cache_key(user_id, local_date, STARTUP_BRIEFING_CACHE_VERSION)
 
     # Insert an expired generating record
@@ -278,7 +278,7 @@ async def test_7_generation_lease_recovery(repo):
 async def test_8_active_generation_lease(repo):
     """Test 8: An active non-expired generating record prevents another request from making external calls."""
     user_id = "user_test_8"
-    local_date, _ = resolve_user_local_date("America/Los_Angeles")
+    local_date = resolve_user_local_date("America/Los_Angeles")[0]
     key = build_stable_daily_cache_key(user_id, local_date, STARTUP_BRIEFING_CACHE_VERSION)
 
     # Insert an active generating record with future lease
@@ -297,7 +297,7 @@ async def test_8_active_generation_lease(repo):
 async def test_9_california_date_boundary():
     """Test 9: 2026-07-25 02:00:00 UTC correctly resolves to 2026-07-24 in America/Los_Angeles."""
     dt_utc = datetime(2026, 7, 25, 2, 0, 0, tzinfo=timezone.utc)
-    local_date, tz_name = resolve_user_local_date("America/Los_Angeles", now_dt=dt_utc)
+    local_date, tz_name, _, _ = resolve_user_local_date("America/Los_Angeles", now_dt=dt_utc)
 
     assert local_date == "2026-07-24"
     assert tz_name == "America/Los_Angeles"
@@ -440,3 +440,196 @@ async def test_13_fallback_quality(repo):
     assert ".." not in fallback
     assert fallback.endswith(".")
     assert validate_fallback_greeting(fallback) is True
+
+
+@pytest.mark.asyncio
+async def test_req_1_valid_configured_timezone(repo):
+    """Test 1: Valid configured timezone returns user_setting source and correct timezone."""
+    user_id = "user_tz_valid"
+    repo.save_agent_settings(user_id, {"notify_on_login": True, "timezone": "America/Los_Angeles"})
+    res = await BriefingService.evaluate_startup_briefing(user_id, repo, tmdb=None)
+    telem = res.get("telemetry", {})
+    assert telem.get("resolved_user_timezone") == "America/Los_Angeles"
+    assert telem.get("timezone_resolution_source") == "user_setting"
+
+
+@pytest.mark.asyncio
+async def test_req_2_california_date_boundary():
+    """Test 2: UTC 2026-07-25T02:00:00Z converts to America/Los_Angeles 2026-07-24."""
+    utc_time = datetime(2026, 7, 25, 2, 0, 0, tzinfo=timezone.utc)
+    local_date, resolved_tz, src, err = resolve_user_local_date("America/Los_Angeles", now_dt=utc_time)
+    assert local_date == "2026-07-24"
+    assert resolved_tz == "America/Los_Angeles"
+    assert src == "user_setting"
+    key = build_stable_daily_cache_key("usr_1", local_date, STARTUP_BRIEFING_CACHE_VERSION)
+    assert "2026-07-24" in key
+    assert "2026-07-25" not in key
+
+
+@pytest.mark.asyncio
+async def test_req_3_next_california_day():
+    """Test 3: Local midnight boundary changes key exactly once."""
+    dt_before = datetime(2026, 7, 25, 6, 59, 0, tzinfo=timezone.utc)
+    dt_after = datetime(2026, 7, 25, 7, 1, 0, tzinfo=timezone.utc)
+
+    d1, tz1, _, _ = resolve_user_local_date("America/Los_Angeles", now_dt=dt_before)
+    d2, tz2, _, _ = resolve_user_local_date("America/Los_Angeles", now_dt=dt_after)
+
+    assert d1 == "2026-07-24"
+    assert d2 == "2026-07-25"
+
+
+@pytest.mark.asyncio
+async def test_req_4_missing_timezone(repo):
+    """Test 4: Missing timezone uses documented default and missing_setting_fallback."""
+    user_id = "user_tz_missing"
+    repo.save_agent_settings(user_id, {"notify_on_login": True, "timezone": ""})
+    res = await BriefingService.evaluate_startup_briefing(user_id, repo, tmdb=None)
+    telem = res.get("telemetry", {})
+    assert telem.get("resolved_user_timezone") == "America/Los_Angeles"
+    assert telem.get("timezone_resolution_source") == "missing_setting_fallback"
+
+
+@pytest.mark.asyncio
+async def test_req_5_invalid_timezone(repo):
+    """Test 5: Invalid timezone falls back gracefully without crashing."""
+    user_id = "user_tz_invalid"
+    repo.save_agent_settings(user_id, {"notify_on_login": True, "timezone": "Invalid/City_Name_X"})
+    res = await BriefingService.evaluate_startup_briefing(user_id, repo, tmdb=None)
+    telem = res.get("telemetry", {})
+    assert telem.get("resolved_user_timezone") == "America/Los_Angeles"
+    assert telem.get("timezone_resolution_source") == "invalid_setting_fallback"
+    assert telem.get("timezone_resolution_error") is not None
+
+
+@pytest.mark.asyncio
+async def test_req_6_cache_hit_source_semantics(repo):
+    """Test 6: Persistent daily cache hit reports served_from=persistent_daily_cache and content_origin from cached record."""
+    user_id = "user_source_sem"
+    repo.save_agent_settings(user_id, {"notify_on_login": True, "timezone": "America/Los_Angeles"})
+    
+    failed_res = AgentResult(
+        text="", provider="fallback", model_requested="gemini-2.5-flash", model_used=None,
+        gemini_called=True, fallback_used=True, fallback_reason="503_error", http_status=503,
+        request_duration_ms=50.0, actions_taken=[],
+    )
+    with patch.object(AiAgentService, "_call_gemini_api", new_callable=AsyncMock) as mock_gemini:
+        mock_gemini.return_value = failed_res
+        res1 = await BriefingService.evaluate_startup_briefing(user_id, repo, tmdb=None, session_id="s1")
+        assert res1["telemetry"]["served_from"] == "fresh_generation"
+        assert res1["telemetry"]["content_origin"] == "local_rule_fallback"
+
+        res2 = await BriefingService.evaluate_startup_briefing(user_id, repo, tmdb=None, session_id="s2")
+        t2 = res2["telemetry"]
+        assert t2["daily_cache_result"] == "hit"
+        assert t2["served_from"] == "persistent_daily_cache"
+        assert t2["content_origin"] == "local_rule_fallback"
+        assert t2["gemini_called"] is False
+        assert t2["external_attempt_counts"]["gemini"] == 0
+        assert t2["fallback_attempted"] is False
+
+
+@pytest.mark.asyncio
+async def test_req_7_fresh_gemini_source_semantics(repo):
+    """Test 7: Fresh Gemini generation reports served_from=fresh_generation and content_origin=gemini_primary."""
+    user_id = "user_fresh_gem"
+    repo.save_agent_settings(user_id, {"notify_on_login": True, "timezone": "America/Los_Angeles"})
+    succ_res = AgentResult(
+        text="Welcome back! Your movie queue is ready.", provider="gemini",
+        model_requested="gemini-2.5-flash", model_used="gemini-2.5-flash",
+        gemini_called=True, fallback_used=False, fallback_reason=None, http_status=200,
+        request_duration_ms=100.0, actions_taken=[],
+    )
+    with patch.object(AiAgentService, "_call_gemini_api", new_callable=AsyncMock) as mock_gemini:
+        mock_gemini.return_value = succ_res
+        res = await BriefingService.evaluate_startup_briefing(user_id, repo, tmdb=None, session_id="s1")
+        t = res["telemetry"]
+        assert t["served_from"] == "fresh_generation"
+        assert t["content_origin"] == "gemini_primary"
+
+
+@pytest.mark.asyncio
+async def test_req_8_fresh_local_fallback_source_semantics(repo):
+    """Test 8: Fresh local fallback reports fallback_attempted=True on fresh run and False on cache hit."""
+    user_id = "user_fresh_fb"
+    repo.save_agent_settings(user_id, {"notify_on_login": True, "timezone": "America/Los_Angeles"})
+    failed_res = AgentResult(
+        text="", provider="fallback", model_requested="gemini-2.5-flash", model_used=None,
+        gemini_called=True, fallback_used=True, fallback_reason="timeout", http_status=504,
+        request_duration_ms=500.0, actions_taken=[],
+    )
+    with patch.object(AiAgentService, "_call_gemini_api", new_callable=AsyncMock) as mock_gemini:
+        mock_gemini.return_value = failed_res
+        res1 = await BriefingService.evaluate_startup_briefing(user_id, repo, tmdb=None, session_id="s1")
+        assert res1["telemetry"]["fallback_attempted"] is True
+
+        res2 = await BriefingService.evaluate_startup_briefing(user_id, repo, tmdb=None, session_id="s2")
+        assert res2["telemetry"]["served_from"] == "persistent_daily_cache"
+        assert res2["telemetry"]["fallback_attempted"] is False
+
+
+@pytest.mark.asyncio
+async def test_req_9_zero_call_cache_hit_remains_intact(repo):
+    """Test 9: Repeated same-day startup produces zero external calls."""
+    user_id = "user_zero_calls"
+    repo.save_agent_settings(user_id, {"notify_on_login": True, "timezone": "America/Los_Angeles"})
+    succ_res = AgentResult(
+        text="Welcome back! Zero external call test.", provider="gemini",
+        model_requested="gemini-2.5-flash", model_used="gemini-2.5-flash",
+        gemini_called=True, fallback_used=False, fallback_reason=None, http_status=200,
+        request_duration_ms=100.0, actions_taken=[],
+    )
+    with patch.object(AiAgentService, "_call_gemini_api", new_callable=AsyncMock) as mock_gemini:
+        mock_gemini.return_value = succ_res
+        await BriefingService.evaluate_startup_briefing(user_id, repo, tmdb=None, session_id="s1")
+        
+        res2 = await BriefingService.evaluate_startup_briefing(user_id, repo, tmdb=None, session_id="s2")
+        ext = res2["telemetry"]["external_attempt_counts"]
+        assert ext["weather"] == 0
+        assert ext["tmdb_details"] == 0
+        assert ext["tmdb_search"] == 0
+        assert ext["tmdb_watch_providers"] == 0
+        assert ext["news"] == 0
+        assert ext["gemini"] == 0
+
+
+@pytest.mark.asyncio
+async def test_req_10_new_session_same_day(repo):
+    """Test 10: New session on same day receives daily cache hit with new session ID recorded."""
+    user_id = "user_new_sess"
+    repo.save_agent_settings(user_id, {"notify_on_login": True, "timezone": "America/Los_Angeles"})
+    succ_res = AgentResult(
+        text="Welcome back! Same greeting for all sessions today.", provider="gemini",
+        model_requested="gemini-2.5-flash", model_used="gemini-2.5-flash",
+        gemini_called=True, fallback_used=False, fallback_reason=None, http_status=200,
+        request_duration_ms=100.0, actions_taken=[],
+    )
+    with patch.object(AiAgentService, "_call_gemini_api", new_callable=AsyncMock) as mock_gemini:
+        mock_gemini.return_value = succ_res
+        r1 = await BriefingService.evaluate_startup_briefing(user_id, repo, tmdb=None, session_id="sess_alpha")
+        r2 = await BriefingService.evaluate_startup_briefing(user_id, repo, tmdb=None, session_id="sess_beta")
+        
+        assert r1["briefing"] == r2["briefing"]
+        assert r2["telemetry"]["session_id"] == "sess_beta"
+        assert r2["telemetry"]["served_from"] == "persistent_daily_cache"
+
+
+@pytest.mark.asyncio
+async def test_req_11_legacy_record_display_compatibility(repo):
+    """Test 11: Legacy decision log records deserialize safely without errors."""
+    user_id = "user_legacy"
+    repo.save_agent_settings(user_id, {"notify_on_login": True, "timezone": "America/Los_Angeles"})
+    legacy_log = {
+        "log_id": "legacy_log_123",
+        "event_type": "startup_briefing_decision",
+        "timestamp": repo.utc_now_iso(),
+        "user_id": user_id,
+        "result_source": "local_rule_fallback",
+        "telemetry_version": 1,
+    }
+    saved = repo.add_decision_log(legacy_log)
+    assert saved["log_id"] == "legacy_log_123"
+    logs = repo.list_decision_logs(user_id=user_id)
+    assert len(logs["logs"]) > 0
+    item = next(l for l in logs["logs"] if l["log_id"] == "legacy_log_123")
+    assert item["is_legacy"] is True

@@ -348,9 +348,16 @@ export const AiAgentDecisionsTab: React.FC<AiAgentDecisionsTabProps> = ({ authTo
                       </td>
                       <td style={{ padding: "10px" }}>
                         {isRunSummary ? (
-                          <span style={{ background: "#2e7d32", padding: "3px 8px", borderRadius: "4px", fontSize: "0.8rem", fontWeight: "bold" }}>
-                            Source: {l.result_source || "unknown"}
-                          </span>
+                          <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+                            <span style={{ background: l.daily_cache_result === "hit" ? "#00796b" : "#2e7d32", padding: "3px 8px", borderRadius: "4px", fontSize: "0.75rem", fontWeight: "bold" }}>
+                              Served: {l.served_from || l.result_source || "unknown"}
+                            </span>
+                            {l.content_origin && (
+                              <span style={{ background: "rgba(255,255,255,0.08)", padding: "2px 6px", borderRadius: "4px", fontSize: "0.7rem", color: "#81c784" }}>
+                                Origin: {l.content_origin}
+                              </span>
+                            )}
+                          </div>
                         ) : !l.gemini_called ? (
                           <span style={{ color: "#aaa" }}>
                             {isCandidateDecision ? "Local Candidate Scoring" : "Local System Event"}
@@ -398,6 +405,41 @@ export const AiAgentDecisionsTab: React.FC<AiAgentDecisionsTabProps> = ({ authTo
                     ⚠️ Legacy Log Record — Created before V2 truthful instrumentation. `gemini_called` was set during local candidate scoring and does not prove an outbound HTTP call was made.
                   </div>
                 )}
+
+                {/* Delivery & Timezone Diagnostics Section */}
+                <div style={{ background: "rgba(255,255,255,0.04)", padding: "14px", borderRadius: "8px", marginBottom: "16px", display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: "10px", fontSize: "0.85rem" }}>
+                  <div>
+                    <span style={{ color: "#aaa" }}>Served From: </span>
+                    <strong style={{ color: "#2196f3" }}>
+                      {selectedLog.served_from || (selectedLog.result_source === "persistent_daily_cache" ? "persistent_daily_cache" : selectedLog.result_source || "legacy/unknown")}
+                    </strong>
+                  </div>
+                  <div>
+                    <span style={{ color: "#aaa" }}>Content Origin: </span>
+                    <strong style={{ color: "#4caf50" }}>
+                      {selectedLog.content_origin || (selectedLog.served_from === "persistent_daily_cache" ? "unknown_legacy" : selectedLog.result_source || "unknown")}
+                    </strong>
+                  </div>
+                  <div>
+                    <span style={{ color: "#aaa" }}>Daily Cache Result: </span>
+                    <strong style={{ color: selectedLog.daily_cache_result === "hit" ? "#4caf50" : "#ff9800" }}>
+                      {selectedLog.daily_cache_result || "N/A"}
+                    </strong>
+                  </div>
+                  <div>
+                    <span style={{ color: "#aaa" }}>Resolved Timezone: </span>
+                    <strong>{selectedLog.resolved_user_timezone || selectedLog.user_timezone || "America/Los_Angeles"}</strong>
+                    {selectedLog.timezone_resolution_source && (
+                      <span style={{ fontSize: "0.75rem", color: "#aaa", marginLeft: "4px" }}>
+                        ({selectedLog.timezone_resolution_source})
+                      </span>
+                    )}
+                  </div>
+                  <div>
+                    <span style={{ color: "#aaa" }}>Local Date: </span>
+                    <strong>{selectedLog.resolved_local_date || "N/A"}</strong>
+                  </div>
+                </div>
 
                 {/* Clipboard Actions Bar */}
                 <div style={{ display: "flex", gap: "8px", marginBottom: "16px", flexWrap: "wrap" }}>

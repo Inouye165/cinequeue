@@ -87,7 +87,27 @@ async def test_session_deduplication(repo):
     res2 = await BriefingService.evaluate_startup_briefing(user_id, repo, None, session_id="session_abc")
 
     assert res1["briefing"] == res2["briefing"]
-    assert res1["updates_count"] == res2["updates_count"]
+    assert res1["updates_count"] >= 1
+    assert res2["updates_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_cached_briefing_returns_zero_updates_on_subsequent_fetch(repo):
+    user_id = "test_cached_unpresented_user"
+    today = date.today()
+    available_date = (today - timedelta(days=1)).isoformat()
+    repo.add_item(user_id=user_id, media_type="movie", tmdb_id=55, title="The Odyssey", poster_path=None, release_date=available_date, status="queue")
+
+    # First fetch: generates briefing and presents updates
+    res1 = await BriefingService.evaluate_startup_briefing(user_id, repo, None, session_id="sess_cache1")
+    assert res1["updates_count"] >= 1
+
+    # Second fetch (same day, cache hit): returns cached greeting text but updates_count 0
+    res2 = await BriefingService.evaluate_startup_briefing(user_id, repo, None, session_id="sess_cache2")
+    assert res2["cached"] is True
+    assert res2["briefing"] == res1["briefing"]
+    assert res2["updates_count"] == 0
+    assert res2["updates"] == []
 
 
 @pytest.mark.asyncio

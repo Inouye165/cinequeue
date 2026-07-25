@@ -46,6 +46,22 @@ def _ensure_briefing_in_chat_history(user_id: str, briefing_text: str | None, re
         logger.warning(f"Error ensuring briefing in chat history: {e}")
 
 
+def _filter_unpresented_candidates(user_id: str, candidate_list: list[dict[str, Any]], repo: WatchlistRepository) -> list[dict[str, Any]]:
+    if not candidate_list:
+        return []
+    try:
+        presented_dict = repo.get_presented_briefing_keys(user_id)
+        unpresented = []
+        for cand in candidate_list:
+            key = cand.get("item_key") or cand.get("candidate_id") or cand.get("story_cluster_id") or f"item_{cand.get('title', 'gen')}"
+            if key not in presented_dict:
+                unpresented.append(cand)
+        return unpresented
+    except Exception as e:
+        logger.warning(f"Error filtering unpresented candidates: {e}")
+        return candidate_list
+
+
 class BriefingService:
     @staticmethod
     async def evaluate_startup_briefing(
@@ -89,8 +105,10 @@ class BriefingService:
 
         # Step 2: Resolve user timezone & stable daily cache key
         user_tz = settings.get("timezone") or settings.get("user_timezone")
-        local_date_str, resolved_tz = resolve_user_local_date(user_tz)
+        local_date_str, resolved_tz, tz_src, tz_err = resolve_user_local_date(user_tz)
         run_ctx.user_timezone = resolved_tz
+        run_ctx.timezone_resolution_source = tz_src
+        run_ctx.timezone_resolution_error = tz_err
         run_ctx.resolved_local_date = local_date_str
         stable_cache_key = build_stable_daily_cache_key(user_id, local_date_str, version=STARTUP_BRIEFING_CACHE_VERSION)
         run_ctx.daily_cache_key = stable_cache_key
@@ -119,6 +137,8 @@ class BriefingService:
                     _ensure_briefing_in_chat_history(user_id, b_text, repo)
 
                     res_src = cached_daily.get("result_source", "persistent_daily_cache")
+                    run_ctx.served_from = "persistent_daily_cache"
+                    run_ctx.content_origin = cached_daily.get("content_origin") or res_src
                     presented_keys_count = len(repo.get_presented_briefing_keys(user_id))
                     run_ctx.already_presented_count = max(cached_daily.get("already_presented_count", 0), presented_keys_count)
                     run_ctx.selected_count = len(cached_daily.get("selected_candidates", []))
@@ -133,11 +153,12 @@ class BriefingService:
                         logger.warning(f"Error recording run summary: {e}")
                     set_current_run_context(None)
 
+                    unpresented = _filter_unpresented_candidates(user_id, cached_daily.get("selected_candidates", []), repo)
                     return {
                         "enabled": True,
                         "briefing": b_text,
-                        "updates_count": len(cached_daily.get("selected_candidates", [])),
-                        "updates": cached_daily.get("selected_candidates", []),
+                        "updates_count": len(unpresented),
+                        "updates": unpresented,
                         "telemetry": summary,
                         "briefing_run_id": brun_id,
                         "request_id": req_id,
@@ -171,6 +192,8 @@ class BriefingService:
                         )
                         _ensure_briefing_in_chat_history(user_id, b_text, repo)
                         res_src = completed_record.get("result_source", "persistent_daily_cache")
+                        run_ctx.served_from = "persistent_daily_cache"
+                        run_ctx.content_origin = completed_record.get("content_origin") or res_src
                         summary = run_ctx.finalize_run(
                             result_source=res_src,
                             final_status="success",
@@ -197,6 +220,8 @@ class BriefingService:
                         stale_text = (cached_daily.get("briefing") or cached_daily.get("briefing_text")) if cached_daily else None
                         final_text = stale_text or "Welcome back! Everything is up to date on your monitored queue today."
                         res_src = cached_daily.get("result_source", "stale_cache_fallback") if stale_text else "local_rule_fallback"
+                        run_ctx.served_from = "persistent_daily_cache" if stale_text else "local_fallback"
+                        run_ctx.content_origin = res_src
                         _ensure_briefing_in_chat_history(user_id, final_text, repo)
                         summary = run_ctx.finalize_run(result_source=res_src, final_status="success", response_text=final_text)
                         try:
@@ -236,6 +261,8 @@ class BriefingService:
             run_ctx.add_timeline_event("generation_claim", "not_acquired", result={"daily_cache_key": stable_cache_key})
             b_text = (existing_claim.get("briefing") or existing_claim.get("briefing_text")) if existing_claim else None
             res_src = existing_claim.get("result_source", "stale_cache_fallback") if (existing_claim and b_text) else "local_rule_fallback"
+            run_ctx.served_from = "persistent_daily_cache" if (existing_claim and b_text) else "local_fallback"
+            run_ctx.content_origin = res_src
             if not b_text:
                 b_text = "Welcome back! Everything is up to date on your monitored queue today."
             _ensure_briefing_in_chat_history(user_id, b_text, repo)
@@ -676,6 +703,8 @@ class BriefingService:
             # Convert engine candidates back to briefing item dicts for formatting
             formatting_items = [
                 {
+                    "item_key": c.candidate_id,
+                    "candidate_id": c.candidate_id,
                     "title": c.title,
                     "summary": c.summary,
                     "type": c.type,
@@ -806,7 +835,9 @@ class BriefingService:
             except Exception as e:
                 logger.warning(f"Error saving final daily greeting record: {e}")
 
+            run_ctx.served_from = "fresh_generation"
             summary = run_ctx.finalize_run(result_source=res_source, final_status="success", response_text=briefing_text)
+            briefing_data["telemetry"] = summary
             try:
                 repo.add_decision_log(summary)
             except Exception as e:

@@ -634,6 +634,8 @@ class AiAgentService:
         if result.text and not result.fallback_used and validate_fallback_greeting(result.text):
             briefing_text = result.text
             if run_ctx:
+                run_ctx.served_from = "fresh_generation"
+                run_ctx.content_origin = "gemini_primary"
                 run_ctx.result_source = "fresh_gemini"
             logger.info(f"[Briefing] Using Gemini LLM text ({len(briefing_text)} chars)")
             return briefing_text
@@ -647,6 +649,9 @@ class AiAgentService:
             time_of_day=time_of_day,
         )
         if run_ctx:
+            run_ctx.served_from = "fresh_generation"
+            run_ctx.content_origin = "local_rule_fallback"
+            run_ctx.fallback_attempted = True
             run_ctx.result_source = "local_rule_fallback"
 
         logger.warning(

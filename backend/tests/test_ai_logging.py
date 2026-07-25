@@ -226,7 +226,7 @@ async def test_b_daily_cache_hit_emits_event_without_gemini_call(tmp_path, monke
     user_id = "user_test_b"
     repo.save_agent_settings(user_id, {"notify_on_login": True, "timezone": "America/Los_Angeles"})
 
-    local_date, _ = resolve_user_local_date("America/Los_Angeles")
+    local_date = resolve_user_local_date("America/Los_Angeles")[0]
     cache_key = build_stable_daily_cache_key(user_id, local_date, STARTUP_BRIEFING_CACHE_VERSION)
 
     repo.save_daily_greeting(user_id, cache_key, {

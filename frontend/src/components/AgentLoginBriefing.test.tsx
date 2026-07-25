@@ -57,4 +57,38 @@ describe("AgentLoginBriefing Frontend Behavior", () => {
 
     expect(api.agentBriefing).toHaveBeenCalledTimes(1);
   });
+
+  it("clicking updates count badge opens modal dialog displaying updates list", async () => {
+    vi.mocked(api.agentBriefing).mockResolvedValue({
+      enabled: true,
+      briefing: "Welcome back! The Odyssey is available.",
+      updates_count: 1,
+      updates: [
+        {
+          title: "The Odyssey",
+          type: "memory_recall",
+          message: "You asked about The Odyssey on 2026-07-22.",
+        },
+      ],
+      personality_preset: "cinephile",
+    } as any);
+
+    render(<AgentLoginBriefing onOpenChat={() => {}} />);
+
+    const badgeBtn = await screen.findByRole("button", { name: /1 update/i });
+    expect(badgeBtn).toBeInTheDocument();
+
+    fireEvent.click(badgeBtn);
+
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    expect(screen.getByText(/Updates & Changes Since Last Login/i)).toBeInTheDocument();
+    expect(screen.getByText("The Odyssey")).toBeInTheDocument();
+    expect(screen.getByText("You asked about The Odyssey on 2026-07-22.")).toBeInTheDocument();
+
+    const closeBtn = screen.getByRole("button", { name: /Close modal/i });
+    fireEvent.click(closeBtn);
+
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /1 update/i })).not.toBeInTheDocument();
+  });
 });

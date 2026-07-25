@@ -13,31 +13,41 @@ STARTUP_BRIEFING_CACHE_VERSION = 2
 DEFAULT_USER_TIMEZONE = "America/Los_Angeles"
 
 
-def resolve_user_local_date(user_timezone_str: str | None = None, now_dt: datetime | None = None) -> tuple[str, str]:
+def resolve_user_local_date(
+    user_timezone_str: str | None = None,
+    now_dt: datetime | None = None
+) -> tuple[str, str, str, Optional[str]]:
     """Resolve the user's local date (YYYY-MM-DD) based on their configured timezone.
     
-    Returns tuple of (local_date_str, resolved_timezone_name).
+    Returns tuple of (local_date_str, resolved_timezone_name, timezone_resolution_source, timezone_resolution_error).
     """
-    tz_to_use = (user_timezone_str or "").strip()
-    if not tz_to_use:
-        tz_to_use = DEFAULT_USER_TIMEZONE
-
+    raw_tz = (user_timezone_str or "").strip()
     base_dt = now_dt if now_dt is not None else datetime.now(timezone.utc)
     if base_dt.tzinfo is None:
         base_dt = base_dt.replace(tzinfo=timezone.utc)
 
-    try:
-        zi = ZoneInfo(tz_to_use)
-        local_date = base_dt.astimezone(zi).date().isoformat()
-        return local_date, tz_to_use
-    except Exception:
+    if not raw_tz:
         try:
             zi = ZoneInfo(DEFAULT_USER_TIMEZONE)
             local_date = base_dt.astimezone(zi).date().isoformat()
-            return local_date, DEFAULT_USER_TIMEZONE
-        except Exception:
+            return local_date, DEFAULT_USER_TIMEZONE, "missing_setting_fallback", None
+        except Exception as e:
             utc_date = base_dt.astimezone(timezone.utc).date().isoformat()
-            return utc_date, "UTC"
+            return utc_date, "UTC", "missing_setting_fallback", str(e)
+
+    try:
+        zi = ZoneInfo(raw_tz)
+        local_date = base_dt.astimezone(zi).date().isoformat()
+        return local_date, raw_tz, "user_setting", None
+    except Exception as err:
+        err_msg = f"Invalid timezone '{raw_tz}': {type(err).__name__}"
+        try:
+            zi = ZoneInfo(DEFAULT_USER_TIMEZONE)
+            local_date = base_dt.astimezone(zi).date().isoformat()
+            return local_date, DEFAULT_USER_TIMEZONE, "invalid_setting_fallback", err_msg
+        except Exception as fallback_err:
+            utc_date = base_dt.astimezone(timezone.utc).date().isoformat()
+            return utc_date, "UTC", "invalid_setting_fallback", f"{err_msg}; fallback error: {type(fallback_err).__name__}"
 
 
 def build_stable_daily_cache_key(user_id: str, local_date_str: str, version: int = STARTUP_BRIEFING_CACHE_VERSION) -> str:
@@ -261,21 +271,19 @@ SECRET_PATTERNS = [
 
 
 def scrub_secrets(val: Any) -> Any:
-    """Recursively scrub sensitive keys, tokens, and URL parameters from data structures."""
+    """Recursively redact secrets in dicts, lists, or strings."""
     if isinstance(val, str):
-        res = val
-        for pat, repl in SECRET_PATTERNS:
-            res = re.sub(pat, repl, res)
-        return res
+        val = re.sub(r'(AIzaSy[A-Za-z0-9_-]{33})', '[REDACTED_API_KEY]', val)
+        val = re.sub(r'([a-zA-Z0-9_-]{20,}:APA91b[a-zA-Z0-9_-]+)', '[REDACTED_TOKEN]', val)
+        return val
     elif isinstance(val, dict):
-        cleaned = {}
+        new_d = {}
         for k, v in val.items():
-            k_lower = str(k).lower()
-            if any(s in k_lower for s in ["authorization", "api_key", "gemini_api_key", "tmdb_api_key", "cookie", "bearer"]):
-                cleaned[k] = "[REDACTED_SECRET]"
+            if any(secret_key in k.lower() for secret_key in ["key", "token", "password", "secret"]):
+                new_d[k] = "[REDACTED]"
             else:
-                cleaned[k] = scrub_secrets(v)
-        return cleaned
+                new_d[k] = scrub_secrets(v)
+        return new_d
     elif isinstance(val, list):
         return [scrub_secrets(item) for item in val]
     return val
@@ -293,9 +301,15 @@ class StartupRunContext:
     completed_at: Optional[str] = None
     total_duration_ms: Optional[float] = None
     force_refresh: bool = False
-    user_timezone: str = "UTC"
-    resolved_local_date: str = field(default_factory=lambda: date.today().isoformat())
+    configured_user_timezone: Optional[str] = None
+    resolved_user_timezone: str = "America/Los_Angeles"
+    user_timezone: str = "America/Los_Angeles"
+    timezone_resolution_source: str = "missing_setting_fallback"
+    timezone_resolution_error: Optional[str] = None
+    resolved_local_date: str = field(default_factory=lambda: datetime.now(timezone.utc).date().isoformat())
     server_date: str = field(default_factory=lambda: datetime.now(timezone.utc).date().isoformat())
+    served_from: str = "error"
+    content_origin: Optional[str] = None
     result_source: str = "error"
     final_status: str = "running"
     response_text_length: int = 0
@@ -366,6 +380,23 @@ class StartupRunContext:
         if service in self.external_cache_hit_counts:
             self.external_cache_hit_counts[service] += 1
 
+    def _format_selection_summary(self) -> str:
+        dur = self.total_duration_ms or round((time.perf_counter() - self.start_time_perf) * 1000, 2)
+        if self.served_from == "persistent_daily_cache" or self.daily_cache_result == "hit":
+            origin_label = (self.content_origin or self.result_source or "unknown").replace("_", " ")
+            return f"Startup briefing run {self.briefing_run_id} served from persistent daily cache in {dur}ms. Cached content origin: {origin_label}."
+        elif self.served_from == "fresh_generation":
+            if self.content_origin == "gemini_primary":
+                return f"Startup briefing run {self.briefing_run_id} generated fresh content with Gemini primary in {dur}ms."
+            elif self.content_origin == "local_rule_fallback":
+                return f"Startup briefing run {self.briefing_run_id} generated fresh local fallback content in {dur}ms after Gemini generation failed."
+            else:
+                origin_label = (self.content_origin or "fresh generation").replace("_", " ")
+                return f"Startup briefing run {self.briefing_run_id} generated fresh content via '{origin_label}' in {dur}ms."
+        else:
+            src = (self.served_from or self.result_source or "unknown").replace("_", " ")
+            return f"Startup briefing run {self.briefing_run_id} finished via '{src}' ({self.final_status}, {dur}ms)."
+
     def finalize_run(self, result_source: str, final_status: str, response_text: Optional[str] = None) -> dict[str, Any]:
         end_perf = time.perf_counter()
         now_iso = datetime.now(timezone.utc).isoformat()
@@ -381,7 +412,12 @@ class StartupRunContext:
             duration_ms=0.0,
             started_at=now_iso,
             completed_at=now_iso,
-            result={"result_source": result_source, "response_text_length": self.response_text_length},
+            result={
+                "result_source": result_source,
+                "served_from": self.served_from,
+                "content_origin": self.content_origin,
+                "response_text_length": self.response_text_length,
+            },
         )
 
         return self.to_summary_dict()
@@ -401,9 +437,15 @@ class StartupRunContext:
             "total_duration_ms": self.total_duration_ms or round((time.perf_counter() - self.start_time_perf) * 1000, 2),
             "request_duration_ms": self.total_duration_ms or round((time.perf_counter() - self.start_time_perf) * 1000, 2),
             "force_refresh": self.force_refresh,
-            "user_timezone": self.user_timezone,
+            "configured_user_timezone": self.configured_user_timezone,
+            "resolved_user_timezone": self.resolved_user_timezone,
+            "user_timezone": self.resolved_user_timezone,
+            "timezone_resolution_source": self.timezone_resolution_source,
+            "timezone_resolution_error": self.timezone_resolution_error,
             "resolved_local_date": self.resolved_local_date,
             "server_date": self.server_date,
+            "served_from": self.served_from,
+            "content_origin": self.content_origin,
             "result_source": self.result_source,
             "final_status": self.final_status,
             "response_text_length": self.response_text_length,
@@ -428,7 +470,7 @@ class StartupRunContext:
             "timeline": self.timeline,
             "gemini_called": self.external_attempt_counts.get("gemini", 0) > 0,
             "fallback_used": self.fallback_attempted,
-            "selection_summary": f"Startup briefing run {self.briefing_run_id} finished via '{self.result_source}' ({self.final_status}, {self.total_duration_ms}ms)",
+            "selection_summary": self._format_selection_summary(),
         })
 
 

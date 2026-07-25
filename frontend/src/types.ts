@@ -119,6 +119,9 @@ export interface AgentBriefingUpdate {
   title: string;
   type: string;
   message: string;
+  summary?: string;
+  category?: string;
+  published_at?: string;
   item?: WatchlistItem;
 }
 
@@ -156,6 +159,16 @@ export interface AgentLogEntry {
   total_token_count?: number;
   estimated_cost_usd?: number;
   daily_cache_key?: string | null;
+  daily_cache_result?: string | null;
+  served_from?: string | null;
+  content_origin?: string | null;
+  result_source?: string | null;
+  user_timezone?: string | null;
+  configured_user_timezone?: string | null;
+  resolved_user_timezone?: string | null;
+  timezone_resolution_source?: string | null;
+  timezone_resolution_error?: string | null;
+  resolved_local_date?: string | null;
   attempt_number?: number;
   is_fallback_attempt?: boolean;
   http_status?: number | null;

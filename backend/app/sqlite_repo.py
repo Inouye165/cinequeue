@@ -1,12 +1,15 @@
 """SQLite-backed watchlist repository."""
 
 import json
+import logging
 import sqlite3
 from contextlib import contextmanager
 from typing import Any
 
 from app.config import DATA_DIR, DB_PATH
 from app.repository import DuplicateItemError, WatchlistRepository
+
+logger = logging.getLogger(__name__)
 
 
 class SqliteWatchlistRepository(WatchlistRepository):
@@ -347,6 +350,12 @@ class SqliteWatchlistRepository(WatchlistRepository):
                 ("external_attempt_counts_json", "TEXT"),
                 ("external_cache_hit_counts_json", "TEXT"),
                 ("timeline_json", "TEXT"),
+                ("served_from", "TEXT"),
+                ("content_origin", "TEXT"),
+                ("configured_user_timezone", "TEXT"),
+                ("resolved_user_timezone", "TEXT"),
+                ("timezone_resolution_source", "TEXT"),
+                ("timezone_resolution_error", "TEXT"),
             ]
             for col_name, col_type in new_cols:
                 if col_name not in existing_cols:
@@ -733,7 +742,7 @@ class SqliteWatchlistRepository(WatchlistRepository):
                 "updated_at": self.utc_now_iso(),
             }
         keys = row.keys()
-        tz = (row["timezone"] if ("timezone" in keys and row["timezone"]) else (row["user_timezone"] if ("user_timezone" in keys and row["user_timezone"]) else "America/Los_Angeles"))
+        tz = (row["timezone"] if ("timezone" in keys and row["timezone"] is not None) else (row["user_timezone"] if ("user_timezone" in keys and row["user_timezone"] is not None) else "America/Los_Angeles"))
         return {
             "user_id": row["user_id"],
             "personality_preset": row["personality_preset"],
@@ -753,7 +762,12 @@ class SqliteWatchlistRepository(WatchlistRepository):
         preset = settings.get("personality_preset", "cinephile")
         custom_prompt = settings.get("custom_prompt", "")
         location = settings.get("location", "").strip()
-        tz = (settings.get("timezone") or settings.get("user_timezone") or "America/Los_Angeles").strip()
+        if "timezone" in settings:
+            tz = (settings["timezone"] or "").strip()
+        elif "user_timezone" in settings:
+            tz = (settings["user_timezone"] or "").strip()
+        else:
+            tz = "America/Los_Angeles"
         notify_on_login = 1 if settings.get("notify_on_login", True) else 0
         auto_add_mentioned = 1 if settings.get("auto_add_mentioned", True) else 0
         track_price_drops = 1 if settings.get("track_price_drops", True) else 0
@@ -1242,22 +1256,16 @@ class SqliteWatchlistRepository(WatchlistRepository):
                         server_date, result_source, final_status, response_text_length,
                         daily_cache_result, daily_cache_backend, candidate_signature,
                         gemini_attempt_count, fallback_attempted, fallback_trigger, final_model,
-                        external_attempt_counts_json, external_cache_hit_counts_json, timeline_json
+                        external_attempt_counts_json, external_cache_hit_counts_json, timeline_json,
+                        served_from, content_origin, configured_user_timezone, resolved_user_timezone,
+                        timezone_resolution_source, timezone_resolution_error
                     ) VALUES (
-                        ?, ?, ?, ?, ?,
-                        ?, ?, ?, ?, ?,
-                        ?, ?, ?,
-                        ?, ?, ?,
-                        ?, ?, ?,
-                        ?, ?, ?, ?,
-                        ?, ?, ?, ?,
-                        ?, ?, ?, ?,
-                        ?, ?, ?, ?, ?,
-                        ?, ?, ?, ?,
-                        ?, ?, ?, ?,
-                        ?, ?, ?,
-                        ?, ?, ?, ?,
-                        ?, ?, ?
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                     )
                     """,
                     (
@@ -1299,7 +1307,7 @@ class SqliteWatchlistRepository(WatchlistRepository):
                         clean_dict.get("completed_at"),
                         clean_dict.get("total_duration_ms"),
                         1 if clean_dict.get("force_refresh") is True else 0,
-                        clean_dict.get("user_timezone", "UTC"),
+                        clean_dict.get("resolved_user_timezone") or clean_dict.get("user_timezone", "America/Los_Angeles"),
                         clean_dict.get("resolved_local_date"),
                         clean_dict.get("server_date"),
                         clean_dict.get("result_source"),
@@ -1315,6 +1323,12 @@ class SqliteWatchlistRepository(WatchlistRepository):
                         json.dumps(clean_dict.get("external_attempt_counts", {})),
                         json.dumps(clean_dict.get("external_cache_hit_counts", {})),
                         json.dumps(clean_dict.get("timeline", [])),
+                        clean_dict.get("served_from"),
+                        clean_dict.get("content_origin"),
+                        clean_dict.get("configured_user_timezone"),
+                        clean_dict.get("resolved_user_timezone") or clean_dict.get("user_timezone", "America/Los_Angeles"),
+                        clean_dict.get("timezone_resolution_source"),
+                        clean_dict.get("timezone_resolution_error"),
                     ),
                 )
         except Exception as e:
