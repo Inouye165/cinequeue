@@ -1,6 +1,7 @@
 from datetime import date
 import asyncio
 import logging
+import os
 import re
 from typing import Any
 
@@ -15,58 +16,129 @@ logger = logging.getLogger(__name__)
 
 
 
+import time
+
 class TmdbClient:
     def __init__(self) -> None:
-        if not TMDB_API_KEY:
+        api_key = os.getenv("TMDB_API_KEY") or TMDB_API_KEY
+        if not api_key:
             raise RuntimeError("TMDB_API_KEY is not set")
         self._client = httpx.AsyncClient(
             base_url=TMDB_BASE_URL,
-            params={"api_key": TMDB_API_KEY},
+            params={"api_key": api_key},
             timeout=20.0,
         )
+        self._cache: dict[str, tuple[float, Any]] = {}
+
+    def _get_cached(self, key: str, ttl_seconds: float) -> Any | None:
+        if key in self._cache:
+            ts, val = self._cache[key]
+            if time.time() - ts < ttl_seconds:
+                return val
+            del self._cache[key]
+        return None
+
+    def _set_cached(self, key: str, val: Any) -> None:
+        self._cache[key] = (time.time(), val)
 
     async def close(self) -> None:
         await self._client.aclose()
 
     async def _get(self, path: str, **params: Any) -> Any:
+        from app.decision_models import get_current_run_context
+        ctx = get_current_run_context()
+        if ctx:
+            if "search" in path:
+                ctx.record_external_attempt("tmdb_search")
+            elif "watch/providers" in path or "providers" in path:
+                ctx.record_external_attempt("tmdb_watch_providers")
+            else:
+                ctx.record_external_attempt("tmdb_details")
         response = await self._client.get(path, params=params)
         response.raise_for_status()
         return response.json()
 
     async def search(self, query: str) -> list[dict[str, Any]]:
-        movie_data = await self._get("/search/movie", query=query)
-        tv_data = await self._get("/search/tv", query=query)
+        from app.decision_models import get_current_run_context
+        ctx = get_current_run_context()
+        cache_key = f"search:{query.lower().strip()}"
+        cached = self._get_cached(cache_key, 21600.0)
+        if cached is not None:
+            if ctx:
+                ctx.record_external_cache_hit("tmdb_search")
+            return cached
+
+        movie_data = await self._get("/search/movie", query=query, region="US", language="en-US")
+        tv_data = await self._get("/search/tv", query=query, region="US", language="en-US")
         results: list[dict[str, Any]] = []
         for item in movie_data.get("results", [])[:8]:
             results.append(enrich_media_item(item, "movie"))
         for item in tv_data.get("results", [])[:8]:
             results.append(enrich_media_item(item, "tv"))
         results.sort(key=lambda x: x.get("popularity") or 0, reverse=True)
-        return results[:12]
+        res = results[:12]
+        self._set_cached(cache_key, res)
+        return res
 
     async def upcoming_movies(self) -> list[dict[str, Any]]:
-        data = await self._get("/movie/upcoming", region="US")
-        return [enrich_media_item(item, "movie") for item in data.get("results", [])]
+        cache_key = "upcoming_movies"
+        cached = self._get_cached(cache_key, 21600.0)
+        if cached is not None:
+            return cached
+
+        data = await self._get("/movie/upcoming", region="US", language="en-US")
+        res = [enrich_media_item(item, "movie") for item in data.get("results", [])]
+        self._set_cached(cache_key, res)
+        return res
 
     async def now_playing(self) -> list[dict[str, Any]]:
-        data = await self._get("/movie/now_playing", region="US")
-        return [enrich_media_item(item, "movie") for item in data.get("results", [])]
+        cache_key = "now_playing"
+        cached = self._get_cached(cache_key, 21600.0)
+        if cached is not None:
+            return cached
+
+        data = await self._get("/movie/now_playing", region="US", language="en-US")
+        res = [enrich_media_item(item, "movie") for item in data.get("results", [])]
+        self._set_cached(cache_key, res)
+        return res
 
     async def trending(self) -> list[dict[str, Any]]:
-        data = await self._get("/trending/all/week")
+        cache_key = "trending"
+        cached = self._get_cached(cache_key, 21600.0)
+        if cached is not None:
+            return cached
+
+        data = await self._get("/trending/all/week", language="en-US")
         results = []
         for item in data.get("results", []):
             media_type = item.get("media_type")
             if media_type in {"movie", "tv"}:
                 results.append(enrich_media_item(item, media_type))
+        self._set_cached(cache_key, results)
         return results
 
     async def on_air_tv(self) -> list[dict[str, Any]]:
-        data = await self._get("/tv/on_the_air")
-        return [enrich_media_item(item, "tv") for item in data.get("results", [])]
+        cache_key = "on_air_tv"
+        cached = self._get_cached(cache_key, 21600.0)
+        if cached is not None:
+            return cached
+
+        data = await self._get("/tv/on_the_air", language="en-US")
+        res = [enrich_media_item(item, "tv") for item in data.get("results", [])]
+        self._set_cached(cache_key, res)
+        return res
 
     async def get_details(self, media_type: str, tmdb_id: int) -> dict[str, Any]:
-        data = await self._get(f"/{media_type}/{tmdb_id}")
+        from app.decision_models import get_current_run_context
+        ctx = get_current_run_context()
+        cache_key = f"details:{media_type}:{tmdb_id}"
+        cached = self._get_cached(cache_key, 86400.0)
+        if cached is not None:
+            if ctx:
+                ctx.record_external_cache_hit("tmdb_details")
+            return cached
+
+        data = await self._get(f"/{media_type}/{tmdb_id}", language="en-US")
         release = data.get("release_date") or data.get("first_air_date")
         days = days_until(release)
         genres = [g["name"] for g in data.get("genres", [])]
@@ -74,7 +146,7 @@ class TmdbClient:
         if not runtime and data.get("episode_run_time"):
             runtime = data["episode_run_time"][0] if data["episode_run_time"] else None
 
-        return {
+        res = {
             "id": data["id"],
             "media_type": media_type,
             "title": data.get("title") or data.get("name"),
@@ -93,16 +165,25 @@ class TmdbClient:
             "homepage": data.get("homepage"),
             "seasons": data.get("seasons") if media_type == "tv" else None,
         }
+        self._set_cached(cache_key, res)
+        return res
 
     async def get_recommendations(self, media_type: str, tmdb_id: int) -> list[dict[str, Any]]:
         """Fetch recommended/similar titles for a given movie or show."""
+        cache_key = f"recs:{media_type}:{tmdb_id}"
+        cached = self._get_cached(cache_key, 86400.0)
+        if cached is not None:
+            return cached
+
         try:
             data = await self._get(f"/{media_type}/{tmdb_id}/recommendations")
             results = data.get("results", [])
             if not results:
                 data = await self._get(f"/{media_type}/{tmdb_id}/similar")
                 results = data.get("results", [])
-            return [enrich_media_item(item, media_type) for item in results[:5]]
+            res = [enrich_media_item(item, media_type) for item in results[:5]]
+            self._set_cached(cache_key, res)
+            return res
         except Exception as e:
             logger.warning(f"Error fetching recommendations for {media_type}/{tmdb_id}: {e}")
             return []
@@ -216,6 +297,15 @@ class TmdbClient:
 
 
     async def get_watch_providers(self, media_type: str, tmdb_id: int) -> dict[str, Any]:
+        from app.decision_models import get_current_run_context
+        ctx = get_current_run_context()
+        cache_key = f"providers:{media_type}:{tmdb_id}"
+        cached = self._get_cached(cache_key, 43200.0)
+        if cached is not None:
+            if ctx:
+                ctx.record_external_cache_hit("tmdb_watch_providers")
+            return cached
+
         data = await self._get(f"/{media_type}/{tmdb_id}/watch/providers")
         us = data.get("results", {}).get("US", {})
         free_list = us.get("free", []) + us.get("ads", [])
@@ -262,7 +352,7 @@ class TmdbClient:
         if in_theatres:
             categories["theatres"] = [{"name": "In theatres now", "logo_url": None}]
             
-        return {
+        res = {
             "link": link,
             "categories": categories,
             "is_free_streaming": is_free_streaming,
@@ -270,6 +360,8 @@ class TmdbClient:
             "buy_original_price": f"${original_price:.2f}" if has_buy_options else None,
             "buy_current_price": f"${current_price:.2f}" if has_buy_options else None,
         }
+        self._set_cached(cache_key, res)
+        return res
 
     async def get_videos(self, media_type: str, tmdb_id: int) -> list[dict[str, Any]]:
         try:
@@ -369,21 +461,29 @@ def _format_providers(providers: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 async def fetch_news(title: str, limit: int = 6) -> list[dict[str, Any]]:
     from urllib.parse import quote_plus
+    from app.decision_models import get_current_run_context
+    ctx = get_current_run_context()
+    if ctx:
+        ctx.record_external_attempt("news")
 
     query = quote_plus(f"{title} movie OR show")
     url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        feed = await client.get(url)
-        feed.raise_for_status()
-        parsed = feedparser.parse(feed.text)
-    articles = []
-    for entry in parsed.entries[:limit]:
-        articles.append(
-            {
-                "title": entry.get("title", ""),
-                "url": entry.get("link", ""),
-                "published": entry.get("published", ""),
-                "source": entry.get("source", {}).get("title") if entry.get("source") else None,
-            }
-        )
-    return articles
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            feed = await client.get(url)
+            feed.raise_for_status()
+            parsed = feedparser.parse(feed.text)
+        articles = []
+        for entry in parsed.entries[:limit]:
+            articles.append(
+                {
+                    "title": entry.get("title", ""),
+                    "url": entry.get("link", ""),
+                    "source": entry.get("source", {}).get("title", ""),
+                    "published_at": entry.get("published", ""),
+                }
+            )
+        return articles
+    except Exception as e:
+        logger.warning(f"Error fetching news for '{title}': {e}")
+        return []

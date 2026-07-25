@@ -78,7 +78,12 @@ async def on_air(request: Request) -> list[dict[str, Any]]:
 
 
 @router.get("/{media_type}/{tmdb_id}")
-async def media_details(media_type: str, tmdb_id: int, request: Request) -> dict[str, Any]:
+async def media_details(
+    media_type: str,
+    tmdb_id: int,
+    request: Request,
+    current_user: Any = Depends(get_current_user),
+) -> dict[str, Any]:
     logger.info(f"Media details request: {media_type}/{tmdb_id}")
     if media_type not in {"movie", "tv"}:
         logger.warning(f"Invalid media_type: {media_type}")
@@ -109,6 +114,23 @@ async def media_details(media_type: str, tmdb_id: int, request: Request) -> dict
             tmdb.get_videos(media_type, tmdb_id),
             cast_changes_task,
         )
+
+        user_rating = None
+        repo = getattr(request.app.state, "watchlist_repo", None)
+        if repo and current_user:
+            try:
+                user_id = getattr(current_user, "uid", str(current_user))
+                rated_list = repo.list_rated_movies(user_id)
+                match_r = next((r for r in rated_list if r.get("media_type") == media_type and r.get("tmdb_id") == tmdb_id), None)
+                if match_r:
+                    user_rating = match_r.get("rating")
+                else:
+                    w_item = repo.get_item(user_id, media_type, tmdb_id)
+                    if w_item and w_item.get("user_rating"):
+                        user_rating = w_item.get("user_rating")
+            except Exception as e:
+                logger.warning(f"Could not retrieve user rating for {media_type}/{tmdb_id}: {e}")
+
         logger.info(f"Media details retrieved successfully for {media_type}/{tmdb_id}")
         return {
             **details,
@@ -119,6 +141,7 @@ async def media_details(media_type: str, tmdb_id: int, request: Request) -> dict
             "trailers": trailers,
             "next_season": next_season,
             "cast_changes": cast_changes,
+            "user_rating": user_rating,
         }
     except Exception as e:
         logger.error(f"Media details failed for {media_type}/{tmdb_id}: {e}")

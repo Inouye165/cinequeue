@@ -326,6 +326,8 @@ class FirestoreWatchlistRepository(WatchlistRepository):
                 "personality_preset": "cinephile",
                 "custom_prompt": "",
                 "location": "",
+                "timezone": "America/Los_Angeles",
+                "user_timezone": "America/Los_Angeles",
                 "notify_on_login": True,
                 "auto_add_mentioned": True,
                 "track_price_drops": True,
@@ -337,6 +339,9 @@ class FirestoreWatchlistRepository(WatchlistRepository):
         d.setdefault("personality_preset", "cinephile")
         d.setdefault("custom_prompt", "")
         d.setdefault("location", "")
+        tz = d.get("timezone") or d.get("user_timezone") or "America/Los_Angeles"
+        d["timezone"] = tz
+        d["user_timezone"] = tz
         d.setdefault("notify_on_login", True)
         d.setdefault("auto_add_mentioned", True)
         d.setdefault("track_price_drops", True)
@@ -346,11 +351,14 @@ class FirestoreWatchlistRepository(WatchlistRepository):
     def save_agent_settings(self, user_id: str, settings: dict[str, Any]) -> dict[str, Any]:
         doc_ref = self._db.collection("users").document(user_id).collection("agent").document("settings")
         now = self.utc_now_iso()
+        tz = (settings.get("timezone") or settings.get("user_timezone") or "America/Los_Angeles").strip()
         data = {
             "user_id": user_id,
             "personality_preset": settings.get("personality_preset", "cinephile"),
             "custom_prompt": settings.get("custom_prompt", ""),
             "location": settings.get("location", "").strip(),
+            "timezone": tz,
+            "user_timezone": tz,
             "notify_on_login": bool(settings.get("notify_on_login", True)),
             "auto_add_mentioned": bool(settings.get("auto_add_mentioned", True)),
             "track_price_drops": bool(settings.get("track_price_drops", True)),
@@ -543,6 +551,76 @@ class FirestoreWatchlistRepository(WatchlistRepository):
         }, merge=True)
         return briefing_data
 
+    def get_daily_greeting(self, user_id: str, date_str: str) -> dict[str, Any] | None:
+        doc = self._db.collection("users").document(user_id).collection("daily_greetings").document(date_str).get()
+        if doc.exists:
+            d = doc.to_dict()
+            if d:
+                if "briefing_data" in d:
+                    b_data = d["briefing_data"]
+                    if isinstance(b_data, dict):
+                        return b_data
+                return d
+        return None
+
+    def claim_daily_greeting_generation(
+        self, user_id: str, date_str: str, lease_seconds: int = 30, force_refresh: bool = False
+    ) -> tuple[bool, dict[str, Any] | None]:
+        from datetime import datetime, timezone, timedelta
+        doc_ref = self._db.collection("users").document(user_id).collection("daily_greetings").document(date_str)
+
+        try:
+            @firestore.transactional
+            def _in_transaction(transaction, ref):
+                snapshot = ref.get(transaction=transaction)
+                now_dt = datetime.now(timezone.utc)
+                now_iso = now_dt.isoformat()
+                lease_exp = (now_dt + timedelta(seconds=lease_seconds)).isoformat()
+
+                if snapshot.exists and not force_refresh:
+                    d = snapshot.to_dict() or {}
+                    b_data = d.get("briefing_data", d)
+                    status = b_data.get("status", d.get("status", "completed"))
+                    exp_str = b_data.get("lease_expires_at", d.get("lease_expires_at"))
+
+                    if status == "completed":
+                        return False, b_data
+
+                    if status == "generating" and exp_str:
+                        try:
+                            exp_dt = datetime.fromisoformat(exp_str)
+                            if exp_dt > now_dt:
+                                return False, b_data
+                        except Exception:
+                            pass
+
+                claiming_record = {
+                    "user_id": user_id,
+                    "date_str": date_str,
+                    "status": "generating",
+                    "lease_expires_at": lease_exp,
+                    "created_at": now_iso,
+                }
+                transaction.set(ref, {"user_id": user_id, "date_str": date_str, "briefing_data": claiming_record, "created_at": now_iso}, merge=True)
+                return True, None
+
+            transaction = self._db.transaction()
+            return _in_transaction(transaction, doc_ref)
+        except Exception as e:
+            logger.warning(f"Firestore claim_daily_greeting_generation error: {e}")
+            return True, None
+
+    def save_daily_greeting(self, user_id: str, date_str: str, briefing_data: dict[str, Any]) -> dict[str, Any]:
+        now = self.utc_now_iso()
+        briefing_data.setdefault("status", "completed")
+        doc_ref = self._db.collection("users").document(user_id).collection("daily_greetings").document(date_str)
+        doc_ref.set({
+            "user_id": user_id,
+            "date_str": date_str,
+            "briefing_data": briefing_data,
+            "created_at": now,
+        }, merge=True)
+        return briefing_data
     def list_rated_movies(self, user_id: str) -> list[dict[str, Any]]:
         col = self._db.collection("users").document(user_id).collection("rated_movies")
         docs = col.order_by("updated_at", direction=firestore.Query.DESCENDING).stream()
@@ -631,4 +709,71 @@ class FirestoreWatchlistRepository(WatchlistRepository):
             return True
         return False
 
+    def add_decision_log(self, log_dict: dict[str, Any]) -> dict[str, Any]:
+        from app.decision_models import scrub_secrets
+        clean_dict = scrub_secrets(log_dict)
+        try:
+            log_id = clean_dict.get("log_id") or f"log_{int(time.time()*1000)}"
+            doc_ref = self._db.collection("agent_decision_logs").document(log_id)
+            data = dict(clean_dict)
+            data["log_id"] = log_id
+            if "event_type" not in data:
+                data["event_type"] = "startup_briefing_candidate_decision"
+            if "gemini_called" not in data:
+                data["gemini_called"] = False
+            doc_ref.set(data, merge=True)
+        except Exception as e:
+            logger.warning(f"Failed to save Firestore decision log '{log_dict.get('log_id')}': {e}")
+        return clean_dict
 
+    def _format_decision_log_doc(self, data: dict[str, Any]) -> dict[str, Any]:
+        t_ver = data.get("telemetry_version")
+        if t_ver != 2 or data.get("event_type") == "startup_briefing_decision":
+            data["is_legacy"] = True
+            summary = data.get("selection_summary", "")
+            if "Legacy Candidate Decision — Gemini Call Unverified" not in summary:
+                data["selection_summary"] = f"Legacy Candidate Decision — Gemini Call Unverified: {summary}".strip(": ")
+        else:
+            data["is_legacy"] = False
+        return data
+
+    def list_decision_logs(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        user_id: str | None = None,
+        candidate_type: str | None = None,
+        required_only: bool | None = None,
+        fallback_only: bool | None = None,
+        model: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ) -> dict[str, Any]:
+        col = self._db.collection("agent_decision_logs")
+        query = col.order_by("timestamp", direction=firestore.Query.DESCENDING)
+        if user_id:
+            query = query.where("user_id", "==", user_id)
+        if fallback_only:
+            query = query.where("fallback_used", "==", True)
+
+        docs = list(query.stream())
+        filtered = []
+        for d in docs:
+            data = self._format_decision_log_doc(d.to_dict())
+            if start_date and data.get("timestamp", "") < start_date:
+                continue
+            if end_date and data.get("timestamp", "") > end_date:
+                continue
+            if model and data.get("model_requested") != model and data.get("model_used") != model:
+                continue
+            filtered.append(data)
+
+        total = len(filtered)
+        paginated = filtered[offset : offset + limit]
+        return {"total": total, "logs": paginated, "limit": limit, "offset": offset}
+
+    def get_decision_log(self, log_id: str) -> dict[str, Any] | None:
+        doc = self._db.collection("agent_decision_logs").document(log_id).get()
+        if doc.exists:
+            return self._format_decision_log_doc(doc.to_dict())
+        return None

@@ -19,7 +19,10 @@ export function AgentLoginBriefing({ onOpenChat }: AgentLoginBriefingProps) {
   const [briefing, setBriefing] = useState<AgentBriefing | null>(null);
   const [loading, setLoading] = useState(true);
   const [isSpeaking, setIsSpeaking] = useState(false);
+  const [showUpdatesModal, setShowUpdatesModal] = useState(false);
+  const [hasAcknowledgedUpdates, setHasAcknowledgedUpdates] = useState(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const hasRequestedBriefingRef = useRef(false);
 
   const speakText = (text: string) => {
     if (!("speechSynthesis" in window)) return;
@@ -39,16 +42,16 @@ export function AgentLoginBriefing({ onOpenChat }: AgentLoginBriefingProps) {
     window.speechSynthesis.speak(utterance);
   };
 
-  const loadBriefing = async (forceNewSession: boolean = false) => {
+  const loadBriefing = async (forceRefresh: boolean = false) => {
     setLoading(true);
     try {
-      let sessionId = forceNewSession ? null : sessionStorage.getItem("cinequeue_briefing_session_id");
-      if (!sessionId || forceNewSession) {
+      let sessionId = sessionStorage.getItem("cinequeue_briefing_session_id");
+      if (!sessionId) {
         sessionId = "sess_" + Date.now() + "_" + Math.random().toString(36).substring(2, 9);
         sessionStorage.setItem("cinequeue_briefing_session_id", sessionId);
       }
 
-      const data = await api.agentBriefing(sessionId);
+      const data = await api.agentBriefing(sessionId, forceRefresh);
       if (data && data.enabled && data.briefing) {
         setBriefing(data);
 
@@ -68,8 +71,10 @@ export function AgentLoginBriefing({ onOpenChat }: AgentLoginBriefingProps) {
   };
 
   useEffect(() => {
-    // Generate fresh session on initial page load
-    void loadBriefing(true);
+    if (!hasRequestedBriefingRef.current) {
+      hasRequestedBriefingRef.current = true;
+      void loadBriefing(false); // Normal startup - forceRefresh=false
+    }
 
     return () => {
       if (timerRef.current) clearTimeout(timerRef.current);
@@ -94,41 +99,101 @@ export function AgentLoginBriefing({ onOpenChat }: AgentLoginBriefingProps) {
   const label = presetLabels[briefing.personality_preset || "cinephile"] || "🤖 Agent Briefing";
 
   return (
-    <section className="agent-briefing-card" aria-label="AI Agent Greeting Briefing">
-      <div className="briefing-left">
-        <div className="briefing-header">
-          <span className="briefing-tag">{label}</span>
-          {briefing.updates_count ? (
-            <span className="updates-count-badge">
-              {briefing.updates_count} update{briefing.updates_count > 1 ? "s" : ""}
-            </span>
-          ) : null}
-          {isSpeaking ? (
-            <span className="speaking-badge" title="Speaking out loud">
-              🔊 Playing Audio…
-            </span>
-          ) : null}
+    <>
+      <section className="agent-briefing-card" aria-label="AI Agent Greeting Briefing">
+        <div className="briefing-left">
+          <div className="briefing-header">
+            <span className="briefing-tag">{label}</span>
+            {briefing.updates_count && !hasAcknowledgedUpdates ? (
+              <button
+                className="updates-count-badge interactive"
+                onClick={() => {
+                  setHasAcknowledgedUpdates(true);
+                  setShowUpdatesModal(true);
+                }}
+                title="Click to view all changes since your last login"
+                aria-label={`${briefing.updates_count} update${briefing.updates_count > 1 ? "s" : ""} - click to view changes since last login`}
+              >
+                {briefing.updates_count} update{briefing.updates_count > 1 ? "s" : ""} 🔍
+              </button>
+            ) : null}
+            {isSpeaking ? (
+              <span className="speaking-badge" title="Speaking out loud">
+                🔊 Playing Audio…
+              </span>
+            ) : null}
+          </div>
+          <p className="briefing-text">{briefing.briefing}</p>
         </div>
-        <p className="briefing-text">{briefing.briefing}</p>
-      </div>
 
-      <div className="briefing-actions">
-        <button
-          className={`listen-again-btn ${isSpeaking ? "active" : ""}`}
-          onClick={() => {
-            if (briefing.briefing) {
-              speakText(briefing.briefing);
-            }
-          }}
-          title="Listen to the startup briefing again"
+        <div className="briefing-actions">
+          <button
+            className={`listen-again-btn ${isSpeaking ? "active" : ""}`}
+            onClick={() => {
+              if (briefing.briefing) {
+                speakText(briefing.briefing);
+              }
+            }}
+            title="Listen to the startup briefing again"
+          >
+            {isSpeaking ? "🔊 Speaking..." : "🔊 Listen"}
+          </button>
+          <button
+            className="refresh-briefing-btn"
+            onClick={() => void loadBriefing(true)}
+            title="Manually refresh today's briefing"
+            style={{ background: "#333", color: "#fff", border: "1px solid #555", borderRadius: "4px", padding: "6px 12px", cursor: "pointer" }}
+          >
+            🔄 Refresh
+          </button>
+          <button className="chat-briefing-btn" onClick={onOpenChat}>
+            💬 Chat with AI
+          </button>
+        </div>
+      </section>
+
+      {showUpdatesModal && (
+        <div
+          className="updates-modal-overlay"
+          onClick={() => setShowUpdatesModal(false)}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="updates-modal-title"
         >
-          {isSpeaking ? "🔊 Speaking..." : "🔊 Listen"}
-        </button>
-        <button className="chat-briefing-btn" onClick={onOpenChat}>
-          💬 Chat with AI
-        </button>
-      </div>
-    </section>
-
+          <div className="updates-modal-content" onClick={(e) => e.stopPropagation()}>
+            <div className="updates-modal-header">
+              <h3 id="updates-modal-title">🔔 Updates & Changes Since Last Login</h3>
+              <button
+                className="updates-modal-close-btn"
+                onClick={() => setShowUpdatesModal(false)}
+                aria-label="Close modal"
+              >
+                ✕
+              </button>
+            </div>
+            <p className="updates-modal-subtitle">
+              The following {briefing.updates_count || briefing.updates?.length || 0} novel update(s) were found on your queue and news feeds:
+            </p>
+            <div className="updates-modal-list">
+              {briefing.updates && briefing.updates.length > 0 ? (
+                briefing.updates.map((item, idx) => (
+                  <div key={idx} className="updates-modal-item">
+                    <div className="updates-item-top">
+                      <span className="updates-item-title">{item.title}</span>
+                      <span className="updates-item-tag">{item.type || item.category || "update"}</span>
+                    </div>
+                    <p className="updates-item-message">{item.message || item.summary}</p>
+                  </div>
+                ))
+              ) : (
+                <div className="updates-modal-empty">
+                  <p>No detailed item log available for this briefing.</p>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   );
 }

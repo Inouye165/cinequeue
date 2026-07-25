@@ -31,6 +31,10 @@ class WeatherService:
         if not location or not location.strip():
             return None
 
+        from app.decision_models import get_current_run_context, scrub_secrets
+        ctx = get_current_run_context()
+        start_t = time.perf_counter()
+
         loc_clean = location.strip()
         cache_key = loc_clean.lower()
         now = time.time()
@@ -38,19 +42,44 @@ class WeatherService:
         if cache_key in _WEATHER_DATA_CACHE:
             cached_time, cached_data = _WEATHER_DATA_CACHE[cache_key]
             if now - cached_time < _CACHE_TTL_SECONDS:
-                # Return cached data with status updated to 'cached'
                 cached_copy = WeatherData(**cached_data.to_dict())
                 cached_copy.status = "cached"
+                if ctx:
+                    ctx.record_external_cache_hit("weather")
+                    ctx.add_timeline_event(
+                        stage="weather_collection",
+                        status="hit",
+                        duration_ms=round((time.perf_counter() - start_t) * 1000, 2),
+                        result={"location": loc_clean, "source": "in_memory_cache"},
+                    )
                 return cached_copy
 
         for provider in self.providers:
             try:
+                if ctx:
+                    ctx.record_external_attempt("weather")
                 data = await provider.fetch_weather(loc_clean)
+                dur_ms = round((time.perf_counter() - start_t) * 1000, 2)
                 if data:
                     _WEATHER_DATA_CACHE[cache_key] = (now, data)
+                    if ctx:
+                        ctx.add_timeline_event(
+                            stage="weather_collection",
+                            status="completed",
+                            duration_ms=dur_ms,
+                            result={"location": loc_clean, "conditions": data.conditions, "provider": provider.provider_name},
+                        )
                     return data
             except Exception as e:
+                dur_ms = round((time.perf_counter() - start_t) * 1000, 2)
                 logger.warning(f"Weather provider '{provider.provider_name}' failed for '{loc_clean}': {e}")
+                if ctx:
+                    ctx.add_timeline_event(
+                        stage="weather_collection",
+                        status="failed",
+                        duration_ms=dur_ms,
+                        result={"location": loc_clean, "provider": provider.provider_name, "error": str(e)},
+                    )
 
         logger.info(f"Failed to retrieve weather for location '{loc_clean}' across all providers.")
         return None

@@ -8,6 +8,7 @@ import { SearchHeader } from "../components/SearchHeader";
 import { Tabs, TabType } from "../components/Tabs";
 import { useAuth } from "../context/AuthContext";
 import { StarRating } from "../components/StarRating";
+import { BatchRateModal } from "../components/BatchRateModal";
 import type { MediaDetails, MediaItem, RatedMovie, WatchlistItem } from "../types";
 
 
@@ -35,6 +36,7 @@ export function CinequeueDashboard() {
   const [selected, setSelected] = useState<MediaDetails | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [isBatchRateModalOpen, setIsBatchRateModalOpen] = useState(false);
 
   const queueKeys = useMemo(
     () => new Set(watchlist.filter((item) => !item.is_owned && (item.status === "queue" || !item.status)).map((item) => `${item.media_type}:${item.tmdb_id ?? item.id}`)),
@@ -278,11 +280,15 @@ export function CinequeueDashboard() {
       if (rating === 0) {
         await api.deleteRating(item.media_type, tmdbId);
       } else {
+        let posterPath: string | undefined = (item as any).poster_path;
+        if (!posterPath && item.poster_url) {
+          posterPath = item.poster_url.replace(/^https?:\/\/image\.tmdb\.org\/t\/p\/w\d+/, "");
+        }
         await api.rateMovie({
           media_type: item.media_type,
           tmdb_id: tmdbId,
           title: item.title,
-          poster_path: item.poster_url?.replace("https://image.tmdb.org/t/p/w342", "") ?? undefined,
+          poster_path: posterPath ?? undefined,
           release_date: item.release_date ?? undefined,
           rating,
         });
@@ -378,9 +384,9 @@ export function CinequeueDashboard() {
 
   const [showAvatarMenu, setShowAvatarMenu] = useState(false);
   const [agentModalOpen, setAgentModalOpen] = useState(false);
-  const [agentModalTab, setAgentModalTab] = useState<"chat" | "settings">("chat");
+  const [agentModalTab, setAgentModalTab] = useState<"chat" | "settings" | "logs">("chat");
 
-  const openAgentModal = (tab: "chat" | "settings" = "chat") => {
+  const openAgentModal = (tab: "chat" | "settings" | "logs" = "chat") => {
     setAgentModalTab(tab);
     setAgentModalOpen(true);
     setShowAvatarMenu(false);
@@ -420,24 +426,49 @@ export function CinequeueDashboard() {
           </button>
 
           {showAvatarMenu ? (
-            <div className="avatar-dropdown-menu">
-              <button
-                className="dropdown-menu-item"
-                onClick={() => openAgentModal("chat")}
-              >
-                <span className="menu-item-icon">💬</span> Chat with AI Agent
-              </button>
-              <button
-                className="dropdown-menu-item"
-                onClick={() => openAgentModal("settings")}
-              >
-                <span className="menu-item-icon">⚙️</span> AI Personality & Settings
-              </button>
-              <hr className="dropdown-divider" />
-              <button className="dropdown-menu-item logout-item" onClick={logout}>
-                <span className="menu-item-icon">🚪</span> Sign Out
-              </button>
-            </div>
+            <>
+              <div
+                style={{
+                  position: "fixed",
+                  top: 0,
+                  left: 0,
+                  right: 0,
+                  bottom: 0,
+                  zIndex: 9998,
+                  background: "transparent",
+                }}
+                onClick={() => setShowAvatarMenu(false)}
+              />
+              <div className="avatar-dropdown-menu">
+                <div className="dropdown-user-header">
+                  <span className="dropdown-user-name">{user.display_name || "User Account"}</span>
+                  <span className="dropdown-user-email">{user.email}</span>
+                </div>
+                <hr className="dropdown-divider" />
+                <button
+                  className="dropdown-menu-item"
+                  onClick={() => openAgentModal("chat")}
+                >
+                  <span className="menu-item-icon">💬</span> Chat with AI Agent
+                </button>
+                <button
+                  className="dropdown-menu-item"
+                  onClick={() => openAgentModal("settings")}
+                >
+                  <span className="menu-item-icon">⚙️</span> AI Personality & Settings
+                </button>
+                <button
+                  className="dropdown-menu-item"
+                  onClick={() => openAgentModal("logs")}
+                >
+                  <span className="menu-item-icon">📊</span> AI Debugging & Logs
+                </button>
+                <hr className="dropdown-divider" />
+                <button className="dropdown-menu-item logout-item" onClick={logout}>
+                  <span className="menu-item-icon">🚪</span> Sign Out
+                </button>
+              </div>
+            </>
           ) : null}
         </div>
       </div>
@@ -454,11 +485,31 @@ export function CinequeueDashboard() {
         isOpen={agentModalOpen}
         initialTab={agentModalTab}
         onClose={() => setAgentModalOpen(false)}
-        onWatchlistUpdated={() => void loadWatchlist()}
+        onWatchlistUpdated={() => {
+          void loadWatchlist();
+          void loadRatedMovies();
+        }}
       />
 
 
-      <h2 className="section-title">{sectionTitle}</h2>
+      <BatchRateModal
+        isOpen={isBatchRateModalOpen}
+        onClose={() => setIsBatchRateModalOpen(false)}
+        onRatingsAdded={() => void loadRatedMovies()}
+      />
+
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }}>
+        <h2 className="section-title" style={{ margin: 0 }}>{sectionTitle}</h2>
+        {tab === "rated" && (
+          <button
+            className="btn-primary"
+            onClick={() => setIsBatchRateModalOpen(true)}
+            style={{ display: "flex", alignItems: "center", gap: "6px" }}
+          >
+            <span>⭐ Add Ratings</span>
+          </button>
+        )}
+      </div>
 
       {loading ? (
         <div className="loading">Loading…</div>
@@ -493,8 +544,28 @@ export function CinequeueDashboard() {
                       size="md"
                     />
                   </div>
-                  <div style={{ fontSize: "0.75rem", color: "rgba(255, 255, 255, 0.5)" }}>
-                    Rated {movie.rated_ago || "recently"}
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "4px" }}>
+                    <span style={{ fontSize: "0.75rem", color: "rgba(255, 255, 255, 0.5)" }}>
+                      Rated {movie.rated_ago || "recently"}
+                    </span>
+                    <button
+                      type="button"
+                      title="Remove rating"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        void handleEditRatedMovie(movie, 0);
+                      }}
+                      style={{
+                        background: "none",
+                        border: "none",
+                        color: "rgba(255, 99, 132, 0.8)",
+                        cursor: "pointer",
+                        fontSize: "0.85rem",
+                        padding: "2px 6px",
+                      }}
+                    >
+                      🗑️
+                    </button>
                   </div>
                 </div>
               </div>

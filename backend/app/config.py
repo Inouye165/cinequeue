@@ -14,6 +14,10 @@ TMDB_BASE_URL = "https://api.themoviedb.org/3"
 TMDB_IMAGE_BASE = "https://image.tmdb.org/t/p"
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+GEMINI_PRIMARY_MODEL = os.getenv("GEMINI_PRIMARY_MODEL", "gemini-3.6-flash").strip()
+GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3.5-flash").strip()
+AGENT_DEBUG = os.getenv("AGENT_DEBUG", "false").strip().lower() == "true"
+
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
 DB_PATH = DATA_DIR / "watchlist.db"

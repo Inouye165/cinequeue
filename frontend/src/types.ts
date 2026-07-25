@@ -89,9 +89,15 @@ export interface ChatAction {
   title?: string;
   media_type?: string;
   tmdb_id?: number;
+  rating?: number;
+  status?: string;
+  is_owned?: boolean;
   target_rental_price?: number | null;
   movies?: RatedMovie[];
+  query?: string;
+  results?: RatedMovie[];
   poster_url?: string | null;
+  release_date?: string | null;
   availability_type?: "free" | "rent" | "buy";
   provider_name?: string;
   price?: string;
@@ -113,6 +119,9 @@ export interface AgentBriefingUpdate {
   title: string;
   type: string;
   message: string;
+  summary?: string;
+  category?: string;
+  published_at?: string;
   item?: WatchlistItem;
 }
 
@@ -122,6 +131,62 @@ export interface AgentBriefing {
   updates_count?: number;
   updates?: AgentBriefingUpdate[];
   personality_preset?: string;
+}
+
+export interface AgentLogEntry {
+  log_id: string;
+  event_type: string;
+  timestamp: string;
+  user_id: string;
+  session_id?: string | null;
+  model_requested?: string | null;
+  model_used?: string | null;
+  gemini_called: boolean;
+  fallback_used: boolean;
+  fallback_reason?: string | null;
+  selection_summary?: string;
+  sanitized_prompt?: string;
+  raw_model_response?: string;
+  final_response?: string;
+  request_duration_ms?: number;
+  selected_candidates?: any[];
+  excluded_candidates?: any[];
+  cooldowns_applied?: string[];
+  prompt_char_count?: number;
+  prompt_token_count?: number;
+  response_char_count?: number;
+  response_token_count?: number;
+  total_token_count?: number;
+  estimated_cost_usd?: number;
+  daily_cache_key?: string | null;
+  daily_cache_result?: string | null;
+  served_from?: string | null;
+  content_origin?: string | null;
+  result_source?: string | null;
+  user_timezone?: string | null;
+  configured_user_timezone?: string | null;
+  resolved_user_timezone?: string | null;
+  timezone_resolution_source?: string | null;
+  timezone_resolution_error?: string | null;
+  resolved_local_date?: string | null;
+  attempt_number?: number;
+  is_fallback_attempt?: boolean;
+  http_status?: number | null;
+  success?: boolean;
+  error_type?: string | null;
+  gemini_request_id?: string | null;
+}
+
+export interface AgentLogsResponse {
+  total: number;
+  limit: number;
+  logs: AgentLogEntry[];
+  summary: {
+    total_calls: number;
+    avg_duration_ms: number;
+    fallback_count: number;
+    success_rate_percent: number;
+  };
 }
 
 

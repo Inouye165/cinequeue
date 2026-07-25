@@ -1,12 +1,15 @@
 """SQLite-backed watchlist repository."""
 
 import json
+import logging
 import sqlite3
 from contextlib import contextmanager
 from typing import Any
 
 from app.config import DATA_DIR, DB_PATH
 from app.repository import DuplicateItemError, WatchlistRepository
+
+logger = logging.getLogger(__name__)
 
 
 class SqliteWatchlistRepository(WatchlistRepository):
@@ -165,6 +168,10 @@ class SqliteWatchlistRepository(WatchlistRepository):
                 conn.execute("ALTER TABLE agent_settings ADD COLUMN auto_speak_briefing INTEGER DEFAULT 0")
             except sqlite3.OperationalError:
                 pass
+            try:
+                conn.execute("ALTER TABLE agent_settings ADD COLUMN timezone TEXT DEFAULT 'America/Los_Angeles'")
+            except sqlite3.OperationalError:
+                pass
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS agent_conversations (
@@ -245,6 +252,17 @@ class SqliteWatchlistRepository(WatchlistRepository):
             )
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS daily_greetings (
+                    user_id TEXT NOT NULL,
+                    date_str TEXT NOT NULL,
+                    briefing_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (user_id, date_str)
+                )
+                """
+            )
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS rated_movies (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_id TEXT NOT NULL DEFAULT 'local_test_user',
@@ -261,6 +279,162 @@ class SqliteWatchlistRepository(WatchlistRepository):
                 """
             )
 
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS agent_decision_logs (
+                    log_id TEXT PRIMARY KEY,
+                    event_type TEXT NOT NULL DEFAULT 'startup_briefing_candidate_decision',
+                    timestamp TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    session_id TEXT,
+                    model_requested TEXT,
+                    model_used TEXT,
+                    gemini_called INTEGER DEFAULT 0,
+                    fallback_used INTEGER DEFAULT 0,
+                    fallback_reason TEXT,
+                    decision_config_version INTEGER DEFAULT 1,
+                    prompt_version INTEGER DEFAULT 1,
+                    required_candidates_json TEXT,
+                    optional_candidates_json TEXT,
+                    selected_candidates_json TEXT,
+                    excluded_candidates_json TEXT,
+                    random_rolls_json TEXT,
+                    cooldowns_applied_json TEXT,
+                    selection_summary TEXT,
+                    sanitized_prompt TEXT,
+                    raw_model_response TEXT,
+                    final_response TEXT,
+                    request_duration_ms REAL DEFAULT 0.0,
+                    daily_cache_key TEXT,
+                    attempt_number INTEGER,
+                    is_fallback_attempt INTEGER,
+                    http_status INTEGER,
+                    success INTEGER,
+                    error_type TEXT,
+                    gemini_request_id TEXT,
+                    model_attempted TEXT
+                )
+                """
+            )
+
+            existing_cols = {col[1] for col in conn.execute("PRAGMA table_info(agent_decision_logs)").fetchall()}
+            new_cols = [
+                ("daily_cache_key", "TEXT"),
+                ("attempt_number", "INTEGER"),
+                ("is_fallback_attempt", "INTEGER"),
+                ("http_status", "INTEGER"),
+                ("success", "INTEGER"),
+                ("error_type", "TEXT"),
+                ("gemini_request_id", "TEXT"),
+                ("model_attempted", "TEXT"),
+                ("telemetry_version", "INTEGER DEFAULT 1"),
+                ("briefing_run_id", "TEXT"),
+                ("request_id", "TEXT"),
+                ("started_at", "TEXT"),
+                ("completed_at", "TEXT"),
+                ("total_duration_ms", "REAL"),
+                ("force_refresh", "INTEGER"),
+                ("user_timezone", "TEXT"),
+                ("resolved_local_date", "TEXT"),
+                ("server_date", "TEXT"),
+                ("result_source", "TEXT"),
+                ("final_status", "TEXT"),
+                ("response_text_length", "INTEGER"),
+                ("daily_cache_result", "TEXT"),
+                ("daily_cache_backend", "TEXT"),
+                ("candidate_signature", "TEXT"),
+                ("gemini_attempt_count", "INTEGER"),
+                ("fallback_attempted", "INTEGER"),
+                ("fallback_trigger", "TEXT"),
+                ("final_model", "TEXT"),
+                ("external_attempt_counts_json", "TEXT"),
+                ("external_cache_hit_counts_json", "TEXT"),
+                ("timeline_json", "TEXT"),
+                ("served_from", "TEXT"),
+                ("content_origin", "TEXT"),
+                ("configured_user_timezone", "TEXT"),
+                ("resolved_user_timezone", "TEXT"),
+                ("timezone_resolution_source", "TEXT"),
+                ("timezone_resolution_error", "TEXT"),
+            ]
+            for col_name, col_type in new_cols:
+                if col_name not in existing_cols:
+                    try:
+                        conn.execute(f"ALTER TABLE agent_decision_logs ADD COLUMN {col_name} {col_type}")
+                    except sqlite3.OperationalError:
+                        pass
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS agent_decision_configs (
+                    version INTEGER PRIMARY KEY,
+                    updated_at TEXT NOT NULL,
+                    updated_by TEXT NOT NULL,
+                    change_note TEXT,
+                    config_json TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS agent_prompt_versions (
+                    version INTEGER PRIMARY KEY,
+                    updated_at TEXT NOT NULL,
+                    updated_by TEXT NOT NULL,
+                    change_note TEXT,
+                    prompt_json TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS trivia_facts (
+                    fact_id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    tmdb_id INTEGER,
+                    media_type TEXT DEFAULT 'movie',
+                    fact_text TEXT NOT NULL,
+                    source TEXT DEFAULT 'verified_archive',
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS trivia_presentation_history (
+                    user_id TEXT NOT NULL,
+                    fact_id TEXT NOT NULL,
+                    presented_at TEXT NOT NULL,
+                    PRIMARY KEY (user_id, fact_id)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS news_presentation_history (
+                    user_id TEXT NOT NULL,
+                    story_cluster_id TEXT NOT NULL,
+                    content_fingerprint TEXT NOT NULL,
+                    presented_at TEXT NOT NULL,
+                    PRIMARY KEY (user_id, story_cluster_id)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS entertainment_news (
+                    story_id TEXT PRIMARY KEY,
+                    story_cluster_id TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    news_category TEXT DEFAULT 'official_announcement',
+                    is_major INTEGER DEFAULT 1,
+                    is_rumor INTEGER DEFAULT 0,
+                    published_at TEXT NOT NULL,
+                    content_fingerprint TEXT NOT NULL
+                )
+                """
+            )
 
     @contextmanager
     def _connection(self):
@@ -557,6 +731,8 @@ class SqliteWatchlistRepository(WatchlistRepository):
                 "personality_preset": "cinephile",
                 "custom_prompt": "",
                 "location": "",
+                "timezone": "America/Los_Angeles",
+                "user_timezone": "America/Los_Angeles",
                 "notify_on_login": True,
                 "auto_add_mentioned": True,
                 "track_price_drops": True,
@@ -564,11 +740,14 @@ class SqliteWatchlistRepository(WatchlistRepository):
                 "updated_at": self.utc_now_iso(),
             }
         keys = row.keys()
+        tz = (row["timezone"] if ("timezone" in keys and row["timezone"] is not None) else (row["user_timezone"] if ("user_timezone" in keys and row["user_timezone"] is not None) else "America/Los_Angeles"))
         return {
             "user_id": row["user_id"],
             "personality_preset": row["personality_preset"],
             "custom_prompt": row["custom_prompt"] or "",
             "location": row["location"] if ("location" in keys and row["location"]) else "",
+            "timezone": tz,
+            "user_timezone": tz,
             "notify_on_login": bool(row["notify_on_login"]),
             "auto_add_mentioned": bool(row["auto_add_mentioned"]),
             "track_price_drops": bool(row["track_price_drops"]),
@@ -581,28 +760,34 @@ class SqliteWatchlistRepository(WatchlistRepository):
         preset = settings.get("personality_preset", "cinephile")
         custom_prompt = settings.get("custom_prompt", "")
         location = settings.get("location", "").strip()
+        if "timezone" in settings:
+            tz = (settings["timezone"] or "").strip()
+        elif "user_timezone" in settings:
+            tz = (settings["user_timezone"] or "").strip()
+        else:
+            tz = "America/Los_Angeles"
         notify_on_login = 1 if settings.get("notify_on_login", True) else 0
         auto_add_mentioned = 1 if settings.get("auto_add_mentioned", True) else 0
         track_price_drops = 1 if settings.get("track_price_drops", True) else 0
-
         auto_speak_briefing = 1 if settings.get("auto_speak_briefing", False) else 0
 
         with self._connection() as conn:
             conn.execute(
                 """
-                INSERT INTO agent_settings (user_id, personality_preset, custom_prompt, location, notify_on_login, auto_add_mentioned, track_price_drops, auto_speak_briefing, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO agent_settings (user_id, personality_preset, custom_prompt, location, timezone, notify_on_login, auto_add_mentioned, track_price_drops, auto_speak_briefing, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(user_id) DO UPDATE SET
                     personality_preset = excluded.personality_preset,
                     custom_prompt = excluded.custom_prompt,
                     location = excluded.location,
+                    timezone = excluded.timezone,
                     notify_on_login = excluded.notify_on_login,
                     auto_add_mentioned = excluded.auto_add_mentioned,
                     track_price_drops = excluded.track_price_drops,
                     auto_speak_briefing = excluded.auto_speak_briefing,
                     updated_at = excluded.updated_at
                 """,
-                (user_id, preset, custom_prompt, location, notify_on_login, auto_add_mentioned, track_price_drops, auto_speak_briefing, now),
+                (user_id, preset, custom_prompt, location, tz, notify_on_login, auto_add_mentioned, track_price_drops, auto_speak_briefing, now),
             )
         return self.get_agent_settings(user_id)
 
@@ -623,10 +808,12 @@ class SqliteWatchlistRepository(WatchlistRepository):
         with self._connection() as conn:
             rows = conn.execute(
                 """
-                SELECT * FROM agent_conversations
-                WHERE user_id = ?
-                ORDER BY created_at ASC
-                LIMIT ?
+                SELECT * FROM (
+                    SELECT * FROM agent_conversations
+                    WHERE user_id = ?
+                    ORDER BY id DESC
+                    LIMIT ?
+                ) ORDER BY id ASC
                 """,
                 (user_id, limit),
             ).fetchall()
@@ -835,6 +1022,91 @@ class SqliteWatchlistRepository(WatchlistRepository):
             )
         return briefing_data
 
+    def get_daily_greeting(self, user_id: str, date_str: str) -> dict[str, Any] | None:
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT briefing_json FROM daily_greetings WHERE user_id = ? AND date_str = ?",
+                (user_id, date_str),
+            ).fetchone()
+        if row and row["briefing_json"]:
+            try:
+                return json.loads(row["briefing_json"])
+            except Exception:
+                pass
+        return None
+
+    def claim_daily_greeting_generation(
+        self, user_id: str, date_str: str, lease_seconds: int = 30, force_refresh: bool = False
+    ) -> tuple[bool, dict[str, Any] | None]:
+        from datetime import datetime, timezone, timedelta
+        now_dt = datetime.now(timezone.utc)
+        now_iso = now_dt.isoformat()
+        lease_exp = (now_dt + timedelta(seconds=lease_seconds)).isoformat()
+
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT briefing_json FROM daily_greetings WHERE user_id = ? AND date_str = ?",
+                (user_id, date_str),
+            ).fetchone()
+
+            if row and row["briefing_json"] and not force_refresh:
+                try:
+                    data = json.loads(row["briefing_json"])
+                    status = data.get("status", "completed")
+                    exp_str = data.get("lease_expires_at")
+
+                    if status == "completed":
+                        return False, data
+
+                    if status == "generating" and exp_str:
+                        try:
+                            exp_dt = datetime.fromisoformat(exp_str)
+                            if exp_dt > now_dt:
+                                return False, data
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+            claiming_record = {
+                "user_id": user_id,
+                "date_str": date_str,
+                "status": "generating",
+                "lease_expires_at": lease_exp,
+                "created_at": now_iso,
+            }
+            claiming_json = json.dumps(claiming_record)
+
+            conn.execute(
+                """
+                INSERT INTO daily_greetings (user_id, date_str, briefing_json, created_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(user_id, date_str) DO UPDATE SET
+                    briefing_json = excluded.briefing_json,
+                    created_at = excluded.created_at
+                """,
+                (user_id, date_str, claiming_json, now_iso),
+            )
+
+        return True, None
+
+    def save_daily_greeting(self, user_id: str, date_str: str, briefing_data: dict[str, Any]) -> dict[str, Any]:
+        now = self.utc_now_iso()
+        briefing_data.setdefault("status", "completed")
+        briefing_json = json.dumps(briefing_data)
+        with self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO daily_greetings (user_id, date_str, briefing_json, created_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(user_id, date_str) DO UPDATE SET
+                    briefing_json = excluded.briefing_json,
+                    created_at = excluded.created_at
+                """,
+                (user_id, date_str, briefing_json, now),
+            )
+        return briefing_data
+
     def list_rated_movies(self, user_id: str) -> list[dict[str, Any]]:
         from app.models import poster_url
         from datetime import datetime, timezone
@@ -941,11 +1213,403 @@ class SqliteWatchlistRepository(WatchlistRepository):
                 "DELETE FROM rated_movies WHERE user_id = ? AND media_type = ? AND tmdb_id = ?",
                 (user_id, media_type, tmdb_id),
             )
-            # Reset user_rating in watchlist if present
-            conn.execute(
-                "UPDATE watchlist SET user_rating = 0 WHERE user_id = ? AND media_type = ? AND tmdb_id = ?",
+            row = conn.execute(
+                "SELECT * FROM watchlist WHERE user_id = ? AND media_type = ? AND tmdb_id = ?",
                 (user_id, media_type, tmdb_id),
+            ).fetchone()
+            if row:
+                if not bool(row["is_owned"]) and (row["status"] == "watched" or not row["status"]):
+                    conn.execute(
+                        "DELETE FROM watchlist WHERE user_id = ? AND media_type = ? AND tmdb_id = ?",
+                        (user_id, media_type, tmdb_id),
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE watchlist SET user_rating = 0 WHERE user_id = ? AND media_type = ? AND tmdb_id = ?",
+                        (user_id, media_type, tmdb_id),
+                    )
+            return cursor.rowcount > 0 or (row is not None)
+
+    # -- Decision Engine Repository Extensions --------------------------------
+
+    def add_decision_log(self, log_dict: dict[str, Any]) -> dict[str, Any]:
+        from app.decision_models import scrub_secrets
+        clean_dict = scrub_secrets(log_dict)
+        try:
+            with self._connection() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO agent_decision_logs (
+                        log_id, event_type, timestamp, user_id, session_id,
+                        model_requested, model_used, gemini_called, fallback_used, fallback_reason,
+                        decision_config_version, prompt_version, required_candidates_json,
+                        optional_candidates_json, selected_candidates_json, excluded_candidates_json,
+                        random_rolls_json, cooldowns_applied_json, selection_summary,
+                        sanitized_prompt, raw_model_response, final_response, request_duration_ms,
+                        daily_cache_key, attempt_number, is_fallback_attempt, http_status,
+                        success, error_type, gemini_request_id, model_attempted,
+                        telemetry_version, briefing_run_id, request_id, started_at, completed_at,
+                        total_duration_ms, force_refresh, user_timezone, resolved_local_date,
+                        server_date, result_source, final_status, response_text_length,
+                        daily_cache_result, daily_cache_backend, candidate_signature,
+                        gemini_attempt_count, fallback_attempted, fallback_trigger, final_model,
+                        external_attempt_counts_json, external_cache_hit_counts_json, timeline_json,
+                        served_from, content_origin, configured_user_timezone, resolved_user_timezone,
+                        timezone_resolution_source, timezone_resolution_error
+                    ) VALUES (
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    )
+                    """,
+                    (
+                        clean_dict["log_id"],
+                        clean_dict.get("event_type", "startup_briefing_candidate_decision"),
+                        clean_dict["timestamp"],
+                        clean_dict["user_id"],
+                        clean_dict.get("session_id"),
+                        clean_dict.get("model_requested"),
+                        clean_dict.get("model_used"),
+                        1 if clean_dict.get("gemini_called") is True else 0,
+                        1 if clean_dict.get("fallback_used", False) else 0,
+                        clean_dict.get("fallback_reason"),
+                        clean_dict.get("decision_config_version", 1),
+                        clean_dict.get("prompt_version", 1),
+                        json.dumps(clean_dict.get("required_candidates", [])),
+                        json.dumps(clean_dict.get("optional_candidates", [])),
+                        json.dumps(clean_dict.get("selected_candidates", [])),
+                        json.dumps(clean_dict.get("excluded_candidates", [])),
+                        json.dumps(clean_dict.get("random_rolls", {})),
+                        json.dumps(clean_dict.get("cooldowns_applied", [])),
+                        clean_dict.get("selection_summary", ""),
+                        clean_dict.get("sanitized_prompt", ""),
+                        clean_dict.get("raw_model_response", ""),
+                        clean_dict.get("final_response", ""),
+                        clean_dict.get("request_duration_ms", 0.0),
+                        clean_dict.get("daily_cache_key"),
+                        clean_dict.get("attempt_number"),
+                        1 if clean_dict.get("is_fallback_attempt") is True else (0 if clean_dict.get("is_fallback_attempt") is False else None),
+                        clean_dict.get("http_status"),
+                        1 if clean_dict.get("success") is True else (0 if clean_dict.get("success") is False else None),
+                        clean_dict.get("error_type"),
+                        clean_dict.get("gemini_request_id"),
+                        clean_dict.get("model_attempted"),
+                        clean_dict.get("telemetry_version", 2),
+                        clean_dict.get("briefing_run_id"),
+                        clean_dict.get("request_id"),
+                        clean_dict.get("started_at"),
+                        clean_dict.get("completed_at"),
+                        clean_dict.get("total_duration_ms"),
+                        1 if clean_dict.get("force_refresh") is True else 0,
+                        clean_dict.get("resolved_user_timezone") or clean_dict.get("user_timezone", "America/Los_Angeles"),
+                        clean_dict.get("resolved_local_date"),
+                        clean_dict.get("server_date"),
+                        clean_dict.get("result_source"),
+                        clean_dict.get("final_status"),
+                        clean_dict.get("response_text_length", 0),
+                        clean_dict.get("daily_cache_result"),
+                        clean_dict.get("daily_cache_backend", "sqlite"),
+                        clean_dict.get("candidate_signature"),
+                        clean_dict.get("gemini_attempt_count", 0),
+                        1 if clean_dict.get("fallback_attempted") is True else 0,
+                        clean_dict.get("fallback_trigger"),
+                        clean_dict.get("final_model"),
+                        json.dumps(clean_dict.get("external_attempt_counts", {})),
+                        json.dumps(clean_dict.get("external_cache_hit_counts", {})),
+                        json.dumps(clean_dict.get("timeline", [])),
+                        clean_dict.get("served_from"),
+                        clean_dict.get("content_origin"),
+                        clean_dict.get("configured_user_timezone"),
+                        clean_dict.get("resolved_user_timezone") or clean_dict.get("user_timezone", "America/Los_Angeles"),
+                        clean_dict.get("timezone_resolution_source"),
+                        clean_dict.get("timezone_resolution_error"),
+                    ),
+                )
+        except Exception as e:
+            logger.warning(f"Failed to persist decision log '{clean_dict.get('log_id')}': {e}")
+        return clean_dict
+
+    def list_decision_logs(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        user_id: str | None = None,
+        candidate_type: str | None = None,
+        required_only: bool | None = None,
+        fallback_only: bool | None = None,
+        model: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ) -> dict[str, Any]:
+        conditions = []
+        params = []
+
+        if user_id:
+            conditions.append("user_id = ?")
+            params.append(user_id)
+
+        if fallback_only:
+            conditions.append("fallback_used = 1")
+
+        if model:
+            conditions.append("(model_requested = ? OR model_used = ?)")
+            params.extend([model, model])
+
+        if start_date:
+            conditions.append("timestamp >= ?")
+            params.append(start_date)
+
+        if end_date:
+            conditions.append("timestamp <= ?")
+            params.append(end_date)
+
+        if candidate_type:
+            conditions.append("(selected_candidates_json LIKE ? OR optional_candidates_json LIKE ? OR required_candidates_json LIKE ?)")
+            pat = f"%{candidate_type}%"
+            params.extend([pat, pat, pat])
+
+        where_clause = " WHERE " + " AND ".join(conditions) if conditions else ""
+
+        with self._connection() as conn:
+            total = conn.execute(f"SELECT COUNT(*) FROM agent_decision_logs{where_clause}", params).fetchone()[0]
+            query = f"SELECT * FROM agent_decision_logs{where_clause} ORDER BY timestamp DESC LIMIT ? OFFSET ?"
+            rows = conn.execute(query, params + [limit, offset]).fetchall()
+
+        logs = [self._format_decision_log_row(dict(r)) for r in rows]
+        return {"total": total, "logs": logs, "limit": limit, "offset": offset}
+
+    def _format_decision_log_row(self, d: dict[str, Any]) -> dict[str, Any]:
+        d["gemini_called"] = bool(d.get("gemini_called"))
+        d["fallback_used"] = bool(d.get("fallback_used"))
+        d["is_fallback_attempt"] = bool(d.get("is_fallback_attempt")) if d.get("is_fallback_attempt") is not None else None
+        d["success"] = bool(d.get("success")) if d.get("success") is not None else None
+        d["force_refresh"] = bool(d.get("force_refresh"))
+        d["fallback_attempted"] = bool(d.get("fallback_attempted"))
+
+        for json_col, default in [
+            ("required_candidates_json", []),
+            ("optional_candidates_json", []),
+            ("selected_candidates_json", []),
+            ("excluded_candidates_json", []),
+            ("random_rolls_json", {}),
+            ("cooldowns_applied_json", []),
+            ("external_attempt_counts_json", {}),
+            ("external_cache_hit_counts_json", {}),
+            ("timeline_json", []),
+        ]:
+            key = json_col.replace("_json", "")
+            raw_val = d.get(json_col)
+            if raw_val:
+                try:
+                    d[key] = json.loads(raw_val)
+                except Exception:
+                    d[key] = default
+            else:
+                if key not in d or d[key] is None:
+                    d[key] = default
+
+        t_ver = d.get("telemetry_version")
+        if t_ver != 2 or d.get("event_type") == "startup_briefing_decision":
+            d["is_legacy"] = True
+            summary = d.get("selection_summary", "")
+            if "Legacy Candidate Decision — Gemini Call Unverified" not in summary:
+                d["selection_summary"] = f"Legacy Candidate Decision — Gemini Call Unverified: {summary}".strip(": ")
+        else:
+            d["is_legacy"] = False
+
+        return d
+
+    def get_decision_log(self, log_id: str) -> dict[str, Any] | None:
+        with self._connection() as conn:
+            row = conn.execute("SELECT * FROM agent_decision_logs WHERE log_id = ?", (log_id,)).fetchone()
+        if not row:
+            return None
+        return self._format_decision_log_row(dict(row))
+
+    def get_active_decision_config(self) -> dict[str, Any]:
+        with self._connection() as conn:
+            row = conn.execute("SELECT config_json FROM agent_decision_configs ORDER BY version DESC LIMIT 1").fetchone()
+        if row and row["config_json"]:
+            try:
+                return json.loads(row["config_json"])
+            except Exception:
+                pass
+        from app.decision_models import DEFAULT_DECISION_CONFIG
+        return DEFAULT_DECISION_CONFIG.to_dict()
+
+    def save_decision_config(self, config_dict: dict[str, Any], updated_by: str, change_note: str) -> dict[str, Any]:
+        with self._connection() as conn:
+            max_row = conn.execute("SELECT MAX(version) FROM agent_decision_configs").fetchone()
+            new_ver = (max_row[0] or 0) + 1 if max_row else 1
+            config_dict["version"] = new_ver
+            config_dict["updated_at"] = self.utc_now_iso()
+            config_dict["updated_by"] = updated_by
+            config_dict["change_note"] = change_note
+
+            conn.execute(
+                """
+                INSERT INTO agent_decision_configs (version, updated_at, updated_by, change_note, config_json)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (new_ver, config_dict["updated_at"], updated_by, change_note, json.dumps(config_dict)),
             )
-            return cursor.rowcount > 0
+        return config_dict
+
+    def get_active_prompt_version(self) -> dict[str, Any]:
+        with self._connection() as conn:
+            row = conn.execute("SELECT prompt_json FROM agent_prompt_versions ORDER BY version DESC LIMIT 1").fetchone()
+        if row and row["prompt_json"]:
+            try:
+                return json.loads(row["prompt_json"])
+            except Exception:
+                pass
+        from app.decision_models import DEFAULT_PROMPT_VERSION
+        return DEFAULT_PROMPT_VERSION.to_dict()
+
+    def list_prompt_versions(self) -> list[dict[str, Any]]:
+        with self._connection() as conn:
+            rows = conn.execute("SELECT prompt_json FROM agent_prompt_versions ORDER BY version DESC").fetchall()
+        results = []
+        for r in rows:
+            if r["prompt_json"]:
+                try:
+                    results.append(json.loads(r["prompt_json"]))
+                except Exception:
+                    pass
+        if not results:
+            from app.decision_models import DEFAULT_PROMPT_VERSION
+            results = [DEFAULT_PROMPT_VERSION.to_dict()]
+        return results
+
+    def save_prompt_version(self, prompt_dict: dict[str, Any], updated_by: str, change_note: str) -> dict[str, Any]:
+        with self._connection() as conn:
+            max_row = conn.execute("SELECT MAX(version) FROM agent_prompt_versions").fetchone()
+            new_ver = (max_row[0] or 0) + 1 if max_row else 1
+            prompt_dict["version"] = new_ver
+            prompt_dict["updated_at"] = self.utc_now_iso()
+            prompt_dict["updated_by"] = updated_by
+            prompt_dict["change_note"] = change_note
+
+            conn.execute(
+                """
+                INSERT INTO agent_prompt_versions (version, updated_at, updated_by, change_note, prompt_json)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (new_ver, prompt_dict["updated_at"], updated_by, change_note, json.dumps(prompt_dict)),
+            )
+        return prompt_dict
+
+    def is_trivia_presented(self, user_id: str, fact_id: str) -> bool:
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM trivia_presentation_history WHERE user_id = ? AND fact_id = ?",
+                (user_id, fact_id),
+            ).fetchone()
+        return bool(row)
+
+    def record_trivia_presentation(self, user_id: str, fact_id: str) -> None:
+        now = self.utc_now_iso()
+        with self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO trivia_presentation_history (user_id, fact_id, presented_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(user_id, fact_id) DO UPDATE SET presented_at = excluded.presented_at
+                """,
+                (user_id, fact_id, now),
+            )
+
+    def get_news_presentation(self, user_id: str, story_cluster_id: str) -> dict[str, Any] | None:
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM news_presentation_history WHERE user_id = ? AND story_cluster_id = ?",
+                (user_id, story_cluster_id),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def record_news_presentation(self, user_id: str, story_cluster_id: str, content_fingerprint: str) -> None:
+        now = self.utc_now_iso()
+        with self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO news_presentation_history (user_id, story_cluster_id, content_fingerprint, presented_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(user_id, story_cluster_id) DO UPDATE SET
+                    content_fingerprint = excluded.content_fingerprint,
+                    presented_at = excluded.presented_at
+                """,
+                (user_id, story_cluster_id, content_fingerprint, now),
+            )
+
+    def list_verified_trivia(self, title: str | None = None, tmdb_id: int | None = None) -> list[dict[str, Any]]:
+        with self._connection() as conn:
+            if tmdb_id:
+                rows = conn.execute("SELECT * FROM trivia_facts WHERE tmdb_id = ?", (tmdb_id,)).fetchall()
+            elif title:
+                rows = conn.execute("SELECT * FROM trivia_facts WHERE LOWER(title) LIKE ?", (f"%{title.lower()}%",)).fetchall()
+            else:
+                rows = conn.execute("SELECT * FROM trivia_facts LIMIT 50").fetchall()
+        return [dict(r) for r in rows]
+
+    def add_verified_trivia(self, fact_dict: dict[str, Any]) -> dict[str, Any]:
+        now = self.utc_now_iso()
+        fact_id = fact_dict.get("fact_id") or f"trivia:{fact_dict.get('tmdb_id', 'gen')}:{hash(fact_dict.get('fact_text'))}"
+        with self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO trivia_facts (fact_id, title, tmdb_id, media_type, fact_text, source, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(fact_id) DO UPDATE SET fact_text = excluded.fact_text
+                """,
+                (
+                    fact_id,
+                    fact_dict["title"],
+                    fact_dict.get("tmdb_id"),
+                    fact_dict.get("media_type", "movie"),
+                    fact_dict["fact_text"],
+                    fact_dict.get("source", "verified_archive"),
+                    now,
+                ),
+            )
+        fact_dict["fact_id"] = fact_id
+        return fact_dict
+
+    def list_major_news(self) -> list[dict[str, Any]]:
+        with self._connection() as conn:
+            rows = conn.execute("SELECT * FROM entertainment_news WHERE is_major = 1 ORDER BY published_at DESC LIMIT 20").fetchall()
+        return [dict(r) for r in rows]
+
+    def add_major_news(self, news_dict: dict[str, Any]) -> dict[str, Any]:
+        now = self.utc_now_iso()
+        story_id = news_dict.get("story_id") or f"news:{news_dict.get('story_cluster_id', 'c')}:{hash(news_dict.get('title'))}"
+        with self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO entertainment_news (
+                    story_id, story_cluster_id, title, summary, source,
+                    news_category, is_major, is_rumor, published_at, content_fingerprint
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(story_id) DO UPDATE SET
+                    summary = excluded.summary,
+                    content_fingerprint = excluded.content_fingerprint
+                """,
+                (
+                    story_id,
+                    news_dict["story_cluster_id"],
+                    news_dict["title"],
+                    news_dict["summary"],
+                    news_dict.get("source", "verified_media"),
+                    news_dict.get("news_category", "official_announcement"),
+                    1 if news_dict.get("is_major", True) else 0,
+                    1 if news_dict.get("is_rumor", False) else 0,
+                    news_dict.get("published_at", now),
+                    news_dict.get("content_fingerprint", news_dict["title"]),
+                ),
+            )
+        news_dict["story_id"] = story_id
+        return news_dict
 
 

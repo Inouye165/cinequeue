@@ -1,14 +1,15 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import { StarRating } from "./StarRating";
-import type { AgentSettings, ChatMessage, PersonalityPreset, RatedMovie } from "../types";
+import { ActionConfirmationModal, type PendingActionItem } from "./ActionConfirmationModal";
+import type { AgentLogsResponse, AgentSettings, ChatMessage, PersonalityPreset, RatedMovie } from "../types";
 
 
 interface AgentModalProps {
   isOpen: boolean;
   onClose: () => void;
   onWatchlistUpdated?: () => void;
-  initialTab?: "chat" | "settings";
+  initialTab?: "chat" | "settings" | "logs";
 }
 
 const PRESETS: { id: PersonalityPreset; name: string; icon: string; desc: string }[] = [
@@ -29,12 +30,28 @@ const SUGGESTIONS = [
 
 
 export function AgentModal({ isOpen, onClose, onWatchlistUpdated, initialTab = "chat" }: AgentModalProps) {
-  const [activeTab, setActiveTab] = useState<"chat" | "settings">(initialTab);
+  const [activeTab, setActiveTab] = useState<"chat" | "settings" | "logs">(initialTab);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputMessage, setInputMessage] = useState("");
   const [loadingChat, setLoadingChat] = useState(false);
   const [sending, setSending] = useState(false);
   const [quizRatings, setQuizRatings] = useState<Record<number, number>>({});
+  const [logsData, setLogsData] = useState<AgentLogsResponse | null>(null);
+  const [loadingLogs, setLoadingLogs] = useState(false);
+
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+
+  const copyToClipboard = (text: string, id: string) => {
+    void navigator.clipboard.writeText(text);
+    setCopiedId(id);
+    setTimeout(() => setCopiedId(null), 2000);
+  };
+
+  const copyAllLogsJSON = () => {
+    if (!logsData) return;
+    const fullJSON = JSON.stringify(logsData.logs, null, 2);
+    copyToClipboard(fullJSON, "all-logs");
+  };
 
   const handleRateQuizMovie = async (movie: RatedMovie, rating: number) => {
     setQuizRatings((prev) => ({ ...prev, [movie.tmdb_id]: rating }));
@@ -76,8 +93,29 @@ export function AgentModal({ isOpen, onClose, onWatchlistUpdated, initialTab = "
       setActiveTab(initialTab);
       void loadChatHistory();
       void loadSettings();
+      if (initialTab === "logs") {
+        void loadLogs();
+      }
     }
   }, [isOpen, initialTab]);
+
+  useEffect(() => {
+    if (isOpen && activeTab === "logs") {
+      void loadLogs();
+    }
+  }, [isOpen, activeTab]);
+
+  const loadLogs = async () => {
+    setLoadingLogs(true);
+    try {
+      const data = await api.getAgentLogs(50);
+      setLogsData(data);
+    } catch (err) {
+      console.error("Failed to load agent telemetry logs:", err);
+    } finally {
+      setLoadingLogs(false);
+    }
+  };
 
   useEffect(() => {
     if (activeTab === "chat") {
@@ -106,6 +144,38 @@ export function AgentModal({ isOpen, onClose, onWatchlistUpdated, initialTab = "
     }
   };
 
+  const [showConfirmModal, setShowConfirmModal] = useState(false);
+  const [pendingConfirmItems, setPendingConfirmItems] = useState<PendingActionItem[]>([]);
+
+  const handleConfirmBatchActions = async (confirmedItems: PendingActionItem[]) => {
+    for (const item of confirmedItems) {
+      if (item.action_type === "rate_movie") {
+        let posterPath = item.poster_path;
+        if (posterPath) {
+          posterPath = posterPath.replace(/^https?:\/\/image\.tmdb\.org\/t\/p\/w\d+/, "");
+        }
+        await api.rateMovie({
+          media_type: item.media_type,
+          tmdb_id: item.tmdb_id ?? 0,
+          title: item.title,
+          rating: item.rating,
+          poster_path: posterPath ?? undefined,
+          release_date: item.release_date ?? undefined,
+        });
+      } else {
+        await api.addToWatchlist({
+          media_type: item.media_type,
+          tmdb_id: item.tmdb_id ?? 0,
+          title: item.title,
+          status: "queue",
+          poster_path: item.poster_path,
+          release_date: item.release_date,
+        });
+      }
+    }
+    onWatchlistUpdated?.();
+  };
+
   const handleSendMessage = async (textToSend?: string) => {
     const text = (textToSend || inputMessage).trim();
     if (!text || sending) return;
@@ -126,6 +196,24 @@ export function AgentModal({ isOpen, onClose, onWatchlistUpdated, initialTab = "
       const res = await api.sendAgentChatMessage(text);
       setMessages((prev) => [...prev, res.message]);
       if (res.actions_taken && res.actions_taken.length > 0) {
+        const proposed: PendingActionItem[] = res.actions_taken
+          .filter((a: any) => a.action === "rate_movie" || a.action === "add_monitoring")
+          .map((a: any, idx: number) => ({
+            id: `act_${Date.now()}_${idx}`,
+            tmdb_id: a.tmdb_id,
+            media_type: a.media_type || "movie",
+            title: a.title,
+            poster_path: a.poster_path,
+            release_date: a.release_date,
+            rating: a.rating || 5,
+            action_type: a.action,
+            checked: true,
+          }));
+
+        if (proposed.length > 0) {
+          setPendingConfirmItems(proposed);
+          setShowConfirmModal(true);
+        }
         onWatchlistUpdated?.();
       }
     } catch (err) {
@@ -201,6 +289,12 @@ export function AgentModal({ isOpen, onClose, onWatchlistUpdated, initialTab = "
             onClick={() => setActiveTab("settings")}
           >
             ⚙️ Personality & Settings
+          </button>
+          <button
+            className={`agent-tab-btn ${activeTab === "logs" ? "active" : ""}`}
+            onClick={() => setActiveTab("logs")}
+          >
+            📊 AI Usage & Telemetry Logs
           </button>
         </div>
 
@@ -300,10 +394,96 @@ export function AgentModal({ isOpen, onClose, onWatchlistUpdated, initialTab = "
                                     </div>
                                   );
                                 }
+                                if (act.action === "rate_movie") {
+                                  return (
+                                    <div key={aIdx} className="recommendation-card" style={{ background: "rgba(0, 0, 0, 0.4)", borderRadius: "8px", padding: "12px", border: "1px solid rgba(255, 184, 0, 0.5)", display: "flex", gap: "12px", alignItems: "center" }}>
+                                      {act.poster_url ? (
+                                        <img src={act.poster_url} alt={act.title || "Movie"} style={{ width: "50px", height: "75px", objectFit: "cover", borderRadius: "4px" }} />
+                                      ) : null}
+                                      <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: "4px" }}>
+                                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                                          <span style={{ fontWeight: 700, fontSize: "0.95rem", color: "#fff" }}>⭐️ {act.title}</span>
+                                          <span style={{ fontSize: "0.75rem", background: "rgba(255, 184, 0, 0.2)", color: "#FFB800", padding: "2px 8px", borderRadius: "4px" }}>Rated & Watched</span>
+                                        </div>
+                                        {act.release_date ? <span style={{ fontSize: "0.75rem", color: "rgba(255, 255, 255, 0.5)" }}>{act.release_date.slice(0, 4)}</span> : null}
+                                        <div style={{ display: "flex", alignItems: "center", gap: "8px", marginTop: "2px" }}>
+                                          <StarRating rating={act.rating || 5} onRate={() => {}} size="sm" />
+                                          <span style={{ fontSize: "0.85rem", color: "#FFB800", fontWeight: 600 }}>{act.rating || 5}/5 stars</span>
+                                        </div>
+                                      </div>
+                                    </div>
+                                  );
+                                }
+                                if (act.action === "movie_search" && act.results) {
+                                  return (
+                                    <div key={aIdx} className="quiz-container-card" style={{ background: "rgba(0, 0, 0, 0.4)", borderRadius: "8px", padding: "12px", border: "1px solid rgba(0, 229, 255, 0.4)" }}>
+                                      <h4 style={{ margin: "0 0 10px 0", color: "#00E5FF", fontSize: "0.95rem", display: "flex", alignItems: "center", gap: "6px" }}>
+                                        <span>🔍</span> Search Results for "{act.query}"
+                                      </h4>
+                                      <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+                                        {act.results.map((r) => (
+                                          <div key={r.tmdb_id} style={{ display: "flex", alignItems: "center", gap: "10px", background: "rgba(255, 255, 255, 0.05)", padding: "8px", borderRadius: "6px" }}>
+                                            {r.poster_url ? (
+                                              <img src={r.poster_url} alt={r.title} style={{ width: "40px", height: "60px", objectFit: "cover", borderRadius: "4px" }} />
+                                            ) : (
+                                              <div style={{ width: "40px", height: "60px", background: "#333", borderRadius: "4px", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "10px", textAlign: "center" }}>{r.title}</div>
+                                            )}
+                                            <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: "2px" }}>
+                                              <span style={{ fontWeight: 600, fontSize: "0.9rem", color: "#fff" }}>{r.title}</span>
+                                              {r.release_date ? <span style={{ fontSize: "0.75rem", color: "rgba(255, 255, 255, 0.5)" }}>{r.release_date.slice(0, 4)}</span> : null}
+                                              <div style={{ display: "flex", gap: "6px", marginTop: "4px" }}>
+                                                <button
+                                                  type="button"
+                                                  style={{ padding: "3px 8px", fontSize: "0.7rem", borderRadius: "4px", background: "#FFB800", color: "#000", border: "none", cursor: "pointer", fontWeight: 600 }}
+                                                  onClick={async () => {
+                                                    await api.rateMovie({
+                                                      media_type: r.media_type || "movie",
+                                                      tmdb_id: r.tmdb_id,
+                                                      title: r.title,
+                                                      rating: 5,
+                                                      poster_path: r.poster_path,
+                                                      release_date: r.release_date,
+                                                    });
+                                                    onWatchlistUpdated?.();
+                                                  }}
+                                                >
+                                                  ⭐️ Rate 5★
+                                                </button>
+                                                <button
+                                                  type="button"
+                                                  style={{ padding: "3px 8px", fontSize: "0.7rem", borderRadius: "4px", background: "rgba(255, 255, 255, 0.15)", color: "#fff", border: "none", cursor: "pointer", fontWeight: 600 }}
+                                                  onClick={async () => {
+                                                    await api.addToWatchlist({
+                                                      media_type: r.media_type || "movie",
+                                                      tmdb_id: r.tmdb_id,
+                                                      title: r.title,
+                                                      status: "queue",
+                                                      poster_path: r.poster_path || undefined,
+                                                      release_date: r.release_date || undefined,
+                                                    });
+                                                    onWatchlistUpdated?.();
+                                                  }}
+                                                >
+                                                  ➕ Add to Queue
+                                                </button>
+                                              </div>
+                                            </div>
+                                          </div>
+                                        ))}
+                                      </div>
+                                    </div>
+                                  );
+                                }
                                 return (
                                   <div key={aIdx} className="chat-action-tag">
                                     {act.action === "add_monitoring" || act.action === "update_monitoring"
                                       ? `🎯 Added "${act.title}" to Monitoring`
+                                      : act.action === "update_status"
+                                      ? `📌 Updated status of "${act.title}" to ${act.status || "updated"}`
+                                      : act.action === "delete_rating"
+                                      ? `🗑️ Deleted rating for "${act.title}"`
+                                      : act.action === "remove_item"
+                                      ? `🗑️ Removed "${act.title}" from Queue`
                                       : `💲 Rental Target set to $${act.target_rental_price?.toFixed(2)}`}
                                   </div>
                                 );
@@ -382,7 +562,7 @@ export function AgentModal({ isOpen, onClose, onWatchlistUpdated, initialTab = "
                 </form>
               </div>
             </div>
-          ) : (
+          ) : activeTab === "settings" ? (
             <div className="agent-settings-view">
               <h4>Choose AI Personality</h4>
               <p className="settings-desc">Select how your agent talks and interacts with you across Cinequeue.</p>
@@ -491,9 +671,170 @@ export function AgentModal({ isOpen, onClose, onWatchlistUpdated, initialTab = "
                 </button>
               </div>
             </div>
-          )}
+          ) : activeTab === "logs" ? (
+            <div className="agent-logs-view">
+              {/* Summary statistics grid */}
+              <div className="logs-summary-grid">
+                <div className="logs-summary-card">
+                  <div className="card-top-row">
+                    <span className="label">Total Calls</span>
+                    <span className="card-badge info">API</span>
+                  </div>
+                  <span className="value">{logsData?.summary?.total_calls ?? 0}</span>
+                </div>
+                <div className="logs-summary-card">
+                  <div className="card-top-row">
+                    <span className="label">Avg Latency</span>
+                    <span className="card-badge speed">Fast</span>
+                  </div>
+                  <span className="value">{logsData?.summary?.avg_duration_ms ?? 0} ms</span>
+                </div>
+                <div className="logs-summary-card">
+                  <div className="card-top-row">
+                    <span className="label">Success Rate</span>
+                    <span className="card-badge success">100%</span>
+                  </div>
+                  <span className="value">{logsData?.summary?.success_rate_percent ?? 100}%</span>
+                </div>
+                <div className="logs-summary-card">
+                  <div className="card-top-row">
+                    <span className="label">Fallbacks</span>
+                    <span className={`card-badge ${(logsData?.summary?.fallback_count || 0) > 0 ? "warning" : "healthy"}`}>
+                      {(logsData?.summary?.fallback_count || 0) > 0 ? "Alert" : "Healthy"}
+                    </span>
+                  </div>
+                  <span className="value" style={{ color: (logsData?.summary?.fallback_count || 0) > 0 ? "var(--danger)" : "#4285f4" }}>
+                    {logsData?.summary?.fallback_count ?? 0}
+                  </span>
+                </div>
+              </div>
+
+              <div className="logs-header-bar">
+                <div className="logs-header-title">
+                  <span className="g-icon">⚙️</span>
+                  <h4>AI Developer Telemetry & Debug Logs</h4>
+                </div>
+                <div className="logs-header-actions">
+                  <button
+                    className="copy-btn secondary-btn"
+                    onClick={copyAllLogsJSON}
+                    disabled={!logsData || logsData.logs.length === 0}
+                    title="Copy all telemetry logs as formatted JSON to clipboard"
+                  >
+                    {copiedId === "all-logs" ? "✓ All Logs Copied!" : "📋 Copy All Logs"}
+                  </button>
+                  <button
+                    className="save-settings-btn"
+                    style={{ padding: "6px 12px", fontSize: "0.82rem" }}
+                    onClick={() => void loadLogs()}
+                    disabled={loadingLogs}
+                  >
+                    {loadingLogs ? "Refreshing…" : "🔄 Refresh"}
+                  </button>
+                </div>
+              </div>
+
+              {loadingLogs && !logsData ? (
+                <div className="agent-loading">Fetching AI telemetry logs…</div>
+              ) : !logsData || logsData.logs.length === 0 ? (
+                <div className="agent-empty-chat">
+                  <p className="empty-title">📋 No AI Telemetry Logs Found</p>
+                  <p>Interact with the AI Agent in chat or trigger a briefing to generate usage logs!</p>
+                </div>
+              ) : (
+                <div className="logs-list">
+                  {logsData.logs.map((log) => {
+                    const isCopied = copiedId === log.log_id;
+                    const promptCopied = copiedId === `prompt-${log.log_id}`;
+                    const respCopied = copiedId === `resp-${log.log_id}`;
+
+                    return (
+                      <div key={log.log_id} className="log-entry-card">
+                        <div className="log-entry-header">
+                          <div className="header-chips">
+                            <span className={`status-pill ${!log.gemini_called ? "local" : (log.fallback_used ? "fallback" : (log.event_type && log.event_type.includes("failed") ? "failed" : "success"))}`}>
+                              {!log.gemini_called ? "🧠 Local Event" : (log.fallback_used ? "⚠️ Fallback" : (log.event_type && log.event_type.includes("failed") ? "❌ Error" : "⚡ 200 OK"))}
+                            </span>
+                            <span className="chip event-chip">{log.event_type}</span>
+                            <span className="chip model-chip">{log.gemini_called ? (log.model_used || log.model_requested || "gemini-3.6-flash") : (log.daily_cache_key ? `Cache Key: ${log.daily_cache_key}` : "N/A (Local)")}</span>
+                            <span className="chip latency-chip">
+                              {log.request_duration_ms != null ? `${log.request_duration_ms} ms` : "N/A"}
+                            </span>
+                          </div>
+
+                          <div className="header-right">
+                            <span className="timestamp-text">
+                              {new Date(log.timestamp).toLocaleString()}
+                            </span>
+                            <button
+                              className="icon-copy-btn"
+                              onClick={() => copyToClipboard(JSON.stringify(log, null, 2), log.log_id)}
+                              title="Copy log entry JSON"
+                            >
+                              {isCopied ? "✓ Copied" : "📋 Copy Log"}
+                            </button>
+                          </div>
+                        </div>
+
+                        {log.selection_summary ? (
+                          <div className="log-entry-summary">
+                            <div className="summary-label">Selection Summary / Telemetry:</div>
+                            <div className="summary-content">{log.selection_summary}</div>
+                          </div>
+                        ) : null}
+
+                        {log.sanitized_prompt ? (
+                          <details className="payload-inspector">
+                            <summary className="inspector-summary">
+                              <span>🔍 View Prompt & Response Payload</span>
+                              <span className="expand-icon">▶</span>
+                            </summary>
+                            <div className="inspector-content">
+                              <div className="payload-block">
+                                <div className="block-header">
+                                  <span>Prompt Sent to Gemini</span>
+                                  <button
+                                    className="mini-copy-btn"
+                                    onClick={() => copyToClipboard(log.sanitized_prompt || "", `prompt-${log.log_id}`)}
+                                  >
+                                    {promptCopied ? "✓ Copied!" : "📋 Copy Prompt"}
+                                  </button>
+                                </div>
+                                <pre className="code-box">{log.sanitized_prompt}</pre>
+                              </div>
+
+                              {log.final_response ? (
+                                <div className="payload-block">
+                                  <div className="block-header">
+                                    <span>Model Response Output</span>
+                                    <button
+                                      className="mini-copy-btn"
+                                      onClick={() => copyToClipboard(log.final_response || "", `resp-${log.log_id}`)}
+                                    >
+                                      {respCopied ? "✓ Copied!" : "📋 Copy Response"}
+                                    </button>
+                                  </div>
+                                  <pre className="code-box response-box">{log.final_response}</pre>
+                                </div>
+                              ) : null}
+                            </div>
+                          </details>
+                        ) : null}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          ) : null}
         </div>
       </div>
+      <ActionConfirmationModal
+        isOpen={showConfirmModal}
+        onClose={() => setShowConfirmModal(false)}
+        proposedItems={pendingConfirmItems}
+        onConfirm={handleConfirmBatchActions}
+      />
     </div>
   );
 }

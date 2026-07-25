@@ -1,12 +1,21 @@
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 import json
 import logging
 import re
+import time
+import uuid
 from typing import Any
 
 import httpx
 
-from app.config import GEMINI_API_KEY
-from app.repository import WatchlistRepository, DuplicateItemError
+from app.config import (
+    AGENT_DEBUG,
+    GEMINI_API_KEY,
+    GEMINI_FALLBACK_MODEL,
+    GEMINI_PRIMARY_MODEL,
+)
+from app.repository import DuplicateItemError, WatchlistRepository
 from app.services.tmdb import TmdbClient
 from app.services.weather_service import WeatherService
 
@@ -95,6 +104,210 @@ def get_system_prompt(settings: dict[str, Any], weather_report: str | None = Non
 
     return f"{base_prompt}{weather_ctx}"
 
+
+def calculate_estimated_cost(model_name: str | None, prompt_tokens: int, response_tokens: int) -> float:
+    """Calculate estimated cost in USD based on model pricing (e.g. Gemini Flash vs Pro rates)."""
+    if not model_name:
+        model_name = GEMINI_PRIMARY_MODEL
+
+    m_lower = model_name.lower()
+    if "pro" in m_lower:
+        input_rate = 1.25 / 1_000_000.0    # $1.25 per 1M input tokens
+        output_rate = 5.00 / 1_000_000.0    # $5.00 per 1M output tokens
+    else:
+        # Default Flash rates ($0.075 / 1M input, $0.30 / 1M output)
+        input_rate = 0.075 / 1_000_000.0
+        output_rate = 0.30 / 1_000_000.0
+
+    cost = (prompt_tokens * input_rate) + (response_tokens * output_rate)
+    return round(cost, 8)
+
+
+def compute_prompt_metrics(
+    system_instruction: str,
+    recent_history: list[dict[str, str]] | str,
+    user_message: str,
+    context_notes: list[str] | None = None,
+) -> tuple[int, dict[str, Any]]:
+    """Compute prompt character breakdown and estimated token metrics across prompt sections."""
+    sys_chars = len(system_instruction or "")
+    hist_chars = sum(len(m.get("content", "")) for m in recent_history) if isinstance(recent_history, list) else 0
+    user_chars = len(user_message or "")
+    ctx_chars = sum(len(c) for c in (context_notes or []))
+
+    total_prompt_chars = sys_chars + hist_chars + user_chars + ctx_chars
+
+    breakdown = {
+        "system_instruction_chars": sys_chars,
+        "history_chars": hist_chars,
+        "history_message_count": len(recent_history) if isinstance(recent_history, list) else 0,
+        "user_message_chars": user_chars,
+        "context_notes_chars": ctx_chars,
+        "context_notes_count": len(context_notes) if context_notes else 0,
+        "total_prompt_chars": total_prompt_chars,
+        "est_system_tokens": max(1, sys_chars // 4) if sys_chars else 0,
+        "est_history_tokens": max(1, hist_chars // 4) if hist_chars else 0,
+        "est_user_tokens": max(1, user_chars // 4) if user_chars else 0,
+        "est_context_tokens": max(1, ctx_chars // 4) if ctx_chars else 0,
+    }
+    return total_prompt_chars, breakdown
+
+
+@dataclass
+class AgentResult:
+    text: str
+    provider: str  # "gemini" or "fallback"
+    model_requested: str | None
+    model_used: str | None
+    gemini_called: bool
+    fallback_used: bool
+    fallback_reason: str | None  # "api_key_missing", "timeout", "rate_limited", "authentication_failed", "model_not_found", "blocked_response", "empty_response", "invalid_response", "network_error", "unknown_error"
+    http_status: int | None
+    request_duration_ms: float | None
+    actions_taken: list[dict[str, Any]]
+    caller: str = "agent_service"
+    prompt_char_count: int = 0
+    prompt_token_count: int = 0
+    response_char_count: int = 0
+    response_token_count: int = 0
+    total_token_count: int = 0
+    estimated_cost_usd: float = 0.0
+    finish_reason: str | None = None
+    usage_metadata: dict[str, Any] = field(default_factory=dict)
+    prompt_breakdown: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def sanitize_log_data(data: Any) -> Any:
+    """Sanitize log data to prevent secrets, tokens, emails, or cookies from leaking."""
+    if isinstance(data, dict):
+        sanitized = {}
+        for k, v in data.items():
+            lk = k.lower()
+            if any(secret_key in lk for secret_key in ["api_key", "token", "cookie", "email", "authorization", "password", "secret"]):
+                sanitized[k] = "[REDACTED]"
+            elif lk == "message" and not AGENT_DEBUG:
+                sanitized[k] = "[REDACTED_TEXT]"
+            else:
+                sanitized[k] = sanitize_log_data(v)
+        return sanitized
+    elif isinstance(data, list):
+        return [sanitize_log_data(item) for item in data]
+    return data
+
+
+def build_gemini_request(
+    system_instruction: str,
+    recent_history: list[dict[str, str]],
+    user_message: str,
+    context_notes: list[str] | None = None,
+    max_output_tokens: int = 450,
+) -> dict[str, Any]:
+    """Construct a clean, typed Gemini API payload using native systemInstruction, structured contents, and token limits."""
+    payload: dict[str, Any] = {
+        "systemInstruction": {
+            "parts": [{"text": system_instruction}]
+        },
+        "contents": [],
+        "generationConfig": {
+            "maxOutputTokens": max_output_tokens,
+            "temperature": 0.7,
+        }
+    }
+
+    # Add conversation history
+    for m in recent_history:
+        role = m.get("role", "user").lower()
+        gemini_role = "model" if role in {"assistant", "model"} else "user"
+        content = m.get("content", "").strip()
+        if content:
+            payload["contents"].append({
+                "role": gemini_role,
+                "parts": [{"text": content}]
+            })
+
+    # Final turn (current user message)
+    turn_text = user_message
+    if context_notes and len(context_notes) > 0:
+        ctx_str = "\n".join(context_notes)
+        turn_text = f"Context Information:\n{ctx_str}\n\nUser Message: {user_message}"
+
+    payload["contents"].append({
+        "role": "user",
+        "parts": [{"text": turn_text}]
+    })
+
+    return payload
+
+
+def normalize_display_title(title: str | None) -> str:
+    """Normalize display title by stripping whitespace and accidental trailing punctuation
+    (e.g. 'the odyssey,' -> 'The Odyssey'), while preserving internal punctuation like 'Mamma Mia!' or 'What If...?'.
+    """
+    if not title or not isinstance(title, str):
+        return ""
+    t = title.strip()
+    # Remove accidental trailing comma, colon, or semicolon (and dangling trailing periods if not ending with ? or !)
+    t = re.sub(r'[,:;]+\s*$', '', t)
+    if not (t.endswith('?') or t.endswith('!')):
+        t = re.sub(r'\.+\s*$', '', t)
+    t = t.strip()
+    if t.islower():
+        t = t.title()
+    return t
+
+
+def validate_fallback_greeting(text: str | None) -> bool:
+    """Validate that a greeting text is complete, natural, and properly formatted."""
+    if not text or not isinstance(text, str):
+        return False
+    clean = text.strip()
+    if len(clean) < 15:
+        return False
+
+    clean_lower = clean.lower()
+
+    # Must end with valid sentence punctuation
+    if clean[-1] not in {'.', '!', '?'}:
+        return False
+
+    # Check for malformed dangling combinations
+    if clean.endswith(('..', ',.', ':,', ';.', ':', ';', ',')):
+        return False
+
+    # Reject dangling introductory phrases
+    dangling_intros = [
+        "updates for", "updates for the", "latest updates", "information on", "news about"
+    ]
+    for intro in dangling_intros:
+        if clean_lower.endswith(intro) or clean_lower.endswith(intro + "."):
+            return False
+
+    # Reject internal debugging labels
+    if any(label in clean for label in ["MEMORY RECALL", "MEMORY_RECALL", "[ACTION FAILURE]", "[ACTION SUCCESS]"]):
+        return False
+
+    return _is_valid_briefing_text(clean)
+
+
+def _is_valid_briefing_text(text: str | None) -> bool:
+    """Return True if the briefing text is non-empty and not a robotic placeholder or garbled JSON artifact."""
+    if not text or not isinstance(text, str):
+        return False
+    clean = text.strip()
+    if len(clean) < 12:
+        return False
+    clean_lower = clean.lower()
+    invalid_patterns = ["nomessage", "no message", "no_message", "nothing to report", "no updates to show"]
+    if any(pattern in clean_lower for pattern in invalid_patterns) and len(clean) < 35:
+        return False
+    if clean.startswith('"') or clean.startswith('[') or clean.startswith('{'):
+        return False
+    if '", "' in clean or "', '" in clean:
+        return False
+    return True
 
 
 class AiAgentService:
@@ -245,201 +458,115 @@ class AiAgentService:
         from app.services.briefing_service import BriefingService
         return await BriefingService.evaluate_startup_briefing(user_id, repo, tmdb)
 
-        settings = repo.get_agent_settings(user_id)
-        if not settings.get("notify_on_login", True):
-            return {"enabled": False, "briefing": None, "updates": []}
-
-        items = repo.list_items(user_id)
-        monitored = [
-            item for item in items
-            if not item.get("is_owned") and (item.get("status") in {"following", "queue", "watchlist"} or not item.get("status"))
-        ]
-
-        updates = []
-        for item in monitored:
-            media_type = item.get("media_type", "movie")
-            tmdb_id = item.get("tmdb_id")
-            title = item.get("title", "Untitled")
-
-            air_date = item.get("release_date")
-            days_away = None
-            next_season_num = None
-
-            # 1. Air dates & season updates
-            if media_type == "tv" and tmdb and tmdb_id:
-                try:
-                    details = await tmdb.get_details("tv", tmdb_id)
-                    seasons = details.get("seasons", [])
-                    next_season = tmdb.get_next_season(seasons) if seasons else None
-                    if next_season:
-                        air_date = next_season.get("air_date") or air_date
-                        days_away = next_season.get("days_away")
-                        next_season_num = next_season.get("season_number")
-                except Exception as e:
-                    logger.warning(f"Error checking TV details for {title}: {e}")
-
-            if days_away is None and air_date:
-                from app.models import days_until
-                days_away = days_until(air_date)
-
-            # Categorize date updates
-            if days_away is not None:
-                if 0 <= days_away <= 2:
-                    day_desc = "TODAY" if days_away == 0 else ("in 1 day" if days_away == 1 else f"in {days_away} days")
-                    season_str = f" Season {next_season_num}" if next_season_num else ""
-                    updates.append({
-                        "title": title,
-                        "type": "imminent_release",
-                        "urgency": 1,
-                        "days_away": days_away,
-                        "message": f"🔥 URGENT (Next 2 Days): '{title}'{season_str} releases {day_desc} ({air_date})!",
-                        "item": item,
-                    })
-                elif -14 <= days_away < 0:
-                    ago_days = abs(days_away)
-                    ago_str = f"{ago_days} day{'s' if ago_days != 1 else ''} ago"
-                    updates.append({
-                        "title": title,
-                        "type": "recently_available",
-                        "urgency": 2,
-                        "days_away": days_away,
-                        "message": f"🎉 JUST RELEASED: '{title}' became available recently ({ago_str} on {air_date})!",
-                        "item": item,
-                    })
-                elif 3 <= days_away <= 14:
-                    season_str = f" Season {next_season_num}" if next_season_num else ""
-                    updates.append({
-                        "title": title,
-                        "type": "upcoming_2_weeks",
-                        "urgency": 3,
-                        "days_away": days_away,
-                        "message": f"📅 UPCOMING (Next 2 Weeks): '{title}'{season_str} releases in {days_away} days ({air_date}).",
-                        "item": item,
-                    })
-                elif 15 <= days_away <= 30:
-                    season_str = f" Season {next_season_num}" if next_season_num else ""
-                    updates.append({
-                        "title": title,
-                        "type": "upcoming_month",
-                        "urgency": 4,
-                        "days_away": days_away,
-                        "message": f"📆 UPCOMING: '{title}'{season_str} releases in {days_away} days ({air_date}).",
-                        "item": item,
-                    })
-
-            # 2. Target Rental Price Check & Free Streaming
-            target_price = item.get("target_rental_price")
-            if tmdb and tmdb_id:
-                try:
-                    providers = await tmdb.get_watch_providers(media_type, tmdb_id)
-                    rent_list = providers.get("categories", {}).get("rent", [])
-                    buy_list = providers.get("categories", {}).get("buy", [])
-
-                    prices = []
-                    for r in rent_list + buy_list:
-                        curr = r.get("current_price") or r.get("price")
-                        if curr:
-                            try:
-                                p_val = float(str(curr).replace("$", ""))
-                                prices.append(p_val)
-                            except ValueError:
-                                pass
-
-                    if target_price is not None and prices and min(prices) <= target_price:
-                        min_price = min(prices)
-                        updates.append({
-                            "title": title,
-                            "type": "price_drop",
-                            "urgency": 2,
-                            "days_away": None,
-                            "message": f" Great news! '{title}' is now available to rent for ${min_price:.2f} (your target was ${target_price:.2f})!",
-                            "item": item,
-                        })
-                    elif providers.get("is_free_streaming") and (item.get("watch_free_streaming") or target_price is not None):
-                        updates.append({
-                            "title": title,
-                            "type": "free_streaming",
-                            "urgency": 2,
-                            "days_away": None,
-                            "message": f" '{title}' is now streaming for free on included platforms!",
-                            "item": item,
-                        })
-                except Exception as e:
-                    logger.warning(f"Error checking watch providers for {title}: {e}")
-
-        # 3. Persistent Query Memory Evaluation (Titles asked about in past 4+ weeks)
-        try:
-            memories = repo.list_query_memories(user_id, limit=30)
-            monitored_titles_set = {m.get("title", "").lower() for m in monitored}
-            for mem in memories:
-                m_title = mem.get("title") or mem.get("query_text")
-                if not m_title or m_title.lower() in monitored_titles_set:
-                    continue
-                m_tmdb_id = mem.get("tmdb_id")
-                m_media = mem.get("media_type") or "movie"
-                m_rel_date = None
-                if tmdb and m_tmdb_id:
-                    try:
-                        det = await tmdb.get_details(m_media, m_tmdb_id)
-                        m_rel_date = det.get("release_date")
-                    except Exception:
-                        pass
-                elif tmdb and m_title:
-                    try:
-                        search_res = await tmdb.search(m_title)
-                        if search_res:
-                            m_rel_date = search_res[0].get("release_date")
-                    except Exception:
-                        pass
-
-                if m_rel_date:
-                    from app.models import days_until
-                    m_days = days_until(m_rel_date)
-                    asked_at_str = mem.get("asked_at", "")[:10]
-                    if m_days is not None:
-                        if -14 <= m_days <= 2:
-                            updates.append({
-                                "title": m_title,
-                                "type": "memory_recall",
-                                "urgency": 2,
-                                "days_away": m_days,
-                                "message": f"💡 MEMORY RECALL: You asked about '{m_title}' on {asked_at_str}. It is currently available/releasing ({m_rel_date})!",
-                                "item": {"title": m_title, "release_date": m_rel_date},
-                            })
-                        elif 3 <= m_days <= 14:
-                            updates.append({
-                                "title": m_title,
-                                "type": "memory_recall",
-                                "urgency": 3,
-                                "days_away": m_days,
-                                "message": f"💡 MEMORY RECALL: You asked about '{m_title}' on {asked_at_str}. It releases in {m_days} days ({m_rel_date})!",
-                                "item": {"title": m_title, "release_date": m_rel_date},
-                            })
-        except Exception as e:
-            logger.warning(f"Error evaluating query memories: {e}")
-
-        # Sort updates by urgency and date proximity
-        updates.sort(key=lambda u: (u.get("urgency", 5), abs(u.get("days_away") or 999)))
-
-        # Fetch weather report if user location is configured
-        location = settings.get("location", "").strip()
-        weather_report = await WeatherService.get_weather_report(location) if location else None
-
-        # Format briefing response
-        system_prompt = get_system_prompt(settings, weather_report)
-        briefing_text = await AiAgentService._format_briefing_text(system_prompt, updates, monitored, weather_report)
-
-        return {
-            "enabled": True,
-            "briefing": briefing_text,
-            "updates_count": len(updates),
-            "updates": updates,
-            "personality_preset": settings.get("personality_preset", "cinephile"),
-            "location": location,
-            "weather_report": weather_report,
-        }
+    @staticmethod
+    def _get_time_of_day() -> str:
+        import datetime
+        hour = datetime.datetime.now().hour
+        if 5 <= hour < 12:
+            return "morning"
+        elif 12 <= hour < 17:
+            return "afternoon"
+        elif 17 <= hour < 22:
+            return "evening"
+        else:
+            return "night"
 
     @staticmethod
+    def _generate_dynamic_human_briefing(
+        settings: dict[str, Any],
+        location: str,
+        weather_json: dict[str, Any] | None,
+        briefing_items: list[dict[str, Any]],
+        time_of_day: str,
+    ) -> str:
+        greeting_prefix = "Welcome back!"
+        if briefing_items:
+            primary_item = briefing_items[0]
+            raw_title = primary_item.get("title") or primary_item.get("name") or "your watchlist"
+            norm_title = normalize_display_title(raw_title)
+
+            summary = primary_item.get("summary") or primary_item.get("verified_summary") or primary_item.get("message") or primary_item.get("fact")
+            if summary:
+                s_clean = summary.strip()
+                s_clean = re.sub(r'\[.*?\]', '', s_clean).strip()
+                s_clean = re.sub(r'[💡]*\s*MEMORY RECALL:?\s*', '', s_clean, flags=re.IGNORECASE).strip()
+
+                if raw_title:
+                    s_clean = s_clean.replace(f"'{raw_title}'", norm_title).replace(f'"{raw_title}"', norm_title)
+                    if raw_title in s_clean and raw_title != norm_title:
+                        s_clean = s_clean.replace(raw_title, norm_title)
+
+                if norm_title and norm_title.lower() not in s_clean.lower():
+                    if s_clean.lower().startswith("it is "):
+                        s_clean = f"{norm_title} is " + s_clean[6:]
+                    elif s_clean.lower().startswith("it was "):
+                        s_clean = f"{norm_title} was " + s_clean[7:]
+                    elif s_clean.lower().startswith("it "):
+                        s_clean = f"{norm_title} " + s_clean[3:]
+                    else:
+                        s_clean = f"{norm_title}: {s_clean}"
+
+                greeting = f"{greeting_prefix} {s_clean}"
+            else:
+                release_date = primary_item.get("release_date")
+                status = primary_item.get("status")
+                if release_date and status in {"released", "available"}:
+                    greeting = f"{greeting_prefix} {norm_title} was released on {release_date} and is now available."
+                elif release_date:
+                    greeting = f"{greeting_prefix} {norm_title} is scheduled for release on {release_date}."
+                elif norm_title:
+                    greeting = f"{greeting_prefix} I found an update for {norm_title}, but the full briefing is temporarily unavailable."
+                else:
+                    greeting = f"{greeting_prefix} Everything is up to date on your monitored queue today."
+        else:
+            greeting = f"{greeting_prefix} Everything is up to date on your monitored queue today."
+
+        greeting = greeting.strip()
+        greeting = re.sub(r'[,;:]+\s*\.', '.', greeting)
+        greeting = re.sub(r'\.{2,}', '.', greeting)
+        greeting = re.sub(r'\s+', ' ', greeting).strip()
+
+        if not greeting.endswith(('.', '!', '?')):
+            greeting += "."
+
+        if not validate_fallback_greeting(greeting):
+            return f"{greeting_prefix} Everything is up to date on your monitored queue today."
+        return greeting
+
+    @staticmethod
+    def _build_greeting_instruction(
+        briefing_items: list[dict[str, Any]],
+        time_of_day: str,
+        location: str,
+        weather_json: dict[str, Any] | None,
+        recent_openings: list[str] | None = None,
+        prompt_version: Any = None,
+    ) -> str:
+        items_payload = json.dumps(briefing_items, indent=2)
+        weather_str = ""
+        if weather_json and weather_json.get("significant_alert"):
+            weather_str = f"\nSignificant Weather Alert: {weather_json['significant_alert']}"
+
+        recent_str = ""
+        if recent_openings and len(recent_openings) > 0:
+            recent_str = f"\nRecent Openings (Do NOT repeat these phrasing patterns):\n" + "\n".join([f"- {o}" for o in recent_openings[-10:]])
+
+        wording_instruction = getattr(prompt_version, "wording_instruction", None) or (
+            "Create a brief, natural opening using only the supplied facts. Mention the most useful new or time-sensitive item first. "
+            "If there are no new facts, provide a warm welcome back greeting (e.g., 'Welcome back! Everything is up to date on your monitored queue today.'). "
+            "Do not output 'no message', 'nomessage', or robotic placeholders. Do not invent activity merely to fill space. "
+            "Do not repeat wording from recent greetings."
+        )
+
+        instruction = (
+            f"Selected Verified Facts:\n```json\n{items_payload}\n```\n\n"
+            f"Context Info:\n"
+            f"- Time of day: {time_of_day}\n"
+            f"- Location: {location or 'Not specified'}{weather_str}{recent_str}\n\n"
+            f"Wording Instruction:\n{wording_instruction}"
+        )
+        return instruction
+
     @staticmethod
     def _get_time_of_day() -> str:
         import datetime
@@ -530,7 +657,24 @@ class AiAgentService:
         else:
             bullet_lines = []
             for it in briefing_items:
-                msg = it.get("summary") or it.get("message") or it.get("headline") or it.get("title")
+                raw_title = it.get("title") or it.get("name")
+                norm_title = normalize_display_title(raw_title) if raw_title else ""
+                msg = it.get("summary") or it.get("message") or it.get("headline") or it.get("title") or ""
+                if msg:
+                    msg = msg.strip()
+                    if raw_title and norm_title:
+                        msg = msg.replace(f"'{raw_title}'", norm_title).replace(f'"{raw_title}"', norm_title)
+                        if raw_title in msg and raw_title != norm_title:
+                            msg = msg.replace(raw_title, norm_title)
+                    if norm_title and norm_title.lower() not in msg.lower():
+                        if msg.lower().startswith("it is "):
+                            msg = f"{norm_title} is " + msg[6:]
+                        elif msg.lower().startswith("it was "):
+                            msg = f"{norm_title} was " + msg[7:]
+                        elif msg.lower().startswith("it "):
+                            msg = f"{norm_title} " + msg[3:]
+                        else:
+                            msg = f"{norm_title}: {msg}"
                 bullet_lines.append(f"• {msg}")
             bullets_str = "\n".join(bullet_lines)
             intro_options = [
@@ -547,123 +691,322 @@ class AiAgentService:
         weather_data: Any,
         briefing_items: list[dict[str, Any]],
         total_monitored: int = 0,
+        recent_openings: list[str] | None = None,
+        prompt_version: Any = None,
+        user_id: str | None = None,
+        repo: Any = None,
+        force_refresh: bool = False,
     ) -> str:
         location = settings.get("location", "").strip()
         time_of_day = AiAgentService._get_time_of_day()
 
-        # Build compact structured context for LLM
         weather_json = None
         if weather_data:
             weather_dict = weather_data.to_dict() if hasattr(weather_data, "to_dict") else weather_data
             weather_json = {
                 "conditions": weather_dict.get("conditions"),
                 "temperature_f": weather_dict.get("temperature_f"),
-                "high_f": weather_dict.get("high_f"),
-                "low_f": weather_dict.get("low_f"),
-                "precipitation_probability": weather_dict.get("precipitation_probability"),
                 "significant_alert": weather_dict.get("significant_alert"),
             }
 
-        compact_payload = {
-            "local_context": {
-                "location": location,
-                "weather": weather_json,
-                "time_of_day": time_of_day,
-            },
-            "briefing_items": briefing_items,
-            "total_monitored": total_monitored,
-            "personality_preset": settings.get("personality_preset", "cinephile"),
-        }
+        from app.decision_models import get_current_run_context
+        run_ctx = get_current_run_context()
+        stable_key = run_ctx.daily_cache_key if run_ctx else None
 
-        payload_json_str = json.dumps(compact_payload, indent=2)
-
-        prompt = (
-            f"Here is the structured input object containing verified facts and context:\n"
-            f"```json\n{payload_json_str}\n```\n\n"
-            f"Write a fresh, warm, natural human startup greeting for the user based strictly on these facts.\n\n"
-            f"CRITICAL GUIDELINES:\n"
-            f"1. Sound like a real human movie-buff friend having a casual conversation with another human. Use varied, natural phrasing.\n"
-            f"2. Match the current time of day ({time_of_day}) in your greeting (e.g., 'Good morning', 'Good afternoon', 'Hey there', 'Good evening').\n"
-            f"3. If there is a significant weather alert in local_context, state it clearly and respectfully before entertainment updates; do NOT turn severe alerts into jokes.\n"
-            f"4. NEVER use rigid or robotic template phrases like 'Nothing major changed in your watchlist since your last visit. I'll keep an eye on it.', 'according to my database', or 'telemetry scan'.\n"
-            f"5. If local weather is provided in local_context, weave it naturally into conversation (e.g. 'Hope you're staying cozy in Concord with that rain—great weather for a movie marathon!'). Do NOT report weather like a robot news anchor.\n"
-            f"6. If briefing_items is empty, greet them warmly, mention that their watchlist is looking smooth and quiet today, and invite them to chat or ask for a movie pick.\n"
-            f"7. If briefing_items contains items, summarize them conversationally.\n"
-            f"8. Keep the greeting concise (2 to 4 sentences max)."
+        instruction = AiAgentService._build_greeting_instruction(
+            briefing_items=briefing_items,
+            time_of_day=time_of_day,
+            location=location,
+            weather_json=weather_json,
+            recent_openings=recent_openings,
+            prompt_version=prompt_version,
         )
 
-        system_prompt = get_system_prompt(settings, weather_report=None)
+        system_prompt = getattr(prompt_version, "system_instruction_template", None) or get_system_prompt(settings, weather_report=None)
 
-        if GEMINI_API_KEY:
-            try:
-                llm_response = await AiAgentService._call_gemini_api(system_prompt, prompt)
-                if llm_response:
-                    logger.info("Generated structured briefing via Gemini", extra={
-                        "response_source": "gemini",
-                        "model_used": "gemini-flash-latest",
-                        "intent": "startup_briefing",
-                        "selected_count": len(briefing_items),
-                    })
-                    return llm_response
-            except Exception as e:
-                logger.error(f"Gemini API error during structured briefing generation: {e}")
+        logger.info(
+            f"[Briefing] Calling Gemini API for briefing. "
+            f"Items count: {len(briefing_items)}, location: {location!r}, time_of_day: {time_of_day}"
+        )
 
-        # Dynamic human fallback generator when Gemini is unavailable
-        return AiAgentService._generate_dynamic_human_briefing(
+        result = await AiAgentService._call_gemini_api(
+            system_instruction=system_prompt,
+            recent_history=[],
+            user_message=instruction,
+            context_notes=None,
+            max_output_tokens=600,
+            caller="briefing_generator",
+            user_id=user_id,
+            repo=repo,
+            daily_cache_key=stable_key,
+        )
+
+        logger.info(
+            f"[Briefing] Gemini result: provider={result.provider!r}, "
+            f"fallback_used={result.fallback_used}, fallback_reason={result.fallback_reason!r}, "
+            f"http_status={result.http_status}, duration_ms={result.request_duration_ms}, "
+            f"text_length={len(result.text) if result.text else 0}, "
+            f"text_preview={(result.text[:80] if result.text else 'EMPTY')!r}"
+        )
+
+        if result.text and not result.fallback_used and validate_fallback_greeting(result.text):
+            briefing_text = result.text
+            if run_ctx:
+                run_ctx.served_from = "fresh_generation"
+                run_ctx.content_origin = "gemini_primary"
+                run_ctx.result_source = "fresh_gemini"
+            logger.info(f"[Briefing] Using Gemini LLM text ({len(briefing_text)} chars)")
+            return briefing_text
+
+        # Local rule fallback path
+        fallback_text = AiAgentService._generate_dynamic_human_briefing(
             settings=settings,
             location=location,
             weather_json=weather_json,
             briefing_items=briefing_items,
             time_of_day=time_of_day,
         )
+        if run_ctx:
+            run_ctx.served_from = "fresh_generation"
+            run_ctx.content_origin = "local_rule_fallback"
+            run_ctx.fallback_attempted = True
+            run_ctx.result_source = "local_rule_fallback"
 
+        logger.warning(
+            f"[Briefing] Falling back to local dynamic briefing generator. "
+            f"Reason: fallback_used={result.fallback_used}, fallback_reason={result.fallback_reason!r}"
+        )
+
+        return fallback_text
 
     @staticmethod
     async def process_chat(
         user_id: str, user_message: str, repo: WatchlistRepository, tmdb: TmdbClient | None
     ) -> dict[str, Any]:
-        """Process chat message, recognize intents (auto-monitoring, rental price targets), update history, and generate response."""
+        """Process chat message, recognize intents (auto-monitoring, ratings, status, search), update history, and generate response."""
         settings = repo.get_agent_settings(user_id)
         history = repo.list_chat_messages(user_id, limit=20)
-        
-        # Save user message
-        repo.add_chat_message(user_id, "user", user_message)
 
         actions_taken = []
+        context_notes: list[str] = []
+        msg_lower = user_message.lower().strip()
+        user_items = repo.list_items(user_id)
+
+        # Handle 5-movie quiz request
+        if any(phrase in msg_lower for phrase in [
+            "quiz me", "5 movies", "have i seen", "have you seen", "ask me about 5 movies",
+            "movie quiz", "rate 5 movies", "rate movies", "movies quiz"
+        ]):
+            quiz_movies = await AiAgentService.generate_movie_quiz(user_id, repo, tmdb)
+            quiz_action = {"action": "movie_quiz", "movies": quiz_movies}
+            actions_taken.append(quiz_action)
+            q_titles = ", ".join([m["title"] for m in quiz_movies[:5]])
+            context_notes.append(f"Movie Quiz Action Executed: Picked 5 movies for user quiz: {q_titles}. Invite user conversationally to rate them.")
+
+        # Handle "Show my ratings" request
+        elif any(phrase in msg_lower for phrase in [
+            "my ratings", "show my ratings", "what movies have i rated",
+            "list my ratings", "movies i rated", "rated movies", "my rated movies"
+        ]):
+            rated_list = repo.list_rated_movies(user_id)
+            if rated_list:
+                r_summary = "; ".join([f"{m['title']} ({m['rating']}/5 stars)" for m in rated_list[:5]])
+                context_notes.append(f"User Ratings List Action: User has rated {len(rated_list)} titles: {r_summary}. Summarize these ratings conversationally.")
+            else:
+                context_notes.append("User Ratings List Action: User has no rated movies yet. Let them know warmly.")
+
+        # Handle streaming recommendation request
+        elif any(phrase in msg_lower for phrase in [
+            "streaming recommendation", "free movie", "rent movie", "where to stream",
+            "stream recommendation", "free streaming"
+        ]):
+            rec_action = await AiAgentService.generate_streaming_recommendation(user_id, repo, tmdb)
+            if rec_action:
+                actions_taken.append(rec_action)
+                context_notes.append(f"Streaming Recommendation Action Executed: Found '{rec_action['title']}' ({rec_action['details_text']}). Overview: {rec_action.get('overview', '')}. Present this recommendation conversationally.")
+            else:
+                context_notes.append("Streaming Recommendation Action: No specific free/rental recommendation found right now.")
+
+        # Extract intent titles first to check for explicit movie/series names
+        rate_title, rating_val = AiAgentService._extract_rating_action(user_message)
+        ext_title, target_price = AiAgentService._extract_title_and_price(user_message)
+        explicit_title_raw = rate_title or ext_title
+        parsed_title, start_idx, end_idx, is_range = AiAgentService._parse_ordinal_range(explicit_title_raw) if explicit_title_raw else (None, None, None, False)
+
+        ignored_words = {"those", "them", "these", "it", "remaining", "movies", "films", "all", "yes", "sure", "add", "rate", "and", "the", "a", "an", "list", "queue"}
+        parsed_words = set(re.findall(r'\w+', (parsed_title or "").lower()))
+        has_explicit_title = bool(parsed_title and len(parsed_words - ignored_words) > 0 and len(parsed_title) > 1)
+
+        # 0. Intent Recognition: Conversational Context / Pronoun Action (ONLY if NO explicit title is named)
+        pronoun_words = ["those", "them", "these", "it", "the remaining ones", "those movies", "the movies", "all of them", "yes add", "yes rate", "do it", "sure", "add those", "rate those"]
+        is_pronoun_ref = not has_explicit_title and any(p in msg_lower for p in pronoun_words)
+        if is_pronoun_ref and history:
+            recent_titles = AiAgentService._extract_titles_from_recent_history(history)
+            if recent_titles:
+                rate_val = None
+                num_m = re.search(r'(?:(\d)\s*(?:-\s*)?stars?|(\d)\s*/\s*5|rated?\s+(\d)|rating\s+(?:of\s+)?(\d)|give\s+(?:it|them|those)?\s*(\d)|log\s+(?:my\s+)?(\d)|rate\s+(?:it|them|those|these|all|each)?\s*(\d)|and\s+rate\s+(?:it|them|those|these|all|each)?\s*(\d))', msg_lower)
+                if num_m:
+                    val = next(g for g in num_m.groups() if g is not None)
+                    try:
+                        rate_val = int(val)
+                    except ValueError:
+                        pass
+                if rate_val is None and any(k in msg_lower for k in ["rate", "rating", "rated", "stars", "star"]):
+                    rate_val = 5
+
+                has_rate_intent = rate_val is not None or any(k in msg_lower for k in ["rate", "rating", "rated", "stars", "star"])
+                has_add_intent = any(k in msg_lower for k in ["add", "queue", "watchlist", "list", "put", "insert", "log"]) or not has_rate_intent
+
+                processed_count = 0
+                from app.models import poster_url
+                for title_item in recent_titles:
+                    t_name = title_item
+                    m_type = "movie"
+                    t_id = None
+                    p_path = None
+                    r_date = None
+
+                    if tmdb:
+                        try:
+                            res_p = await AiAgentService._search_tmdb_with_fallback(tmdb, title_item, user_id, user_message)
+                            if res_p:
+                                best = next((c for c in res_p if title_item.lower() in (c.get("title") or c.get("name") or "").lower() or (c.get("title") or c.get("name") or "").lower() in title_item.lower()), res_p[0])
+                                t_name = best.get("title") or best.get("name") or title_item
+                                m_type = best.get("media_type", "movie")
+                                t_id = best.get("id")
+                                r_date = best.get("release_date")
+                                p_path = best.get("poster_path")
+                        except Exception:
+                            pass
+
+                    if t_id:
+                        if has_rate_intent:
+                            try:
+                                repo.rate_movie(user_id, m_type, t_id, t_name, p_path, r_date, rate_val or 5)
+                                match_item = next((i for i in user_items if i.get("tmdb_id") == t_id and i.get("media_type") == m_type), None)
+                                if match_item:
+                                    repo.update_item(user_id, m_type, t_id, status="watched", user_rating=rate_val or 5)
+                                actions_taken.append({
+                                    "action": "rate_movie",
+                                    "title": t_name,
+                                    "rating": rate_val or 5,
+                                    "media_type": m_type,
+                                    "tmdb_id": t_id,
+                                    "poster_path": p_path,
+                                    "poster_url": poster_url(p_path) if p_path else None,
+                                    "release_date": r_date,
+                                })
+                            except Exception as e:
+                                logger.warning(f"Error rating title '{t_name}' via pronoun ref: {e}")
+
+                        if has_add_intent:
+                            try:
+                                repo.add_item(
+                                    user_id=user_id,
+                                    media_type=m_type,
+                                    tmdb_id=t_id,
+                                    title=t_name,
+                                    poster_path=p_path,
+                                    release_date=r_date,
+                                    status="queue",
+                                )
+                                actions_taken.append({
+                                    "action": "add_monitoring",
+                                    "title": t_name,
+                                    "media_type": m_type,
+                                    "tmdb_id": t_id,
+                                })
+                            except DuplicateItemError:
+                                pass
+                            except Exception as e:
+                                logger.warning(f"Error adding title '{t_name}' to queue via pronoun ref: {e}")
+
+                        processed_count += 1
+
+                if processed_count > 0:
+                    context_notes.append(f"Conversational Context Action Executed: Processed batch request for {processed_count} titles from recent conversation: {', '.join(recent_titles[:5])}.")
 
         # 1. Intent Recognition: Movie Rating / Watched List Action
         rate_title, rating_val = AiAgentService._extract_rating_action(user_message)
-        if rate_title:
+        if rate_title and not actions_taken:
+            search_title, start_idx, end_idx, is_range = AiAgentService._parse_ordinal_range(rate_title)
+            if not search_title:
+                search_title = rate_title
+
+            clean_msg_for_series = re.sub(r'\b(?:to|in|into|on|as)\s+(?:my\s+)?(?:movies?\s+(?:i\s*\'?ve?\s+)?watched|watched\s+list|watched|rated\s+movies?|rated\s+list|ratings?|list|lis|watchlist|queue)\b', '', user_message, flags=re.IGNORECASE).strip()
+            is_series_req = is_range or any(k in clean_msg_for_series.lower() for k in ["series", "collection", "franchise", "trilogy", "all movies", "all films", "movie series", "film series", "set of movies", "all the", "all of the", "remaining", "rest of"])
+
             t_name = rate_title
             m_type = "movie"
             t_id = None
             p_path = None
             r_date = None
+            candidates = []
 
             # Search local user watchlist & rated movies first
             all_local = repo.list_items(user_id) + repo.list_rated_movies(user_id)
-            match_local = next((i for i in all_local if rate_title.lower() in (i.get("title") or "").lower()), None)
+            match_local = next((i for i in all_local if search_title.lower() in (i.get("title") or "").lower()), None)
             if match_local:
-                t_name = match_local.get("title", rate_title)
+                t_name = match_local.get("title", search_title)
                 m_type = match_local.get("media_type", "movie")
                 t_id = match_local.get("tmdb_id")
                 p_path = match_local.get("poster_path")
                 r_date = match_local.get("release_date")
 
-            if not t_id and tmdb:
+            if tmdb:
                 try:
-                    res = await tmdb.search(rate_title)
+                    res = await AiAgentService._search_tmdb_with_fallback(tmdb, search_title, user_id, user_message)
                     if res:
-                        best = res[0]
-                        t_name = best.get("title") or best.get("name") or rate_title
-                        m_type = best.get("media_type", "movie")
-                        t_id = best.get("id")
-                        r_date = best.get("release_date")
-                        p_path = best.get("poster_path")
-                except Exception as e:
-                    logger.warning(f"Error searching TMDB for rating title '{rate_title}': {e}")
+                        if is_series_req:
+                            filtered = [c for c in res if (c.get("title") or c.get("name"))]
+                            start_pos = max(0, (start_idx or 1) - 1)
+                            end_pos = end_idx if end_idx is not None else len(filtered)
+                            candidates = filtered[start_pos:end_pos]
+                        else:
+                            candidates = res[:3]
 
-            if t_id:
+                        if not t_id and candidates:
+                            best = candidates[0]
+                            t_name = best.get("title") or best.get("name") or rate_title
+                            m_type = best.get("media_type", "movie")
+                            t_id = best.get("id")
+                            r_date = best.get("release_date")
+                            p_path = best.get("poster_path")
+                except Exception as e:
+                    logger.warning(f"Error searching TMDB for rating title '{search_title}': {e}")
+
+            if is_series_req and candidates and len(candidates) > 1:
+                rated_count = 0
+                for cand in candidates:
+                    c_title = cand.get("title") or cand.get("name")
+                    c_type = cand.get("media_type", "movie")
+                    c_id = cand.get("id")
+                    c_date = cand.get("release_date")
+                    c_poster = cand.get("poster_path")
+                    if c_id and c_title:
+                        try:
+                            repo.rate_movie(user_id, c_type, c_id, c_title, c_poster, c_date, rating_val or 5)
+                            match_item = next((i for i in user_items if i.get("tmdb_id") == c_id and i.get("media_type") == c_type), None)
+                            if match_item:
+                                repo.update_item(user_id, c_type, c_id, status="watched", user_rating=rating_val or 5)
+                            from app.models import poster_url
+                            actions_taken.append({
+                                "action": "rate_movie",
+                                "title": c_title,
+                                "rating": rating_val or 5,
+                                "media_type": c_type,
+                                "tmdb_id": c_id,
+                                "poster_path": c_poster,
+                                "poster_url": poster_url(c_poster) if c_poster else None,
+                                "release_date": c_date,
+                            })
+                            rated_count += 1
+                        except Exception as e:
+                            logger.warning(f"Error saving series rating for '{c_title}': {e}")
+                if rated_count > 0:
+                    repo.add_query_memory(user_id, user_message, title=rate_title)
+                    context_notes.append(f"Rating Action Executed: Rated all {rated_count} movies in the '{search_title}' series {rating_val or 5}/5 stars and added them to user's watched/ratings list.")
+            elif t_id:
                 try:
                     repo.rate_movie(
                         user_id=user_id,
@@ -674,16 +1017,43 @@ class AiAgentService:
                         release_date=r_date,
                         rating=rating_val or 5,
                     )
+                    # If item exists in user queue/watchlist, update status to 'watched' as well
+                    match_item = next((i for i in user_items if i.get("tmdb_id") == t_id and i.get("media_type") == m_type), None)
+                    if match_item:
+                        repo.update_item(user_id, m_type, t_id, status="watched", user_rating=rating_val or 5)
+
+                    from app.models import poster_url
                     actions_taken.append({
                         "action": "rate_movie",
                         "title": t_name,
                         "rating": rating_val or 5,
                         "media_type": m_type,
                         "tmdb_id": t_id,
+                        "poster_path": p_path,
+                        "poster_url": poster_url(p_path) if p_path else None,
+                        "release_date": r_date,
                     })
                     repo.add_query_memory(user_id, user_message, tmdb_id=t_id, media_type=m_type, title=t_name)
+                    context_notes.append(f"Rating Action Executed: Rated '{t_name}' ({m_type}) {rating_val or 5}/5 stars and added to user's watched/ratings list.")
+
+                    # Disambiguation note if multiple candidates exist
+                    if len(candidates) > 1 and candidates[0].get("title") != candidates[1].get("title"):
+                        other_titles = [f"{c.get('title') or c.get('name')} ({c.get('release_date', '')[:4]})" for c in candidates[1:3] if c.get('title') or c.get('name')]
+                        if other_titles:
+                            context_notes.append(f"Disambiguation Note: Top search result '{t_name}' was rated. Other candidate matches found: {', '.join(other_titles)}.")
                 except Exception as e:
                     logger.warning(f"Error saving rating for '{t_name}': {e}")
+
+            if not any(a.get("action") == "rate_movie" for a in actions_taken):
+                logger.warning(
+                    f"[AI Agent Rating Execution Failure] Could not find or rate items for title: '{rate_title}'. Prompt: '{user_message}'",
+                    extra=sanitize_log_data({
+                        "ai_event": "rating_execution_failure",
+                        "rate_title": rate_title,
+                        "user_id": user_id,
+                    })
+                )
+                context_notes.append(f"[ACTION FAILURE]: Rating action could NOT be saved to the database because no matching titles for '{rate_title}' were found on TMDB. Inform the user conversationally that you could not find or log ratings for this title/series. DO NOT claim that you added or rated them.")
 
         # 2. Intent Recognition: Deletion Action (Remove rating or item)
         del_title, del_target = AiAgentService._extract_delete_action(user_message)
@@ -697,6 +1067,7 @@ class AiAgentService:
                         "action": "delete_rating",
                         "title": match_r["title"],
                     })
+                    context_notes.append(f"Delete Action Executed: Deleted user rating for '{match_r['title']}'.")
             else:
                 items = repo.list_items(user_id)
                 match_i = next((i for i in items if del_title.lower() in (i.get("title") or "").lower()), None)
@@ -706,8 +1077,33 @@ class AiAgentService:
                         "action": "remove_item",
                         "title": match_i["title"],
                     })
+                    context_notes.append(f"Remove Action Executed: Removed '{match_i['title']}' from queue.")
 
-        # 3. Intent Recognition & Auto-Monitoring Execution
+        # 3. Intent Recognition: Status & Ownership Update Action
+        status_title, new_status, is_owned_flag = AiAgentService._extract_status_action(user_message)
+        if status_title and not any(a.get("action") == "rate_movie" for a in actions_taken):
+            items = repo.list_items(user_id)
+            match_i = next((i for i in items if status_title.lower() in (i.get("title") or "").lower()), None)
+            if match_i:
+                repo.update_item(
+                    user_id,
+                    match_i["media_type"],
+                    match_i["tmdb_id"],
+                    status=new_status,
+                    is_owned=is_owned_flag,
+                )
+                act_desc = f"Updated status of '{match_i['title']}' to {new_status or 'updated'}"
+                if is_owned_flag is True:
+                    act_desc += " and marked as owned"
+                actions_taken.append({
+                    "action": "update_status",
+                    "title": match_i["title"],
+                    "status": new_status,
+                    "is_owned": is_owned_flag,
+                })
+                context_notes.append(f"Status Update Action Executed: {act_desc}.")
+
+        # 4. Intent Recognition: Auto-Monitoring / Add to Queue Execution
         ext_title, target_price = AiAgentService._extract_title_and_price(user_message)
         already_acted = any(
             (a.get("title") or "").lower() in (ext_title or "").lower() or (ext_title or "").lower() in (a.get("title") or "").lower()
@@ -715,109 +1111,144 @@ class AiAgentService:
         ) or (rate_title and ext_title and rate_title.lower() in ext_title.lower())
         if ext_title and tmdb and not already_acted:
             try:
-                res = await tmdb.search(ext_title)
+                search_queue_title, q_start_idx, q_end_idx, q_is_range = AiAgentService._parse_ordinal_range(ext_title)
+                if not search_queue_title:
+                    search_queue_title = ext_title
+
+                clean_ext_series = re.sub(r'\b(?:to|in|into|on|as)\s+(?:my\s+)?(?:list|lis|watchlist|queue|monitoring)\b', '', user_message, flags=re.IGNORECASE).strip()
+                is_series_queue = q_is_range or any(k in clean_ext_series.lower() for k in ["series", "collection", "franchise", "trilogy", "all movies", "all films", "movie series", "film series", "set of movies", "all the", "all of the", "remaining", "rest of"])
+
+                res = await AiAgentService._search_tmdb_with_fallback(tmdb, search_queue_title, user_id, user_message)
                 if res:
-                    best = res[0]
-                    t_name = best.get("title") or best.get("name") or ext_title
-                    m_type = best.get("media_type", "movie")
-                    t_id = best.get("id")
-                    r_date = best.get("release_date")
-                    p_path = best.get("poster_path")
+                    if is_series_queue and len(res) > 1:
+                        filtered = [c for c in res if (c.get("title") or c.get("name"))]
+                        q_start_pos = max(0, (q_start_idx or 1) - 1)
+                        q_end_pos = q_end_idx if q_end_idx is not None else len(filtered)
+                        target_cand = filtered[q_start_pos:q_end_pos]
 
-                    try:
-                        repo.add_item(
-                            user_id=user_id,
-                            media_type=m_type,
-                            tmdb_id=t_id,
-                            title=t_name,
-                            poster_path=p_path,
-                            release_date=r_date,
-                            status="queue",
-                            target_rental_price=target_price,
-                        )
-                    except DuplicateItemError:
-                        if target_price is not None:
-                            repo.update_item(user_id, m_type, t_id, target_rental_price=target_price)
+                        added_count = 0
+                        for best in target_cand:
+                            t_name = best.get("title") or best.get("name")
+                            m_type = best.get("media_type", "movie")
+                            t_id = best.get("id")
+                            r_date = best.get("release_date")
+                            p_path = best.get("poster_path")
+                            if t_id and t_name:
+                                try:
+                                    repo.add_item(
+                                        user_id=user_id,
+                                        media_type=m_type,
+                                        tmdb_id=t_id,
+                                        title=t_name,
+                                        poster_path=p_path,
+                                        release_date=r_date,
+                                        status="queue",
+                                        target_rental_price=target_price,
+                                    )
+                                except DuplicateItemError:
+                                    if target_price is not None:
+                                        repo.update_item(user_id, m_type, t_id, target_rental_price=target_price)
+                                actions_taken.append({
+                                    "action": "add_monitoring",
+                                    "title": t_name,
+                                    "media_type": m_type,
+                                    "tmdb_id": t_id,
+                                    "target_rental_price": target_price,
+                                })
+                                added_count += 1
+                        if added_count > 0:
+                            repo.add_query_memory(user_id, user_message, title=search_queue_title)
+                            context_notes.append(f"Add Queue Action Executed: Added all {added_count} titles in the '{search_queue_title}' series to user queue.")
+                    else:
+                        best = res[0]
+                        t_name = best.get("title") or best.get("name") or ext_title
+                        m_type = best.get("media_type", "movie")
+                        t_id = best.get("id")
+                        r_date = best.get("release_date")
+                        p_path = best.get("poster_path")
 
-                    actions_taken.append({
-                        "action": "add_monitoring",
-                        "title": t_name,
-                        "media_type": m_type,
-                        "tmdb_id": t_id,
-                        "target_rental_price": target_price,
-                    })
-                    repo.add_query_memory(user_id, user_message, tmdb_id=t_id, media_type=m_type, title=t_name)
+                        try:
+                            repo.add_item(
+                                user_id=user_id,
+                                media_type=m_type,
+                                tmdb_id=t_id,
+                                title=t_name,
+                                poster_path=p_path,
+                                release_date=r_date,
+                                status="queue",
+                                target_rental_price=target_price,
+                            )
+                        except DuplicateItemError:
+                            if target_price is not None:
+                                repo.update_item(user_id, m_type, t_id, target_rental_price=target_price)
+
+                        actions_taken.append({
+                            "action": "add_monitoring",
+                            "title": t_name,
+                            "media_type": m_type,
+                            "tmdb_id": t_id,
+                            "target_rental_price": target_price,
+                        })
+                        repo.add_query_memory(user_id, user_message, tmdb_id=t_id, media_type=m_type, title=t_name)
+                        context_notes.append(f"Add Queue Action Executed: Added '{t_name}' ({m_type}) to queue.")
             except Exception as e:
                 logger.warning(f"Error auto-monitoring title '{ext_title}': {e}")
+
+        # 5. Intent Recognition: Explicit Movie Search Action
+        search_query = AiAgentService._extract_search_action(user_message)
+        if search_query and tmdb and not actions_taken:
+            try:
+                res = await AiAgentService._search_tmdb_with_fallback(tmdb, search_query, user_id, user_message)
+                if res:
+                    from app.models import poster_url
+                    search_results = []
+                    for item in res[:4]:
+                        p_path = item.get("poster_path")
+                        search_results.append({
+                            "tmdb_id": item["id"],
+                            "media_type": item.get("media_type", "movie"),
+                            "title": item.get("title") or item.get("name"),
+                            "poster_path": p_path,
+                            "poster_url": poster_url(p_path) if p_path else None,
+                            "release_date": item.get("release_date"),
+                            "overview": (item.get("overview") or "")[:140],
+                        })
+                    actions_taken.append({
+                        "action": "movie_search",
+                        "query": search_query,
+                        "results": search_results,
+                    })
+                    s_titles = ", ".join([r["title"] for r in search_results])
+                    context_notes.append(f"Movie Search Action Executed: Searched TMDB for '{search_query}'. Found options: {s_titles}. Present these options conversationally and invite user to select or rate them.")
+                else:
+                    context_notes.append(f"Movie Search Action: Searched for '{search_query}', but no results were found on TMDB.")
+            except Exception as e:
+                logger.warning(f"Error executing movie search for '{search_query}': {e}")
 
         items = repo.list_items(user_id)
         monitored = [item for item in items if not item.get("is_owned") and (item.get("status") in {"following", "queue", "watchlist"} or not item.get("status"))]
 
-        msg_lower = user_message.lower().strip()
+        # Action execution note
+        if actions_taken:
+            act_strings = []
+            for a in actions_taken:
+                act = a.get("action")
+                t = a.get("title", "title")
+                if act == "rate_movie":
+                    act_strings.append(f"Logged {a.get('rating', 5)}-star rating for '{t}'")
+                elif act == "delete_rating":
+                    act_strings.append(f"Deleted rating for '{t}'")
+                elif act == "remove_item":
+                    act_strings.append(f"Removed '{t}' from queue")
+                elif act == "add_monitoring":
+                    act_strings.append(f"Added '{t}' to queue")
+                elif act == "update_status":
+                    act_strings.append(f"Updated status for '{t}'")
+                elif act == "movie_search":
+                    act_strings.append(f"Searched movies for '{a.get('query', '')}'")
+            context_notes.append(f"Automated action executed: {'; '.join(act_strings)}. Inform the user conversationally that this action was completed.")
 
-        # Handle 5-movie quiz request
-        if any(phrase in msg_lower for phrase in [
-            "quiz me", "5 movies", "have i seen", "have you seen", "ask me about 5 movies",
-            "movie quiz", "rate 5 movies", "rate movies", "movies quiz"
-        ]):
-            quiz_movies = await AiAgentService.generate_movie_quiz(user_id, repo, tmdb)
-            quiz_action = {"action": "movie_quiz", "movies": quiz_movies}
-            actions_taken.append(quiz_action)
-            reply = "Here are 5 movies I picked based on what I know about your tastes! Have you seen any of these? Feel free to rate them below:"
-            msg_record = repo.add_chat_message(user_id, "assistant", reply, actions=actions_taken)
-            return {
-                "message": msg_record,
-                "actions_taken": actions_taken,
-            }
-
-        # Handle "Show my ratings" request
-        if any(phrase in msg_lower for phrase in [
-            "my ratings", "show my ratings", "what movies have i rated",
-            "list my ratings", "movies i rated", "rated movies", "my rated movies"
-        ]):
-            rated_list = repo.list_rated_movies(user_id)
-            if not rated_list:
-                reply = "You haven't rated any movies yet! Ask me to quiz you or click on the 'My Ratings' tab to start rating movies."
-            else:
-                lines = [f"• {m['title']} — {'★' * m['rating']}{'☆' * (5 - m['rating'])} ({m['rating']}/5) — Rated {m.get('rated_ago', 'recently')}" for m in rated_list]
-                reply = f"Here are the movies you've rated ({len(rated_list)} total):\n" + "\n".join(lines) + "\n\nYou can view or edit all your ratings in the 'My Ratings' tab!"
-            msg_record = repo.add_chat_message(user_id, "assistant", reply, actions=actions_taken)
-            return {
-                "message": msg_record,
-                "actions_taken": actions_taken,
-            }
-
-        # Handle streaming recommendation request
-        if any(phrase in msg_lower for phrase in [
-            "streaming recommendation", "free movie", "rent movie", "where to stream",
-            "stream recommendation", "free streaming"
-        ]):
-            rec_action = await AiAgentService.generate_streaming_recommendation(user_id, repo, tmdb)
-            if rec_action:
-                actions_taken.append(rec_action)
-                reply = f"🎬 *Streaming Recommendation*: **{rec_action['title']}** — {rec_action['details_text']}!\n\n{rec_action.get('overview', '')}"
-            else:
-                reply = "I couldn't find a free streaming or rental recommendation right now, but check out the 'Trending' tab for top titles!"
-            msg_record = repo.add_chat_message(user_id, "assistant", reply, actions=actions_taken)
-            return {
-                "message": msg_record,
-                "actions_taken": actions_taken,
-            }
-
-        # Handle manual "What's new?" / "Any movie news?" refresh queries using novelty pipeline
-        if any(phrase in msg_lower for phrase in [
-            "what's new", "whats new", "any movie news", "what changed",
-            "check my watchlist for updates", "any news about the movies", "what changed since i was last here"
-        ]):
-            from app.services.briefing_service import BriefingService
-            briefing_res = await BriefingService.evaluate_startup_briefing(user_id, repo, tmdb, force_refresh=True)
-            agent_reply = briefing_res.get("briefing") or "I checked your watchlist and news sources—everything is currently up to date!"
-            msg_record = repo.add_chat_message(user_id, "assistant", agent_reply, actions=actions_taken)
-            return {
-                "message": msg_record,
-                "actions_taken": actions_taken,
-            }
-        title_query = ext_title
+        title_query = ext_title or rate_title or search_query
         if not title_query:
             title_patterns = [
                 r"(?:any\s+)?(?:update|updates|news|info|word)\s+(?:on|about|for)\s+['\"]?([^'.\"$\n]+?)['\"]?$",
@@ -830,70 +1261,66 @@ class AiAgentService:
                 if m:
                     extracted = m.group(1).strip()
                     extracted = re.sub(r'\s+(?:released|available|coming|out|today|soon)$', '', extracted, flags=re.IGNORECASE).strip()
-                    if extracted and len(extracted) > 1 and extracted not in {"my shows", "my queue", "monitored shows", "updates", "watchlist", "list"}:
-                        title_query = extracted
+                    if extracted and len(extracted) > 1:
+                        match_item = next((i for i in items if extracted.lower() in (i.get("title") or "").lower()), None)
+                        title_query = match_item.get("title", extracted) if match_item else extracted
                         break
 
-        title_context_note = ""
-        recommendation_note = ""
-
+        # Title-specific context lookup
         if title_query:
-            # Store query into persistent memory
             repo.add_query_memory(user_id, user_message, title=title_query)
-
             exact_matches = [i for i in items if title_query.lower() in i.get("title", "").lower()]
             partial_matches = [
                 i for i in items
                 if any(w in i.get("title", "").lower() for w in title_query.split() if len(w) > 3 and w.lower() not in {"title", "movie", "show", "season"})
             ]
             matching_user_items = exact_matches or partial_matches
-            rec_item_id = None
-            rec_media_type = None
 
             if matching_user_items:
                 item = matching_user_items[0]
                 t_title = item.get("title")
                 status_str = "monitored" if item.get("status") in {"following", "queue"} else item.get("status")
                 rel_date = item.get("release_date")
-                rec_item_id = item.get("tmdb_id")
-                rec_media_type = item.get("media_type", "movie")
                 from app.models import days_until
                 days = days_until(rel_date) if rel_date else None
                 days_desc = f" (Releasing in {days} days on {rel_date})" if days and days > 0 else (f" (Released {abs(days)} days ago on {rel_date})" if days and days < 0 else (f" (Releasing TODAY {rel_date})" if days == 0 else f" (Release date: {rel_date})"))
-                title_context_note = f"\n[System Note: User specifically asked about '{t_title}'. Item IS in user's queue. Status: {status_str}{days_desc}. Answer specifically about '{t_title}' warmly and conversationally as a knowledgeable friend.]"
+                context_notes.append(f"Title Information: User asked about '{t_title}'. Item IS in user's queue. Status: {status_str}{days_desc}.")
             elif tmdb:
                 try:
                     res = await tmdb.search(title_query)
                     if res:
                         best = res[0]
-                        t_title = best.get("title")
+                        t_title = best.get("title") or best.get("name")
                         rel_date = best.get("release_date")
-                        media_type = best.get("media_type")
-                        rec_item_id = best.get("id")
-                        rec_media_type = media_type
+                        media_type = best.get("media_type", "movie")
                         rel_str = f" ({rel_date})" if rel_date else ""
-                        title_context_note = f"\n[System Note: User asked about '{t_title}'. Found on TMDB: '{t_title}' ({media_type}{rel_str}). It is NOT currently in user's queue. Answer conversationally as a knowledgeable movie-buff friend.]"
-
+                        context_notes.append(f"Title Information: User asked about '{t_title}'. Found on TMDB: '{t_title}' ({media_type}{rel_str}). It is NOT currently in user's queue.")
                     else:
-                        title_context_note = f"\n[System Note: User asked about '{title_query}'. No matching show/movie found in user's queue or TMDB.]"
+                        context_notes.append(f"Title Information: User asked about '{title_query}'. No matching show/movie found in user's queue or TMDB.")
                 except Exception as e:
                     logger.warning(f"Error resolving title search for LLM context: {e}")
 
-            if tmdb and rec_item_id and rec_media_type:
-                try:
-                    recs = await tmdb.get_recommendations(rec_media_type, rec_item_id)
-                    if recs:
-                        r_title = recs[0].get("title")
-                        r_year = (recs[0].get("release_date") or "")[:4]
-                        r_year_str = f" ({r_year})" if r_year else ""
-                        recommendation_note = f"\n[System Note: Taste Recommendation: Based on user's interest in this title, you may suggest '{r_title}'{r_year_str} as a similar recommendation.]"
-                except Exception as e:
-                    logger.warning(f"Error fetching recommendations for context: {e}")
+        # Recommendation request context lookup
+        recommend_keywords = ["recommend", "suggest", "what to watch", "what should i watch", "movie idea", "show idea", "something like"]
+        is_rec_query = any(k in msg_lower for k in recommend_keywords)
+        if is_rec_query:
+            rated_items = repo.list_rated_movies(user_id)
+            top_rated = [i for i in rated_items if (i.get("rating") or 0) >= 4]
+            if top_rated:
+                context_notes.append(f"User Taste Preferences: User loved {[r['title'] for r in top_rated[:3]]}.")
 
-        holiday_ctx = ""
+        # Queue summary context lookup
+        queue_summary_keywords = ["my queue", "my list", "all updates", "monitored shows", "what updates", "show list", "monitoring", "upcoming"]
+        if any(k in msg_lower for k in queue_summary_keywords):
+            if monitored:
+                m_titles = [f"{i['title']} ({i.get('status', 'queue')})" for i in monitored[:10]]
+                context_notes.append(f"Monitored Queue Items:\n" + "\n".join([f"- {t}" for t in m_titles]))
+            else:
+                context_notes.append("Monitored Queue Items: None currently monitored.")
+
         holiday_remark = get_approaching_holiday_or_season()
         if holiday_remark:
-            holiday_ctx = f"\n[System Note: Context remark: {holiday_remark}]"
+            context_notes.append(f"Holiday Remark: {holiday_remark}")
 
         # User Ratings context for recommendations
         rated_items = [i for i in items if i.get("user_rating")]
@@ -902,7 +1329,7 @@ class AiAgentService:
         # Check if user is asking for a movie/show recommendation
         recommend_keywords = ["recommend", "suggest", "what to watch", "what should i watch", "movie idea", "show idea", "something like"]
         is_rec_query = any(k in msg_lower for k in recommend_keywords)
-        
+
         rating_rec_note = ""
         if is_rec_query and top_rated_items and tmdb:
             try:
@@ -922,62 +1349,150 @@ class AiAgentService:
         location = settings.get("location", "").strip()
         weather_report = await WeatherService.get_weather_report(location) if location else None
         system_prompt = get_system_prompt(settings, weather_report)
-        actions_str = ""
-        if actions_taken:
-            actions_list = []
-            for a in actions_taken:
-                act = a.get("action")
-                t = a.get("title", "title")
-                if act == "rate_movie":
-                    actions_list.append(f"Logged {a.get('rating', 5)}-star rating for '{t}' in user's rated movies list")
-                elif act == "delete_rating":
-                    actions_list.append(f"Deleted rating for '{t}'")
-                elif act == "remove_item":
-                    actions_list.append(f"Removed '{t}' from queue")
-                elif act == "add_monitoring":
-                    p_str = f" with target rental price ${a['target_rental_price']:.2f}" if a.get("target_rental_price") else ""
-                    actions_list.append(f"Added/Updated '{t}' to queue{p_str}")
-                else:
-                    actions_list.append(f"Performed action on '{t}'")
-            actions_str = f"\n[System Note: Automated action executed on user behalf: {', '.join(actions_list)}. Inform the user clearly that this was accomplished.]"
 
-        full_prompt = f"User message: {user_message}{actions_str}{title_context_note}{recommendation_note}{rating_rec_note}{holiday_ctx}"
+        result = await AiAgentService._call_gemini_api(
+            system_instruction=system_prompt,
+            recent_history=history[-6:],
+            user_message=user_message,
+            context_notes=context_notes,
+            caller="chat_processor",
+            user_id=user_id,
+            repo=repo,
+        )
 
-        agent_reply = None
-        if GEMINI_API_KEY:
-            try:
-                monitored_summary = "\n".join([f"- {i['title']} ({i['media_type']}, status: {i['status']}" + (f", target price: ${i['target_rental_price']}" if i.get("target_rental_price") else "") + (f", user rating: {i['user_rating']}/5 stars" if i.get("user_rating") else "") + ")" for i in monitored[:10]])
-                if not monitored_summary:
-                    monitored_summary = "None currently monitored."
+        agent_reply = result.text
 
-                rated_summary = "\n".join([f"- {i['title']} (Rated {i['user_rating']}/5 stars)" for i in rated_items[:10]])
-                if not rated_summary:
-                    rated_summary = "No ratings provided by user yet."
-
-                chat_context = (
-                    f"{system_prompt}\n\n"
-                    f"User's Monitored Watchlist Context:\n{monitored_summary}\n\n"
-                    f"User's Saved Ratings:\n{rated_summary}\n\n"
-                    f"Recent Conversation:\n"
-                )
-                for m in history[-6:]:
-                    chat_context += f"{m['role'].capitalize()}: {m['content']}\n"
-                agent_reply = await AiAgentService._call_gemini_api(chat_context, full_prompt)
-            except Exception as e:
-                logger.error(f"Gemini API error during chat: {e}")
-
-        if not agent_reply:
-            agent_reply = await AiAgentService._generate_fallback_chat_reply(
-                system_prompt, user_message, actions_taken, user_id, repo, tmdb
+        if not agent_reply or result.fallback_used:
+            agent_reply = AiAgentService._generate_fallback_chat_reply(
+                system_prompt=system_prompt,
+                user_message=user_message,
+                actions=actions_taken,
+                title_query=title_query,
             )
 
         # Save assistant message
         msg_record = repo.add_chat_message(user_id, "assistant", agent_reply, actions=actions_taken)
+
+        # Record decision log for telemetry & usage logs view
+        try:
+            import datetime, uuid
+            chat_log = {
+                "log_id": f"chat_{uuid.uuid4().hex[:12]}",
+                "event_type": "chat_llm_generation",
+                "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "user_id": user_id,
+                "session_id": None,
+                "model_requested": result.model_requested,
+                "model_used": result.model_used,
+                "gemini_called": result.gemini_called,
+                "fallback_used": result.fallback_used,
+                "fallback_reason": result.fallback_reason,
+                "decision_config_version": 1,
+                "prompt_version": 1,
+                "required_candidates": [],
+                "optional_candidates": [],
+                "selected_candidates": [],
+                "excluded_candidates": [],
+                "random_rolls": {},
+                "cooldowns_applied": [],
+                "selection_summary": (
+                    f"Caller: {result.caller} | Model: {result.model_used or result.model_requested} | "
+                    f"Tokens: {result.prompt_token_count} prompt + {result.response_token_count} response = {result.total_token_count} total | "
+                    f"Est Cost: ${result.estimated_cost_usd:.8f} | Latency: {result.request_duration_ms or 0}ms"
+                ),
+                "sanitized_prompt": user_message,
+                "raw_model_response": agent_reply,
+                "final_response": agent_reply,
+                "request_duration_ms": result.request_duration_ms or 0.0,
+            }
+            if hasattr(repo, "add_decision_log"):
+                repo.add_decision_log(chat_log)
+        except Exception as e:
+            logger.warning(f"Error recording chat telemetry decision log: {e}")
+
         return {
             "message": msg_record,
             "actions_taken": actions_taken,
+            "telemetry": result.to_dict(),
         }
 
+    @staticmethod
+    def _parse_ordinal_range(text: str) -> tuple[str, int | None, int | None, bool]:
+        """Parse ordinal/range expressions from query text (e.g. '2nd through the end of the harry potter movies')."""
+        clean_text = text.strip()
+        msg_lower = clean_text.lower()
+        start_idx = None
+        end_idx = None
+        is_range = False
+
+        # Pattern 1: "2nd through the end of ...", "2nd to the end of ...", "2nd through end of ..."
+        m1 = re.search(r'\b(?:the\s+)?(\d+)(?:st|nd|rd|th)?\s+(?:through|to|till|until)\s+(?:the\s+)?(?:end|last)\s+(?:of\s+)?(?:the\s+)?', msg_lower)
+        if m1:
+            start_idx = int(m1.group(1))
+            end_idx = None
+            is_range = True
+            clean_text = re.sub(r'\b(?:the\s+)?\d+(?:st|nd|rd|th)?\s+(?:through|to|till|until)\s+(?:the\s+)?(?:end|last)\s+(?:of\s+)?(?:the\s+)?', '', clean_text, flags=re.IGNORECASE).strip()
+
+        # Pattern 2: "from (the) 2nd to (the) 5th ...", "movies 2 through 8 of ..."
+        if not is_range:
+            m2 = re.search(r'\b(?:from\s+)?(?:the\s+)?(\d+)(?:st|nd|rd|th)?\s+(?:through|to|till|until|-)\s+(?:the\s+)?(\d+)(?:st|nd|rd|th)?\s*(?:of|in)?\s*(?:the\s+)?', msg_lower)
+            if m2:
+                start_idx = int(m2.group(1))
+                end_idx = int(m2.group(2))
+                is_range = True
+                clean_text = re.sub(r'\b(?:from\s+)?(?:the\s+)?\d+(?:st|nd|rd|th)?\s+(?:through|to|till|until|-)\s+(?:the\s+)?\d+(?:st|nd|rd|th)?\s*(?:of|in)?\s*(?:the\s+)?', '', clean_text, flags=re.IGNORECASE).strip()
+
+        # Pattern 3: "the rest of ...", "remaining ...", "all ... except the first"
+        if not is_range:
+            if any(k in msg_lower for k in ["rest of", "remaining", "except the first", "from the second", "after the first"]):
+                start_idx = 2
+                end_idx = None
+                is_range = True
+                clean_text = re.sub(r'\b(?:the\s+)?(?:rest\s+of|remaining|movies\s+after\s+the\s+first|all\s+except\s+the\s+first)\s+(?:the\s+)?', '', clean_text, flags=re.IGNORECASE).strip()
+
+        # Pattern 4: "the 2nd movie of ..."
+        if not is_range:
+            m4 = re.search(r'\b(?:the\s+)?(\d+)(?:st|nd|rd|th)\s+(?:movie|film|installment|part)\s+(?:of\s+)?(?:the\s+)?', msg_lower)
+            if m4:
+                start_idx = int(m4.group(1))
+                end_idx = start_idx
+                is_range = True
+                clean_text = re.sub(r'\b(?:the\s+)?\d+(?:st|nd|rd|th)\s+(?:movie|film|installment|part)\s+(?:of\s+)?(?:the\s+)?', '', clean_text, flags=re.IGNORECASE).strip()
+
+        # Clean series descriptors
+        clean_text = re.sub(r'\b(?:the\s+)?(?:series|collection|franchise|trilogy|all\s+(?:the\s+)?movies?|all\s+(?:the\s+)?films?|movie\s+series|film\s+series|set\s+of\s+movies|movies?|films?)\s*(?:of)?\b', '', clean_text, flags=re.IGNORECASE).strip()
+        clean_text = re.sub(r'\s+(?:series|collection|franchise|trilogy|movies|films)$', '', clean_text, flags=re.IGNORECASE).strip()
+
+        return clean_text, start_idx, end_idx, is_range
+
+    @staticmethod
+    def _extract_titles_from_recent_history(history: list[dict[str, Any]]) -> list[str]:
+        """Extract titles from recent assistant messages when user refers back with pronouns ('those', 'them')."""
+        titles = []
+        for msg in reversed(history):
+            if msg.get("role") in {"assistant", "model"}:
+                actions = msg.get("actions") or []
+                for act in actions:
+                    if act.get("action") == "movie_search" and act.get("results"):
+                        for r in act["results"]:
+                            if r.get("title"):
+                                titles.append(r["title"])
+                    elif act.get("action") == "movie_quiz" and act.get("movies"):
+                        for m in act["movies"]:
+                            if m.get("title"):
+                                titles.append(m["title"])
+
+                content = msg.get("content", "")
+                italic_titles = re.findall(r'\*([^*]{2,70})\*', content)
+                for t in italic_titles:
+                    t_clean = t.strip()
+                    if t_clean and t_clean.lower() not in {"my algorithms suggest", "cinequeue"} and len(t_clean) > 2:
+                        if t_clean not in titles:
+                            titles.append(t_clean)
+
+                if titles:
+                    break
+        return titles
 
     @staticmethod
     def _extract_rating_action(text: str) -> tuple[str | None, int | None]:
@@ -985,7 +1500,7 @@ class AiAgentService:
         clean_text = text.strip()
         msg_lower = clean_text.lower()
 
-        if any(k in msg_lower for k in ["remove", "delete", "unrate", "clear"]):
+        if any(k in msg_lower for k in ["remove", "delete", "unrate", "clear"]) or any(q in msg_lower for q in ["show my", "list my", "what movies have i", "my ratings"]):
             return None, None
 
         has_rate_intent = any(k in msg_lower for k in [
@@ -995,7 +1510,7 @@ class AiAgentService:
             return None, None
 
         rating = None
-        num_match = re.search(r'(?:(\d)\s*(?:-\s*)?stars?|(\d)\s*/\s*5|rated?\s+(\d)|rating\s+(?:of\s+)?(\d)|give\s+it\s+(\d)|log\s+(?:my\s+)?(\d))', msg_lower)
+        num_match = re.search(r'(?:(\d)\s*(?:-\s*)?stars?|(\d)\s*/\s*5|rated?\s+(\d)|rating\s+(?:of\s+)?(\d)|give\s+(?:it|them|those)?\s*(\d)|log\s+(?:my\s+)?(\d)|rate\s+(?:it|them|those|these|all|each)?\s*(\d)|and\s+rate\s+(?:it|them|those|these|all|each)?\s*(\d))', msg_lower)
         if num_match:
             val = next(g for g in num_match.groups() if g is not None)
             try:
@@ -1010,27 +1525,49 @@ class AiAgentService:
                     break
 
         if rating is None:
-            if any(p in msg_lower for p in ["watched list", "rated movies", "log rating", "rate movie", "rated list", "list of rated"]):
+            if any(p in msg_lower for p in ["watched list", "rated movies", "log rating", "rate movie", "rated list", "list of rated", "watched"]):
                 rating = 5
 
         if rating is not None:
             rating = max(1, min(5, rating))
 
         title_str = clean_text
+
+        # Strip leading verbs/intent phrases including polite expressions (e.g., "please add", "can you rate")
         prefix_patterns = [
-            r"^(?:add|put|log|insert|record)\s+(?:a|an|the|my)?\s*(?:\d\s*(?:-\s*)?stars?\s+)?(?:rating\s+for\s+)?",
-            r"^(?:i\s+(?:have\s+)?(?:watched|seen))\s+",
-            r"^(?:rate)\s+",
-            r"^(?:give)\s+",
+            r"^(?:please\s+|can\s+you\s+|could\s+you\s+|would\s+you\s+)*(?:add|put|log|insert|record|rate|give|set)\s+(?:a|an|the|my)?\s*(?:\d\s*(?:-\s*)?stars?\s+)?(?:rating\s+for\s+)?",
+            r"^(?:please\s+|can\s+you\s+|could\s+you\s+|would\s+you\s+)*(?:i\s+(?:have\s+)?(?:watched|seen))\s+",
+            r"^(?:please\s+|can\s+you\s+|could\s+you\s+|would\s+you\s+)*(?:rate)\s+",
+            r"^(?:please\s+|can\s+you\s+|could\s+you\s+|would\s+you\s+)*(?:give)\s+",
         ]
         for p in prefix_patterns:
             title_str = re.sub(p, "", title_str, flags=re.IGNORECASE).strip()
 
-        title_str = re.split(r'\s+(?:and\s+rate|and\s+give|with\s+a|giving|rated|rating|to\s+my\s+watched|to\s+my\s+rated|as\s+\d)\b', title_str, flags=re.IGNORECASE)[0].strip()
-        title_str = re.sub(r'^(?:for|about|a|an|the)\s+', '', title_str, flags=re.IGNORECASE).strip()
-        title_str = re.sub(r'\s+(?:with|giving|and|rating|ratings|stars?|star|to|on|in|a|\d|\d/5)$', '', title_str, flags=re.IGNORECASE).strip()
+        # Remove destination clauses (including typos like "to the lis", "to list", "watched list")
+        dest_patterns = [
+            r"\bto\s+(?:my\s+)?(?:movies?\s+(?:i\s*\'?ve?\s+)?watched|watched\s+list|watched|rated\s+movies?|rated\s+list|ratings?|list|lis|watchlist|queue)\b",
+            r"\b(?:in|into|on|as)\s+(?:my\s+)?(?:movies?\s+(?:i\s*\'?ve?\s+)?watched|watched\s+list|watched|rated\s+movies?|rated\s+list|ratings?|list|lis|watchlist|queue)\b",
+        ]
+        for dp in dest_patterns:
+            title_str = re.sub(dp, "", title_str, flags=re.IGNORECASE).strip()
 
-        ignored_titles = {"movie", "show", "title", "watched list", "rated movies", "my rated movies", "it", "them", "this", "that", "something", "3-star", "4-star", "5-star"}
+        # Remove rating clauses
+        rating_patterns = [
+            r"\b(?:and\s+)?(?:rate|rating|give)\s+(?:it|them|those|these|all|each)?\s*(?:\d|one|two|three|four|five)(?:\s*stars?)?\b",
+            r"\bwith\s+(?:a\s+)?(?:\d|one|two|three|four|five)\s*stars?\b",
+            r"\b(?:\d|one|two|three|four|five)\s*stars?\b",
+            r"\b(?:\d)\s*/\s*5\b",
+            r"\brated\s+\d\b",
+        ]
+        for rp in rating_patterns:
+            title_str = re.sub(rp, "", title_str, flags=re.IGNORECASE).strip()
+
+        # Cleanup connector words, trailing rating details, and punctuation
+        title_str = re.sub(r'^(?:for|about|a|an|the)\s+', '', title_str, flags=re.IGNORECASE).strip()
+        title_str = re.sub(r'\s+(?:with|giving|and|rating|ratings|stars?|star|to|on|in|as|a|\d|\d/5)$', '', title_str, flags=re.IGNORECASE).strip()
+        title_str = title_str.strip(' ,.-"\'')
+
+        ignored_titles = {"movie", "show", "title", "watched list", "rated movies", "my rated movies", "it", "them", "this", "that", "something", "3-star", "4-star", "5-star", "watched"}
         ignored_prefixes = ("it ", "them ", "this ", "that ", "something ")
 
         if (
@@ -1042,6 +1579,49 @@ class AiAgentService:
             return title_str, rating
 
         return None, None
+
+    @staticmethod
+    async def _search_tmdb_with_fallback(
+        tmdb: TmdbClient,
+        query: str,
+        user_id: str = "unknown",
+        user_message: str = "",
+    ) -> list[dict[str, Any]]:
+        """Search TMDB with query, falling back to stripped title if actor/detail clauses prevent exact matching, and log failure telemetry."""
+        if not query or not query.strip():
+            return []
+
+        clean_query = query.strip()
+        res = await tmdb.search(clean_query)
+        if res:
+            return res
+
+        # Fallback 1: Strip trailing actor/cast or release year annotations e.g. "The Patriot with Mel Gibson" -> "The Patriot"
+        simplified = re.sub(r'\s+(?:with|starring|featuring|by|directed\s+by)\s+[A-Za-z\s]+$', '', clean_query, flags=re.IGNORECASE).strip()
+        simplified = re.sub(r'\s*\(\d{4}\)', '', simplified).strip()
+
+        if simplified and simplified.lower() != clean_query.lower():
+            res_simp = await tmdb.search(simplified)
+            if res_simp:
+                actor_match = re.search(r'\b(?:with|starring|featuring)\s+([A-Za-z\s]+)$', clean_query, re.IGNORECASE)
+                if actor_match:
+                    actor_name = actor_match.group(1).strip().lower()
+                    matched = [c for c in res_simp if actor_name in (c.get("overview") or "").lower() or actor_name in (c.get("title") or "").lower()]
+                    if matched:
+                        return matched
+                return res_simp
+
+        # Fallback 2: Log failure to retrieve so admins can inspect unretrieved queries
+        logger.warning(
+            f"[AI Agent TMDB Lookup Failure] No TMDB results found for search query '{clean_query}'. User prompt: '{user_message}'",
+            extra=sanitize_log_data({
+                "ai_event": "tmdb_lookup_failure",
+                "query": clean_query,
+                "user_message": user_message,
+                "user_id": user_id,
+            })
+        )
+        return []
 
     @staticmethod
     def _extract_delete_action(text: str) -> tuple[str | None, str | None]:
@@ -1056,15 +1636,21 @@ class AiAgentService:
 
         title_str = clean_text
         prefix_patterns = [
-            r"^(?:remove|delete|clear)\s+(?:rating\s+for\s+)?",
+            r"^(?:remove|delete|clear|unrate)\s+(?:a|an|the|my)?\s*(?:rating\s+for\s+)?",
             r"^(?:delete\s+rating\s+for|unrate|remove\s+rating\s+for)\s+",
         ]
         for p in prefix_patterns:
             title_str = re.sub(p, "", title_str, flags=re.IGNORECASE).strip()
 
-        title_str = re.split(r'\s+(?:from\s+my|from\s+the|from)\b', title_str, flags=re.IGNORECASE)[0].strip()
-        title_str = re.sub(r'\s+(?:rating|ratings|list|queue)$', '', title_str, flags=re.IGNORECASE).strip()
-        title_str = re.sub(r'^(?:a|an|the|for)\s+', '', title_str, flags=re.IGNORECASE).strip()
+        dest_patterns = [
+            r"\bfrom\s+(?:my\s+)?(?:movies?\s+(?:i\s*\'?ve?\s+)?watched|watched\s+list|watched|rated\s+movies?|rated\s+list|ratings?|queue|watchlist)\b",
+        ]
+        for dp in dest_patterns:
+            title_str = re.sub(dp, "", title_str, flags=re.IGNORECASE).strip()
+
+        title_str = re.sub(r'\s+(?:rating|ratings|list|queue|watchlist)$', '', title_str, flags=re.IGNORECASE).strip()
+        title_str = re.sub(r'^(?:a|an|the|for|about)\s+', '', title_str, flags=re.IGNORECASE).strip()
+        title_str = title_str.strip(' ,.-"\'')
 
         ignored_titles = {"movie", "show", "watchlist", "queue", "rating", "ratings"}
 
@@ -1073,6 +1659,7 @@ class AiAgentService:
 
         return None, None
 
+
     @staticmethod
     def _extract_title_and_price(text: str) -> tuple[str | None, float | None]:
         """Extract title and optional target price from user prompt."""
@@ -1080,10 +1667,10 @@ class AiAgentService:
         target_price = float(price_match.group(1)) if price_match else None
 
         patterns = [
-            r"(?:add|track|monitor|follow)\s+['\"]?([^'.\"$\n]+?)['\"]?\s+(?:to\s+my\s+(?:monitor\s+|watch\s*)?(?:list|queue|monitoring)|to\s+monitoring)",
+            r"(?:add|track|monitor|follow|enter|put|insert|save|log)\s+['\"]?([^'.\"$\n]+?)['\"]?\s+(?:to|into|in|on)\s+(?:my\s+)?(?:monitor\s+|watch\s*)?(?:list|queue|monitoring|watchlist)",
             r"(?:waiting|wait|looking)\s+for\s+(?:the\s+movie\s+|the\s+show\s+)?['\"]?([^'.\"$\n]+?)['\"]?\s*(?:to\s+(?:come|air|drop|rent|release)|under|\$|$)",
             r"(?:notify|alert|tell)\s+me\s+when\s+(?:the\s+movie\s+|the\s+show\s+)?['\"]?([^'.\"$\n]+?)['\"]?\s*(?:drops|is|available|to\s+rent|under|\$|$)",
-            r"(?:add|track|monitor)\s+['\"]?([^'.\"$\n]+?)['\"]?$",
+            r"(?:add|track|monitor|enter|put|insert|save|log)\s+['\"]?([^'.\"$\n]+?)['\"]?$",
             r"(?:waiting\s+for)\s+['\"]?([^'.\"$\n]+?)['\"]?$",
             r"(?:can't|cant)\s+wait\s+for\s+['\"]?([^'.\"$\n]+?)['\"]?\s*(?:to\s+drop|to\s+rent|under|\$|$)",
         ]
@@ -1097,234 +1684,679 @@ class AiAgentService:
 
         return None, target_price
 
-
     @staticmethod
-    async def _call_gemini_api(system_prompt: str, user_prompt: str) -> str | None:
-        """Call Gemini API via httpx using current active model endpoints."""
-        models_to_try = ["gemini-flash-latest", "gemini-3.5-flash-lite"]
-        payload = {
-            "contents": [
-                {
-                    "role": "user",
-                    "parts": [{"text": f"{system_prompt}\n\nUser: {user_prompt}"}]
-                }
-            ]
-        }
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            for model_name in models_to_try:
-                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
-                try:
-                    resp = await client.post(url, json=payload)
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        candidates = data.get("candidates", [])
-                        if candidates:
-                            parts = candidates[0].get("content", {}).get("parts", [])
-                            if parts:
-                                return parts[0].get("text", "").strip()
-                except Exception as e:
-                    logger.warning(f"Error calling Gemini model '{model_name}': {e}")
+    def _extract_search_action(text: str) -> str | None:
+        """Extract title to search for if the user has an explicit movie search intent."""
+        clean_text = text.strip()
+        msg_lower = clean_text.lower()
+        search_patterns = [
+            r"^(?:search|find|look\s+up|check|details\s+on|info\s+on|tell\s+me\s+about)\s+(?:for\s+)?['\"]?([^'.\"$\n]+?)['\"]?$",
+            r"^(?:is|where\s+can\s+i\s+watch)\s+['\"]?([^'.\"$\n]+?)['\"]?\s+(?:available|streaming|releasing|out)?$",
+        ]
+        for p in search_patterns:
+            m = re.search(p, msg_lower, re.IGNORECASE)
+            if m:
+                extracted = m.group(1).strip()
+                extracted = re.sub(r'\s+(?:released|available|coming|out|today|soon|movie|show)$', '', extracted, flags=re.IGNORECASE).strip()
+                if extracted and len(extracted) > 1 and extracted not in {"the movie", "the show", "it", "something"}:
+                    return extracted
         return None
 
     @staticmethod
-    async def _generate_fallback_chat_reply(
+    def _extract_status_action(text: str) -> tuple[str | None, str | None, bool | None]:
+        """Extract movie title and requested status update ('watched', 'watching', 'queue', 'dropped') or ownership."""
+        clean_text = text.strip()
+        msg_lower = clean_text.lower()
+
+        if not any(k in msg_lower for k in ["mark", "set status", "change status", "owned", "watching", "dropped"]):
+            return None, None, None
+
+        new_status = None
+        if "watched" in msg_lower:
+            new_status = "watched"
+        elif "watching" in msg_lower:
+            new_status = "watching"
+        elif "dropped" in msg_lower:
+            new_status = "dropped"
+        elif "queue" in msg_lower or "watchlist" in msg_lower:
+            new_status = "queue"
+
+        is_owned = True if any(k in msg_lower for k in ["owned", "purchased", "bought", "have it on disc", "blu-ray", "dvd"]) else None
+
+        title_str = clean_text
+        prefix_patterns = [
+            r"^(?:mark|set\s+status\s+of|change\s+status\s+of|set|change)\s+(?:a|an|the|my)?\s*",
+        ]
+        for p in prefix_patterns:
+            title_str = re.sub(p, "", title_str, flags=re.IGNORECASE).strip()
+
+        suffix_patterns = [
+            r"\bas\s+(?:watched|watching|dropped|queue|owned|purchased)\b",
+            r"\bto\s+(?:watched|watching|dropped|queue|owned|purchased)\b",
+        ]
+        for sp in suffix_patterns:
+            title_str = re.sub(sp, "", title_str, flags=re.IGNORECASE).strip()
+
+        title_str = re.sub(r'^(?:for|about|a|an|the)\s+', '', title_str, flags=re.IGNORECASE).strip()
+        title_str = title_str.strip(' ,.-"\'')
+
+        if title_str and len(title_str) > 1 and title_str.lower() not in {"movie", "show", "it", "status"}:
+            return title_str, new_status, is_owned
+
+        return None, None, None
+
+    @staticmethod
+    async def _call_gemini_api(
+        system_instruction: str,
+        recent_history: list[dict[str, str]] | str = [],
+        user_message: str = "",
+        context_notes: list[str] | None = None,
+        max_output_tokens: int = 450,
+        caller: str = "agent_service",
+        user_id: str | None = None,
+        session_id: str | None = None,
+        repo: Any = None,
+        daily_cache_key: str | None = None,
+    ) -> AgentResult:
+        """Call Gemini API via httpx using configurable model selection and native request structure."""
+        if isinstance(recent_history, str):
+            user_message = recent_history
+            recent_history = []
+
+        total_prompt_chars, prompt_breakdown = compute_prompt_metrics(
+            system_instruction, recent_history, user_message, context_notes
+        )
+
+        if not GEMINI_API_KEY:
+            est_p_tokens = max(1, total_prompt_chars // 4) if total_prompt_chars else 0
+            est_cost = calculate_estimated_cost(GEMINI_PRIMARY_MODEL, est_p_tokens, 0)
+            logger.info(
+                f"[AI CALL TELEMETRY] Caller: '{caller}' | GEMINI_API_KEY missing. Fallback triggered.",
+                extra=sanitize_log_data({
+                    "provider": "fallback",
+                    "caller": caller,
+                    "fallback_reason": "api_key_missing",
+                    "prompt_char_count": total_prompt_chars,
+                    "prompt_token_count": est_p_tokens,
+                    "prompt_breakdown": prompt_breakdown,
+                })
+            )
+            return AgentResult(
+                text="",
+                provider="fallback",
+                model_requested=GEMINI_PRIMARY_MODEL,
+                model_used=None,
+                gemini_called=False,
+                fallback_used=True,
+                fallback_reason="api_key_missing",
+                http_status=None,
+                request_duration_ms=None,
+                actions_taken=[],
+                caller=caller,
+                prompt_char_count=total_prompt_chars,
+                prompt_token_count=est_p_tokens,
+                response_char_count=0,
+                response_token_count=0,
+                total_token_count=est_p_tokens,
+                estimated_cost_usd=est_cost,
+                finish_reason="API_KEY_MISSING",
+                usage_metadata={},
+                prompt_breakdown=prompt_breakdown,
+            )
+
+        models_to_try = [GEMINI_PRIMARY_MODEL, GEMINI_FALLBACK_MODEL]
+        payload = build_gemini_request(
+            system_instruction=system_instruction,
+            recent_history=recent_history,
+            user_message=user_message,
+            context_notes=context_notes,
+            max_output_tokens=max_output_tokens,
+        )
+
+        last_fallback_reason = "unknown_error"
+        last_http_status = None
+        gemini_request_id = f"req_{uuid.uuid4().hex[:12]}"
+        start_gem_perf = time.perf_counter()
+
+        from app.decision_models import get_current_run_context
+        run_ctx = get_current_run_context()
+
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            for idx, model_name in enumerate(models_to_try, start=1):
+                is_fallback = (idx > 1)
+                start_time_iso = datetime.now(timezone.utc).isoformat()
+
+                if run_ctx:
+                    run_ctx.record_external_attempt("gemini")
+                    if is_fallback:
+                        run_ctx.fallback_attempted = True
+
+                # Emit Attempt Started Event
+                if repo and hasattr(repo, "add_decision_log"):
+                    try:
+                        repo.add_decision_log({
+                            "log_id": f"log_att_start_{uuid.uuid4().hex[:10]}",
+                            "event_type": "gemini_http_attempt_started",
+                            "telemetry_version": 2,
+                            "briefing_run_id": run_ctx.briefing_run_id if run_ctx else None,
+                            "request_id": run_ctx.request_id if run_ctx else None,
+                            "session_id": session_id or (run_ctx.session_id if run_ctx else None),
+                            "user_id": user_id or (run_ctx.user_id if run_ctx else "unknown"),
+                            "gemini_request_id": gemini_request_id,
+                            "timestamp": start_time_iso,
+                            "caller": caller,
+                            "model_requested": GEMINI_PRIMARY_MODEL,
+                            "model_attempted": model_name,
+                            "attempt_number": idx,
+                            "is_fallback_attempt": is_fallback,
+                            "gemini_called": True,
+                            "fallback_used": is_fallback,
+                            "daily_cache_key": daily_cache_key or (run_ctx.daily_cache_key if run_ctx else None),
+                            "selection_summary": f"Gemini HTTP Attempt #{idx} Started ({model_name})",
+                        })
+                    except Exception as log_err:
+                        logger.warning(f"Error logging gemini_http_attempt_started: {log_err}")
+
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
+                start_time = time.perf_counter()
+                try:
+                    resp = await client.post(url, json=payload)
+                    duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+                    end_time_iso = datetime.now(timezone.utc).isoformat()
+                    last_http_status = resp.status_code
+
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        candidates = data.get("candidates", [])
+                        usage_metadata = data.get("usageMetadata", {})
+
+                        p_tokens = usage_metadata.get("promptTokenCount")
+                        if p_tokens is None:
+                            p_tokens = max(1, total_prompt_chars // 4) if total_prompt_chars else 0
+
+                        if candidates:
+                            finish_reason = candidates[0].get("finishReason", "UNKNOWN")
+                            parts = candidates[0].get("content", {}).get("parts", [])
+                            text_out = parts[0].get("text", "").strip() if parts else ""
+                            partial_text = bool(text_out)
+                            r_chars = len(text_out)
+                            r_tokens = usage_metadata.get("candidatesTokenCount") or usage_metadata.get("outputTokenCount")
+                            if r_tokens is None:
+                                r_tokens = max(1, r_chars // 4) if r_chars else 0
+                            t_tokens = usage_metadata.get("totalTokenCount") or (p_tokens + r_tokens)
+                            cached_tokens = usage_metadata.get("cachedContentTokenCount")
+                            est_cost = calculate_estimated_cost(model_name, p_tokens, r_tokens)
+
+                            if text_out and finish_reason != "MAX_TOKENS":
+                                logger.info(
+                                    f"[AI CALL TELEMETRY] Caller: '{caller}' | Model Requested: '{GEMINI_PRIMARY_MODEL}' | Model Used: '{model_name}' | "
+                                    f"Provider: gemini | Status: 200 ({finish_reason}) | Duration: {duration_ms}ms | "
+                                    f"Tokens: {p_tokens} prompt + {r_tokens} response = {t_tokens} total | Est. Cost: ${est_cost:.8f}"
+                                )
+
+                                # Emit Attempt Completed Success Event
+                                if repo and hasattr(repo, "add_decision_log"):
+                                    try:
+                                        repo.add_decision_log({
+                                            "log_id": f"log_att_comp_{uuid.uuid4().hex[:10]}",
+                                            "event_type": "gemini_http_attempt_completed",
+                                            "telemetry_version": 2,
+                                            "briefing_run_id": run_ctx.briefing_run_id if run_ctx else None,
+                                            "request_id": run_ctx.request_id if run_ctx else None,
+                                            "session_id": session_id or (run_ctx.session_id if run_ctx else None),
+                                            "user_id": user_id or (run_ctx.user_id if run_ctx else "unknown"),
+                                            "gemini_request_id": gemini_request_id,
+                                            "timestamp": end_time_iso,
+                                            "started_at": start_time_iso,
+                                            "completed_at": end_time_iso,
+                                            "duration_ms": duration_ms,
+                                            "caller": caller,
+                                            "model_requested": GEMINI_PRIMARY_MODEL,
+                                            "model_used": model_name,
+                                            "model_attempted": model_name,
+                                            "attempt_number": idx,
+                                            "is_fallback_attempt": is_fallback,
+                                            "http_status": 200,
+                                            "success": True,
+                                            "finish_reason": finish_reason,
+                                            "candidate_count": len(candidates),
+                                            "response_text_length": r_chars,
+                                            "partial_text_present": partial_text,
+                                            "prompt_token_count": p_tokens,
+                                            "candidate_token_count": r_tokens,
+                                            "total_token_count": t_tokens,
+                                            "cached_content_token_count": cached_tokens,
+                                            "error_type": None,
+                                            "error_category": None,
+                                            "gemini_called": True,
+                                            "fallback_used": is_fallback,
+                                            "fallback_reason": last_fallback_reason if is_fallback else None,
+                                            "daily_cache_key": daily_cache_key or (run_ctx.daily_cache_key if run_ctx else None),
+                                            "request_duration_ms": duration_ms,
+                                            "selection_summary": f"Gemini HTTP Attempt #{idx} Succeeded (200 OK, {duration_ms}ms, model: '{model_name}')",
+                                            "raw_model_response": text_out,
+                                            "final_response": text_out,
+                                        })
+                                    except Exception as log_err:
+                                        logger.warning(f"Error logging attempt completed: {log_err}")
+
+                                # Emit Logical Gemini Completion Event
+                                total_gem_dur = round((time.perf_counter() - start_gem_perf) * 1000, 2)
+                                if run_ctx:
+                                    run_ctx.gemini_request_id = gemini_request_id
+                                    run_ctx.gemini_attempt_count = idx
+                                    run_ctx.final_model = model_name
+                                    run_ctx.add_timeline_event(
+                                        stage="gemini_generation",
+                                        status="completed",
+                                        duration_ms=total_gem_dur,
+                                        result={"model": model_name, "attempts": idx},
+                                    )
+
+                                if repo and hasattr(repo, "add_decision_log"):
+                                    try:
+                                        repo.add_decision_log({
+                                            "log_id": f"log_gem_comp_{uuid.uuid4().hex[:10]}",
+                                            "event_type": "gemini_request_completed",
+                                            "telemetry_version": 2,
+                                            "briefing_run_id": run_ctx.briefing_run_id if run_ctx else None,
+                                            "request_id": run_ctx.request_id if run_ctx else None,
+                                            "session_id": session_id or (run_ctx.session_id if run_ctx else None),
+                                            "user_id": user_id or (run_ctx.user_id if run_ctx else "unknown"),
+                                            "gemini_request_id": gemini_request_id,
+                                            "timestamp": end_time_iso,
+                                            "attempts_made": idx,
+                                            "fallback_attempted": is_fallback,
+                                            "fallback_trigger": last_fallback_reason if is_fallback else None,
+                                            "primary_model": GEMINI_PRIMARY_MODEL,
+                                            "final_model": model_name,
+                                            "final_success": True,
+                                            "final_error_type": None,
+                                            "total_duration_ms": total_gem_dur,
+                                            "gemini_called": True,
+                                            "selection_summary": f"Gemini logical request {gemini_request_id} completed successfully using '{model_name}' after {idx} attempt(s)",
+                                        })
+                                    except Exception as log_err:
+                                        logger.warning(f"Error logging gemini_request_completed: {log_err}")
+
+                                return AgentResult(
+                                    text=text_out,
+                                    provider="gemini",
+                                    model_requested=GEMINI_PRIMARY_MODEL,
+                                    model_used=model_name,
+                                    gemini_called=True,
+                                    fallback_used=is_fallback,
+                                    fallback_reason=None,
+                                    http_status=200,
+                                    request_duration_ms=duration_ms,
+                                    actions_taken=[],
+                                    caller=caller,
+                                    prompt_char_count=total_prompt_chars,
+                                    prompt_token_count=p_tokens,
+                                    response_char_count=r_chars,
+                                    response_token_count=r_tokens,
+                                    total_token_count=t_tokens,
+                                    estimated_cost_usd=est_cost,
+                                    finish_reason=finish_reason,
+                                    usage_metadata=usage_metadata,
+                                    prompt_breakdown=prompt_breakdown,
+                                )
+                            else:
+                                if finish_reason == "MAX_TOKENS":
+                                    logger.warning(
+                                        f"[AI LLM Call] Model '{model_name}' hit MAX_TOKENS limit "
+                                        f"(max_output_tokens={max_output_tokens}). Response may be TRUNCATED — marking as fallback."
+                                    )
+                                    error_type = "MAX_TOKENS_TRUNCATED"
+                                    last_fallback_reason = "primary_max_tokens_truncated" if idx == 1 else "fallback_max_tokens_truncated"
+                                else:
+                                    error_type = "EMPTY_TEXT" if candidates else "NO_CANDIDATES"
+                                    last_fallback_reason = f"primary_{error_type.lower()}" if idx == 1 else f"fallback_{error_type.lower()}"
+
+                                if run_ctx and idx == 1:
+                                    run_ctx.fallback_attempted = True
+                                    run_ctx.fallback_trigger = last_fallback_reason
+
+                                if repo and hasattr(repo, "add_decision_log"):
+                                    try:
+                                        repo.add_decision_log({
+                                            "log_id": f"log_att_fail_{uuid.uuid4().hex[:10]}",
+                                            "event_type": "gemini_http_attempt_failed",
+                                            "telemetry_version": 2,
+                                            "briefing_run_id": run_ctx.briefing_run_id if run_ctx else None,
+                                            "request_id": run_ctx.request_id if run_ctx else None,
+                                            "session_id": session_id or (run_ctx.session_id if run_ctx else None),
+                                            "user_id": user_id or (run_ctx.user_id if run_ctx else "unknown"),
+                                            "gemini_request_id": gemini_request_id,
+                                            "timestamp": end_time_iso,
+                                            "started_at": start_time_iso,
+                                            "completed_at": end_time_iso,
+                                            "duration_ms": duration_ms,
+                                            "caller": caller,
+                                            "model_requested": GEMINI_PRIMARY_MODEL,
+                                            "model_attempted": model_name,
+                                            "attempt_number": idx,
+                                            "is_fallback_attempt": is_fallback,
+                                            "http_status": 200,
+                                            "success": False,
+                                            "finish_reason": finish_reason,
+                                            "candidate_count": len(candidates),
+                                            "response_text_length": r_chars,
+                                            "partial_text_present": partial_text,
+                                            "prompt_token_count": p_tokens,
+                                            "candidate_token_count": r_tokens,
+                                            "total_token_count": t_tokens,
+                                            "cached_content_token_count": cached_tokens,
+                                            "error_type": error_type,
+                                            "error_category": "unusable_response",
+                                            "fallback_reason": last_fallback_reason,
+                                            "gemini_called": True,
+                                            "fallback_used": True,
+                                            "daily_cache_key": daily_cache_key or (run_ctx.daily_cache_key if run_ctx else None),
+                                            "request_duration_ms": duration_ms,
+                                            "selection_summary": f"Gemini HTTP Attempt #{idx} Failed ({error_type}, {duration_ms}ms, model: '{model_name}')",
+                                        })
+                                    except Exception as log_err:
+                                        logger.warning(f"Error logging attempt failure: {log_err}")
+                                continue
+                        else:
+                            error_type = "NO_CANDIDATES"
+                            last_fallback_reason = "primary_no_candidates" if idx == 1 else "fallback_no_candidates"
+                            if run_ctx and idx == 1:
+                                run_ctx.fallback_attempted = True
+                                run_ctx.fallback_trigger = last_fallback_reason
+                    elif resp.status_code == 503:
+                        error_type = "HTTP_503"
+                        error_category = "service_unavailable"
+                        last_fallback_reason = "primary_http_503" if idx == 1 else "fallback_http_503"
+                        if run_ctx and idx == 1:
+                            run_ctx.fallback_attempted = True
+                            run_ctx.fallback_trigger = last_fallback_reason
+                    else:
+                        error_type = f"HTTP_{resp.status_code}"
+                        error_category = "rate_limited" if resp.status_code == 429 else ("auth_failed" if resp.status_code in {401, 403} else "http_error")
+                        last_fallback_reason = "rate_limited" if resp.status_code == 429 else (f"primary_http_{resp.status_code}" if idx == 1 else f"fallback_http_{resp.status_code}")
+                        if run_ctx and idx == 1:
+                            run_ctx.fallback_attempted = True
+                            run_ctx.fallback_trigger = last_fallback_reason
+
+                    # Emit Attempt Failed Event for non-200 or empty response
+                    if repo and hasattr(repo, "add_decision_log"):
+                        try:
+                            repo.add_decision_log({
+                                "log_id": f"log_att_fail_{uuid.uuid4().hex[:10]}",
+                                "event_type": "gemini_http_attempt_failed",
+                                "telemetry_version": 2,
+                                "briefing_run_id": run_ctx.briefing_run_id if run_ctx else None,
+                                "request_id": run_ctx.request_id if run_ctx else None,
+                                "session_id": session_id or (run_ctx.session_id if run_ctx else None),
+                                "user_id": user_id or (run_ctx.user_id if run_ctx else "unknown"),
+                                "gemini_request_id": gemini_request_id,
+                                "timestamp": end_time_iso,
+                                "started_at": start_time_iso,
+                                "completed_at": end_time_iso,
+                                "duration_ms": duration_ms,
+                                "caller": caller,
+                                "model_requested": GEMINI_PRIMARY_MODEL,
+                                "model_attempted": model_name,
+                                "attempt_number": idx,
+                                "is_fallback_attempt": is_fallback,
+                                "http_status": resp.status_code,
+                                "success": False,
+                                "error_type": error_type,
+                                "error_category": error_category,
+                                "fallback_reason": last_fallback_reason,
+                                "gemini_called": True,
+                                "fallback_used": True,
+                                "daily_cache_key": daily_cache_key or (run_ctx.daily_cache_key if run_ctx else None),
+                                "request_duration_ms": duration_ms,
+                                "selection_summary": f"Gemini HTTP Attempt #{idx} Failed (HTTP {resp.status_code}, {duration_ms}ms, model: '{model_name}')",
+                            })
+                        except Exception as log_err:
+                            logger.warning(f"Error logging attempt failure: {log_err}")
+
+                except httpx.TimeoutException as e:
+                    duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+                    end_time_iso = datetime.now(timezone.utc).isoformat()
+                    error_type = e.__class__.__name__
+                    last_fallback_reason = "timeout"
+                    if run_ctx and idx == 1:
+                        run_ctx.fallback_attempted = True
+                        run_ctx.fallback_trigger = last_fallback_reason
+
+                    if repo and hasattr(repo, "add_decision_log"):
+                        try:
+                            repo.add_decision_log({
+                                "log_id": f"log_att_fail_{uuid.uuid4().hex[:10]}",
+                                "event_type": "gemini_http_attempt_failed",
+                                "telemetry_version": 2,
+                                "briefing_run_id": run_ctx.briefing_run_id if run_ctx else None,
+                                "request_id": run_ctx.request_id if run_ctx else None,
+                                "session_id": session_id or (run_ctx.session_id if run_ctx else None),
+                                "user_id": user_id or (run_ctx.user_id if run_ctx else "unknown"),
+                                "gemini_request_id": gemini_request_id,
+                                "timestamp": end_time_iso,
+                                "started_at": start_time_iso,
+                                "completed_at": end_time_iso,
+                                "duration_ms": duration_ms,
+                                "caller": caller,
+                                "model_requested": GEMINI_PRIMARY_MODEL,
+                                "model_attempted": model_name,
+                                "attempt_number": idx,
+                                "is_fallback_attempt": is_fallback,
+                                "http_status": None,
+                                "success": False,
+                                "error_type": error_type,
+                                "error_category": "timeout",
+                                "fallback_reason": last_fallback_reason,
+                                "gemini_called": True,
+                                "fallback_used": True,
+                                "daily_cache_key": daily_cache_key or (run_ctx.daily_cache_key if run_ctx else None),
+                                "request_duration_ms": duration_ms,
+                                "selection_summary": f"Gemini HTTP Attempt #{idx} Timeout ({error_type}, {duration_ms}ms)",
+                            })
+                        except Exception as log_err:
+                            logger.warning(f"Error logging timeout failure: {log_err}")
+
+                except httpx.NetworkError as e:
+                    duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+                    end_time_iso = datetime.now(timezone.utc).isoformat()
+                    error_type = e.__class__.__name__
+                    last_fallback_reason = "primary_network_error" if idx == 1 else "fallback_network_error"
+                    if run_ctx and idx == 1:
+                        run_ctx.fallback_attempted = True
+                        run_ctx.fallback_trigger = last_fallback_reason
+
+                    if repo and hasattr(repo, "add_decision_log"):
+                        try:
+                            repo.add_decision_log({
+                                "log_id": f"log_att_fail_{uuid.uuid4().hex[:10]}",
+                                "event_type": "gemini_http_attempt_failed",
+                                "telemetry_version": 2,
+                                "briefing_run_id": run_ctx.briefing_run_id if run_ctx else None,
+                                "request_id": run_ctx.request_id if run_ctx else None,
+                                "session_id": session_id or (run_ctx.session_id if run_ctx else None),
+                                "user_id": user_id or (run_ctx.user_id if run_ctx else "unknown"),
+                                "gemini_request_id": gemini_request_id,
+                                "timestamp": end_time_iso,
+                                "started_at": start_time_iso,
+                                "completed_at": end_time_iso,
+                                "duration_ms": duration_ms,
+                                "caller": caller,
+                                "model_requested": GEMINI_PRIMARY_MODEL,
+                                "model_attempted": model_name,
+                                "attempt_number": idx,
+                                "is_fallback_attempt": is_fallback,
+                                "http_status": None,
+                                "success": False,
+                                "error_type": error_type,
+                                "error_category": "network_error",
+                                "fallback_reason": last_fallback_reason,
+                                "gemini_called": True,
+                                "fallback_used": True,
+                                "daily_cache_key": daily_cache_key or (run_ctx.daily_cache_key if run_ctx else None),
+                                "request_duration_ms": duration_ms,
+                                "selection_summary": f"Gemini HTTP Attempt #{idx} Network Error ({error_type}, {duration_ms}ms)",
+                            })
+                        except Exception as log_err:
+                            logger.warning(f"Error logging network failure: {log_err}")
+
+                except Exception as e:
+                    duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+                    end_time_iso = datetime.now(timezone.utc).isoformat()
+                    error_type = e.__class__.__name__
+                    last_fallback_reason = "primary_unknown_error" if idx == 1 else "fallback_unknown_error"
+                    if run_ctx and idx == 1:
+                        run_ctx.fallback_attempted = True
+                        run_ctx.fallback_trigger = last_fallback_reason
+
+                    if repo and hasattr(repo, "add_decision_log"):
+                        try:
+                            repo.add_decision_log({
+                                "log_id": f"log_att_fail_{uuid.uuid4().hex[:10]}",
+                                "event_type": "gemini_http_attempt_failed",
+                                "telemetry_version": 2,
+                                "briefing_run_id": run_ctx.briefing_run_id if run_ctx else None,
+                                "request_id": run_ctx.request_id if run_ctx else None,
+                                "session_id": session_id or (run_ctx.session_id if run_ctx else None),
+                                "user_id": user_id or (run_ctx.user_id if run_ctx else "unknown"),
+                                "gemini_request_id": gemini_request_id,
+                                "timestamp": end_time_iso,
+                                "started_at": start_time_iso,
+                                "completed_at": end_time_iso,
+                                "duration_ms": duration_ms,
+                                "caller": caller,
+                                "model_requested": GEMINI_PRIMARY_MODEL,
+                                "model_attempted": model_name,
+                                "attempt_number": idx,
+                                "is_fallback_attempt": is_fallback,
+                                "http_status": None,
+                                "success": False,
+                                "error_type": error_type,
+                                "error_category": "unknown_error",
+                                "fallback_reason": last_fallback_reason,
+                                "gemini_called": True,
+                                "fallback_used": True,
+                                "daily_cache_key": daily_cache_key or (run_ctx.daily_cache_key if run_ctx else None),
+                                "request_duration_ms": duration_ms,
+                                "selection_summary": f"Gemini HTTP Attempt #{idx} Error ({error_type}, {duration_ms}ms)",
+                            })
+                        except Exception as log_err:
+                            logger.warning(f"Error logging attempt error: {log_err}")
+
+        # Emit Logical Gemini Failure Event if all models failed
+        total_gem_dur = round((time.perf_counter() - start_gem_perf) * 1000, 2)
+        if run_ctx:
+            run_ctx.gemini_request_id = gemini_request_id
+            run_ctx.gemini_attempt_count = len(models_to_try)
+            run_ctx.fallback_attempted = True
+            if not run_ctx.fallback_trigger:
+                run_ctx.fallback_trigger = last_fallback_reason
+            run_ctx.final_failure_reason = last_fallback_reason
+            run_ctx.add_timeline_event(
+                stage="gemini_generation",
+                status="failed",
+                duration_ms=total_gem_dur,
+                result={"reason": last_fallback_reason, "fallback_trigger": run_ctx.fallback_trigger},
+            )
+
+        if repo and hasattr(repo, "add_decision_log"):
+            try:
+                repo.add_decision_log({
+                    "log_id": f"log_gem_fail_{uuid.uuid4().hex[:10]}",
+                    "event_type": "gemini_request_failed",
+                    "telemetry_version": 2,
+                    "briefing_run_id": run_ctx.briefing_run_id if run_ctx else None,
+                    "request_id": run_ctx.request_id if run_ctx else None,
+                    "session_id": session_id or (run_ctx.session_id if run_ctx else None),
+                    "user_id": user_id or (run_ctx.user_id if run_ctx else "unknown"),
+                    "gemini_request_id": gemini_request_id,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "attempts_made": len(models_to_try),
+                    "fallback_attempted": True,
+                    "fallback_trigger": run_ctx.fallback_trigger if run_ctx else last_fallback_reason,
+                    "final_failure_reason": last_fallback_reason,
+                    "primary_model": GEMINI_PRIMARY_MODEL,
+                    "final_model": None,
+                    "final_success": False,
+                    "final_error_type": last_fallback_reason,
+                    "total_duration_ms": total_gem_dur,
+                    "gemini_called": True,
+                    "selection_summary": f"Gemini logical request {gemini_request_id} failed after {len(models_to_try)} attempt(s). Trigger: {run_ctx.fallback_trigger if run_ctx else last_fallback_reason}, Final failure: {last_fallback_reason}",
+                })
+            except Exception as log_err:
+                logger.warning(f"Error logging gemini_request_failed: {log_err}")
+
+        est_p_tokens = max(1, total_prompt_chars // 4) if total_prompt_chars else 0
+        est_cost = calculate_estimated_cost(GEMINI_PRIMARY_MODEL, est_p_tokens, 0)
+        logger.warning(
+            f"[AI CALL TELEMETRY] All Gemini models failed. Caller: '{caller}' | Reason: {last_fallback_reason}",
+            extra=sanitize_log_data({
+                "provider": "fallback",
+                "caller": caller,
+                "model_requested": GEMINI_PRIMARY_MODEL,
+                "fallback_reason": last_fallback_reason,
+                "http_status": last_http_status,
+                "prompt_char_count": total_prompt_chars,
+                "prompt_token_count": est_p_tokens,
+                "estimated_cost_usd": est_cost,
+                "prompt_breakdown": prompt_breakdown,
+            })
+        )
+        return AgentResult(
+            text="",
+            provider="fallback",
+            model_requested=GEMINI_PRIMARY_MODEL,
+            model_used=None,
+            gemini_called=True,
+            fallback_used=True,
+            fallback_reason=last_fallback_reason,
+            http_status=last_http_status,
+            request_duration_ms=None,
+            actions_taken=[],
+            caller=caller,
+            prompt_char_count=total_prompt_chars,
+            prompt_token_count=est_p_tokens,
+            response_char_count=0,
+            response_token_count=0,
+            total_token_count=est_p_tokens,
+            estimated_cost_usd=est_cost,
+            finish_reason="FALLBACK",
+            usage_metadata={},
+            prompt_breakdown=prompt_breakdown,
+        )
+
+    @staticmethod
+    def _generate_fallback_chat_reply(
         system_prompt: str,
         user_message: str,
         actions: list[dict[str, Any]],
-        user_id: str,
-        repo: WatchlistRepository,
-        tmdb: TmdbClient | None,
+        title_query: str | None = None,
     ) -> str:
-        """Generate persona-infused fallback response, querying user watchlist or TMDB when applicable."""
-        preset = system_prompt.lower()
-        msg_lower = user_message.lower()
-        holiday_remark = get_approaching_holiday_or_season()
-
+        """Generate brief, factual fallback response without fake jokes or artificial catchphrases."""
         if actions:
-            descs = []
-            for a in actions:
-                act = a.get("action")
-                t = a.get("title", "it")
-                if act == "rate_movie":
-                    r = a.get("rating", 5)
-                    descs.append(f"I've logged your {r}-star rating for '{t}' in your list of rated movies!")
-                elif act == "delete_rating":
-                    descs.append(f"I've removed your rating for '{t}'.")
-                elif act == "remove_item":
-                    descs.append(f"I've removed '{t}' from your queue.")
-                elif act == "add_monitoring":
-                    p = a.get("target_rental_price")
-                    if p:
-                        descs.append(f"I've added '{t}' to your Monitoring tab and set a rental price alert for ${p:.2f}.")
-                    else:
-                        descs.append(f"I've added '{t}' directly to your queue.")
-                else:
-                    descs.append(f"Completed action on '{t}'.")
-
-            actions_desc = " " + " ".join(descs)
-
-            if "noir" in preset:
-                return f"Got it, kid.{actions_desc} File updated."
-            elif "sci" in preset:
-                return f"Command acknowledged.{actions_desc} Database telemetry updated."
-            elif "sarcastic" in preset:
-                return f"You got it!{actions_desc} Anything else you need me to log?"
-            else:
-                return f"Awesome!{actions_desc} Let me know if you need help with anything else in your queue."
-
-
-        items = repo.list_items(user_id)
-        monitored = [item for item in items if not item.get("is_owned") and (item.get("status") in {"following", "queue", "watchlist"} or not item.get("status"))]
-
-        # Extract title query
-        title_query, _ = AiAgentService._extract_title_and_price(user_message)
-        if not title_query:
-            patterns = [
-                r"(?:any\s+)?(?:update|updates|news|info|word)\s+(?:on|about|for)\s+['\"]?([^'.\"$\n]+?)['\"]?$",
-                r"(?:why\s+didn't\s+the\s+agent\s+say\s+something\s+about|why\s+didn't\s+you\s+mention|what\s+about|tell\s+me\s+about|is\s+there\s+any\s+update\s+on|how\s+about)\s+['\"]?([^'.\"$\n]+?)['\"]?$",
-                r"(?:is|when\s+(?:is|does))\s+['\"]?([^'.\"$\n]+?)['\"]?\s+(?:releasing|release|coming\s+out|available|dropping)",
-                r"(?:search|find|check)\s+(?:for\s+)?['\"]?([^'.\"$\n]+?)['\"]?$",
-            ]
-            for pat in patterns:
-                m = re.search(pat, msg_lower, re.IGNORECASE)
-                if m:
-                    extracted = m.group(1).strip()
-                    extracted = re.sub(r'\s+(?:released|available|coming|out|today|soon)$', '', extracted, flags=re.IGNORECASE).strip()
-                    if extracted and len(extracted) > 1 and extracted not in {"my shows", "my queue", "monitored shows", "updates", "watchlist"}:
-                        title_query = extracted
-                        break
+            t = actions[0].get("title", "the requested item")
+            act = actions[0].get("action")
+            if act == "rate_movie":
+                return f"I've logged your rating for '{t}'. The conversational service was unavailable, but your rating was saved."
+            elif act == "add_monitoring":
+                return f"I added '{t}' to your queue. The conversational service was unavailable, but the queue update succeeded."
+            elif act == "remove_item":
+                return f"I removed '{t}' from your queue. The conversational service was unavailable, but the queue update succeeded."
+            elif act == "delete_rating":
+                return f"I deleted your rating for '{t}'. The conversational service was unavailable, but the update succeeded."
+            elif act == "update_status":
+                return f"I updated the status for '{t}'. The conversational service was unavailable, but the update succeeded."
+            elif act == "movie_search":
+                q = actions[0].get("query", "movies")
+                return f"I searched TMDB for '{q}'. The conversational service was unavailable, but your search results are displayed below."
+            return f"Action completed for '{t}'. The conversational service was unavailable."
 
         if title_query:
-            # Check user watchlist first
-            exact_matches = [i for i in items if title_query.lower() in i.get("title", "").lower()]
-            partial_matches = [
-                i for i in items
-                if any(w in i.get("title", "").lower() for w in title_query.split() if len(w) > 3 and w.lower() not in {"title", "movie", "show", "season"})
-            ]
-            matching_user_items = exact_matches or partial_matches
-            rec_str = ""
-            if matching_user_items:
-                item = matching_user_items[0]
-                t_title = item.get("title")
-                status_str = "monitored" if item.get("status") in {"following", "queue"} else item.get("status")
-                rel_date = item.get("release_date")
-                from app.models import days_until
-                days = days_until(rel_date) if rel_date else None
+            return f"I checked for '{title_query}', but I couldn't reach the conversational service just now. Please check your queue or try again."
 
-                days_info = ""
-                if days is not None:
-                    if days == 0:
-                        days_info = f" Releasing TODAY ({rel_date})!"
-                    elif days > 0:
-                        days_info = f" Releasing in {days} day{'s' if days != 1 else ''} ({rel_date})."
-                    elif days >= -30:
-                        days_info = f" Released recently ({abs(days)} days ago on {rel_date})."
-                    else:
-                        rel_year = rel_date[:4] if rel_date and len(rel_date) >= 4 else ""
-                        days_info = f" Released back in {rel_year} ({rel_date})." if rel_year else f" Released on {rel_date}."
-                elif rel_date:
-                    days_info = f" Release date: {rel_date}."
+        msg_l = user_message.lower()
+        if any(p in msg_l for p in ["rated", "ratings", "my rating"]):
+            return "You haven't logged ratings for any movies yet. You can rate movies from 1 to 5 stars to track your favorites!"
 
-                if tmdb and item.get("tmdb_id"):
-                    try:
-                        recs = await tmdb.get_recommendations(item.get("media_type", "movie"), item["tmdb_id"])
-                        if recs:
-                            rec_str = f" If you enjoy '{t_title}', you might also check out '{recs[0]['title']}'."
-                    except Exception:
-                        pass
-
-                if "noir" in preset:
-                    return f"Checked the records for '{t_title}'. It's in your queue (status: {status_str}).{days_info}{rec_str}"
-                elif "sci" in preset:
-                    return f"Telemetry query for '{t_title}': Status: {status_str}.{days_info}{rec_str}"
-                elif "sarcastic" in preset:
-                    return f"Found '{t_title}' in your queue! Status: {status_str}.{days_info}{rec_str}"
-                else:
-                    return f"Checked your queue for '{t_title}'—it's currently {status_str}.{days_info}{rec_str}"
-
-            # Check TMDB if not in user items
-            if tmdb:
-                try:
-                    res = await tmdb.search(title_query)
-                    if res:
-                        best = res[0]
-                        t_title = best.get("title")
-                        rel_date = best.get("release_date")
-                        media_type = best.get("media_type")
-                        rel_str = f" ({rel_date})" if rel_date else ""
-
-                        try:
-                            recs = await tmdb.get_recommendations(media_type, best["id"])
-                            if recs:
-                                rec_str = f" Also, you might enjoy '{recs[0]['title']}'."
-                        except Exception:
-                            pass
-
-                        if "noir" in preset:
-                            return f"I hit the beat and found '{t_title}' ({media_type}){rel_str} on TMDB. It's not in your queue yet. Want me to track it?{rec_str}"
-                        elif "sci" in preset:
-                            return f"Archive search result: Located '{t_title}' ({media_type}){rel_str}. Unmonitored. Would you like to initialize telemetry?{rec_str}"
-                        elif "sarcastic" in preset:
-                            return f"Found '{t_title}' ({media_type}){rel_str} on TMDB! You haven't added it to your queue yet. Want me to add it?{rec_str}"
-                        else:
-                            return f"I found '{t_title}' ({media_type}{rel_str}) on TMDB. It's not in your queue yet—let me know if you want me to track it.{rec_str}"
-                except Exception as e:
-                    logger.warning(f"Fallback TMDB search error: {e}")
-
-            if "noir" in preset:
-                return f"No leads on '{title_query}' in your files or TMDB records. Want me to try searching another title?"
-            elif "sci" in preset:
-                return f"Query anomaly: Target '{title_query}' not detected in local queue or TMDB archives."
-            elif "sarcastic" in preset:
-                return f"I checked for '{title_query}' but couldn't find anything matching that title. Double check the spelling?"
-            else:
-                return f"I searched for '{title_query}' in your queue and on TMDB, but couldn't find any exact matches. Double check the spelling?"
-
-        # Recommendation query
-        if any(w in msg_lower for w in ["recommend", "suggest", "what to watch", "what should i watch", "movie idea"]):
-            rated_items = [i for i in items if i.get("user_rating")]
-            top_rated = [i for i in rated_items if (i.get("user_rating") or 0) >= 4]
-            if top_rated and tmdb:
-                top_item = top_rated[0]
-                try:
-                    recs = await tmdb.get_recommendations(top_item.get("media_type", "movie"), top_item["tmdb_id"])
-                    if recs:
-                        r_title = recs[0]["title"]
-                        return f"Based on your {top_item['user_rating']}-star rating for '{top_item['title']}', I highly recommend checking out '{r_title}'!"
-                except Exception:
-                    pass
-
-        # General updates query
-        if any(w in msg_lower for w in ["all updates", "my updates", "monitored shows", "what updates", "show list", "my queue", "my list", "update", "updates", "monitored", "following", "monitoring", "upcoming"]):
-            briefing_res = await AiAgentService.evaluate_monitored_updates(user_id, repo, tmdb)
-            holiday_str = f" {holiday_remark}" if holiday_remark else ""
-            if briefing_res.get("updates"):
-                bullet_lines = "\n".join([f"• {u['message']}" for u in briefing_res["updates"]])
-                count = len(briefing_res["updates"])
-                if "noir" in preset:
-                    return f"Chief, here are the {count} update{'s' if count > 1 else ''} on your monitored files:\n{bullet_lines}{holiday_str}"
-                elif "sci" in preset:
-                    return f"Telemetry sync status: {count} active update signal{'s' if count > 1 else ''}:\n{bullet_lines}{holiday_str}"
-                elif "sarcastic" in preset:
-                    return f"Here's what's happening with your {count} monitored show{'s' if count > 1 else ''}:\n{bullet_lines}{holiday_str}"
-                else:
-                    return f"Here are the latest updates for your monitored shows:\n{bullet_lines}{holiday_str}"
-            elif monitored:
-                titles_str = ", ".join([f"'{i['title']}'" for i in monitored[:5]])
-                more_count = len(monitored) - 5
-                more_str = f" and {more_count} more" if more_count > 0 else ""
-                return f"You currently have {len(monitored)} monitored title(s): {titles_str}{more_str}. No urgent release alerts in the next 14 days!{holiday_str}"
-            else:
-                return f"You don't have any monitored shows in your list yet! Ask me to monitor a title like 'waiting for Succession' to add one.{holiday_str}"
-
-        holiday_str = f" {holiday_remark}" if holiday_remark else ""
-        if "noir" in preset:
-            return "Copy that. Keeping eyes on your queue. Let me know if you want to track a specific movie or show."
-        elif "sci" in preset:
-            return "Telemetry nominal. Specify a title name or price target to add monitoring parameters."
-        elif "sarcastic" in preset:
-            return "I'm listening! Tell me what movie or show you want to track."
-        else:
-            return f"I'm here! Ask me about your monitored shows, or tell me what title you're waiting for.{holiday_str}"
-
-
+        return "The conversational service is currently unavailable. Please try again in a moment."
