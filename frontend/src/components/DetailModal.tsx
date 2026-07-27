@@ -102,7 +102,8 @@ export function DetailModal({
   return (
     <div className="detail-overlay" onClick={onClose}>
       <div className="detail-panel" onClick={(e) => e.stopPropagation()}>
-        <button className="icon-button close-button" onClick={onClose}>
+        <div className="mobile-sheet-handle" aria-hidden="true" />
+        <button className="icon-button close-button" onClick={onClose} aria-label="Close details">
           Close
         </button>
         <div

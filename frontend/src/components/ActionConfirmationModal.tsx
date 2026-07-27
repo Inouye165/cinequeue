@@ -131,6 +131,7 @@ export function ActionConfirmationModal({
           overflow: "hidden",
         }}
       >
+        <div className="mobile-sheet-handle" aria-hidden="true" />
         <div
           style={{
             padding: "20px 24px",

@@ -4,6 +4,7 @@ import { AgentLoginBriefing } from "../components/AgentLoginBriefing";
 import { AgentModal } from "../components/AgentModal";
 import { DetailModal } from "../components/DetailModal";
 import { MediaCard } from "../components/MediaCard";
+import { MediaCardSkeleton } from "../components/MediaCardSkeleton";
 import { SearchHeader } from "../components/SearchHeader";
 import { Tabs, TabType } from "../components/Tabs";
 import { useAuth } from "../context/AuthContext";
@@ -382,14 +383,12 @@ export function CinequeueDashboard() {
     return [];
   }, [watchlist, tab]);
 
-  const [showAvatarMenu, setShowAvatarMenu] = useState(false);
   const [agentModalOpen, setAgentModalOpen] = useState(false);
   const [agentModalTab, setAgentModalTab] = useState<"chat" | "settings" | "logs">("chat");
 
   const openAgentModal = (tab: "chat" | "settings" | "logs" = "chat") => {
     setAgentModalTab(tab);
     setAgentModalOpen(true);
-    setShowAvatarMenu(false);
   };
 
   const isLocalTab = ["watchlist", "following", "library"].includes(tab);
@@ -404,78 +403,16 @@ export function CinequeueDashboard() {
 
   return (
     <div className="app-shell">
-      <div className="user-profile-bar">
-        <div className="user-info-dropdown-container">
-          <button
-            className="avatar-dropdown-trigger"
-            onClick={() => setShowAvatarMenu((prev) => !prev)}
-            aria-label="User Account and AI Agent Menu"
-          >
-            {user.photo_url ? (
-              <img src={user.photo_url} alt={user.display_name || user.email} className="user-avatar" />
-            ) : (
-              <div className="user-avatar-fallback">
-                {(user.display_name || user.email)[0].toUpperCase()}
-              </div>
-            )}
-            <div className="user-details">
-              <span className="user-name">{user.display_name || user.email}</span>
-              <span className="user-email">{user.email}</span>
-            </div>
-            <span className="dropdown-caret">▼</span>
-          </button>
-
-          {showAvatarMenu ? (
-            <>
-              <div
-                style={{
-                  position: "fixed",
-                  top: 0,
-                  left: 0,
-                  right: 0,
-                  bottom: 0,
-                  zIndex: 9998,
-                  background: "transparent",
-                }}
-                onClick={() => setShowAvatarMenu(false)}
-              />
-              <div className="avatar-dropdown-menu">
-                <div className="dropdown-user-header">
-                  <span className="dropdown-user-name">{user.display_name || "User Account"}</span>
-                  <span className="dropdown-user-email">{user.email}</span>
-                </div>
-                <hr className="dropdown-divider" />
-                <button
-                  className="dropdown-menu-item"
-                  onClick={() => openAgentModal("chat")}
-                >
-                  <span className="menu-item-icon">💬</span> Chat with AI Agent
-                </button>
-                <button
-                  className="dropdown-menu-item"
-                  onClick={() => openAgentModal("settings")}
-                >
-                  <span className="menu-item-icon">⚙️</span> AI Personality & Settings
-                </button>
-                <button
-                  className="dropdown-menu-item"
-                  onClick={() => openAgentModal("logs")}
-                >
-                  <span className="menu-item-icon">📊</span> AI Debugging & Logs
-                </button>
-                <hr className="dropdown-divider" />
-                <button className="dropdown-menu-item logout-item" onClick={logout}>
-                  <span className="menu-item-icon">🚪</span> Sign Out
-                </button>
-              </div>
-            </>
-          ) : null}
-        </div>
-      </div>
+      <SearchHeader
+        query={query}
+        setQuery={setQuery}
+        onSubmit={handleSearch}
+        user={user}
+        onLogout={logout}
+        onOpenAgentModal={openAgentModal}
+      />
 
       <AgentLoginBriefing onOpenChat={() => openAgentModal("chat")} />
-
-      <SearchHeader query={query} setQuery={setQuery} onSubmit={handleSearch} />
 
       {error ? <div className="error-banner">{error}</div> : null}
 
@@ -512,7 +449,7 @@ export function CinequeueDashboard() {
       </div>
 
       {loading ? (
-        <div className="loading">Loading…</div>
+        <MediaCardSkeleton count={6} />
       ) : tab === "rated" ? (
         ratedMovies.length ? (
           <div className="media-grid">
