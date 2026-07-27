@@ -26,7 +26,7 @@ export function AuthDiagnosticsPanel() {
 
   const debugEnabled =
     import.meta.env.VITE_AUTH_PERFORMANCE_DEBUG === "true" ||
-    import.meta.env.DEV;
+    (typeof window !== "undefined" && new URLSearchParams(window.location.search).has("debug"));
 
   if (!debugEnabled) {
     return null;

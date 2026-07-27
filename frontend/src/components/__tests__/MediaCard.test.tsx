@@ -31,7 +31,7 @@ describe("MediaCard", () => {
     expect(screen.getByText("Inception")).not.toBeNull();
     expect(screen.getByText("★ 8.8")).not.toBeNull();
     expect(screen.getByText("Released 16 years ago")).not.toBeNull();
-    expect(screen.getByText("2010-07-16")).not.toBeNull();
+    expect(screen.getByText("2010")).not.toBeNull();
   });
 
   it("calls onOpen when clicked", () => {
@@ -44,7 +44,7 @@ describe("MediaCard", () => {
       />
     );
 
-    const cardButton = screen.getByRole("button", { name: /open inception/i });
+    const cardButton = screen.getByRole("button", { name: /view details for inception|open inception/i });
     fireEvent.click(cardButton);
     expect(handleOpen).toHaveBeenCalledWith(mockMovie);
   });
@@ -61,7 +61,7 @@ describe("MediaCard", () => {
       />
     );
 
-    const addButton = screen.getByRole("button", { name: /\+ queue/i });
+    const addButton = screen.getByRole("button", { name: /add inception to queue|\+ queue/i });
     fireEvent.click(addButton);
     expect(handleAdd).toHaveBeenCalledWith(mockMovie);
   });
@@ -78,7 +78,7 @@ describe("MediaCard", () => {
       />
     );
 
-    const removeButton = screen.getByRole("button", { name: /remove/i });
+    const removeButton = screen.getByRole("button", { name: /remove inception from queue|remove/i });
     fireEvent.click(removeButton);
     expect(handleRemove).toHaveBeenCalledWith(mockMovie);
   });

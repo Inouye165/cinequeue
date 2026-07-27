@@ -260,6 +260,7 @@ export function AgentModal({ isOpen, onClose, onWatchlistUpdated, initialTab = "
   return (
     <div className="agent-modal-backdrop" onClick={onClose}>
       <div className="agent-modal-container" onClick={(e) => e.stopPropagation()}>
+        <div className="mobile-sheet-handle" aria-hidden="true" />
         {/* Header */}
         <div className="agent-modal-header">
           <div className="agent-modal-title">

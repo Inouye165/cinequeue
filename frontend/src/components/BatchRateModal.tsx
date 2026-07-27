@@ -157,8 +157,8 @@ export const BatchRateModal: React.FC<BatchRateModalProps> = ({
       <div
         className="modal-content batch-rate-modal"
         onClick={(e) => e.stopPropagation()}
-        style={{ maxWidth: "640px", width: "90%" }}
       >
+        <div className="mobile-sheet-handle" aria-hidden="true" />
         <div className="modal-header">
           <h2 style={{ margin: 0, fontSize: "1.3rem" }}>⭐ Batch Add Movie Ratings</h2>
           <button className="close-btn" onClick={onClose} aria-label="Close modal">
