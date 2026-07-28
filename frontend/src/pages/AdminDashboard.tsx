@@ -9,7 +9,7 @@ interface AdminDashboardProps {
   onLogout: () => void;
   onApprove: (email: string) => void;
   onDeny: (email: string) => void;
-  onInvite: (email: string) => Promise<void>;
+  onInvite: (email: string) => Promise<{ status?: string; email?: string; email_sent?: boolean; message?: string } | void>;
 }
 
 export function AdminDashboard({
@@ -24,13 +24,53 @@ export function AdminDashboard({
 }: AdminDashboardProps) {
   const [inviteEmail, setInviteEmail] = useState("");
   const [adminTab, setAdminTab] = useState<"requests" | "users" | "logs" | "decisions">("requests");
+  const [isSubmittingInvite, setIsSubmittingInvite] = useState(false);
+  const [inviteFeedback, setInviteFeedback] = useState<{
+    type: "success" | "warning" | "error";
+    message: string;
+    email: string;
+    emailSent?: boolean;
+  } | null>(null);
+  const [copiedEmail, setCopiedEmail] = useState<string | null>(null);
 
-  const handleInviteSubmit = (e: FormEvent) => {
-    e.preventDefault();
-    if (!inviteEmail.trim()) return;
-    void onInvite(inviteEmail.trim()).then(() => {
-      setInviteEmail("");
+  const copyInviteInstructions = (email: string) => {
+    const inviteUrl = window.location.origin;
+    const text = `Hey! I've pre-approved your email (${email}) for CineQueue. You can sign in here: ${inviteUrl}`;
+    void navigator.clipboard.writeText(text).then(() => {
+      setCopiedEmail(email);
+      setTimeout(() => setCopiedEmail(null), 3000);
     });
+  };
+
+  const handleInviteSubmit = async (e: FormEvent) => {
+    e.preventDefault();
+    const targetEmail = inviteEmail.trim();
+    if (!targetEmail) return;
+
+    setIsSubmittingInvite(true);
+    setInviteFeedback(null);
+
+    try {
+      const res = await onInvite(targetEmail);
+      const emailSent = res?.email_sent ?? false;
+      const msg = res?.message || (emailSent ? `Invitation email sent to ${targetEmail}` : `Pre-approved ${targetEmail}`);
+
+      setInviteFeedback({
+        type: emailSent ? "success" : "warning",
+        message: msg,
+        email: targetEmail,
+        emailSent,
+      });
+      setInviteEmail("");
+    } catch (err) {
+      setInviteFeedback({
+        type: "error",
+        message: err instanceof Error ? err.message : "Failed to send invite.",
+        email: targetEmail,
+      });
+    } finally {
+      setIsSubmittingInvite(false);
+    }
   };
 
   const pendingApprovals = approvals.filter((a) => a.status === "pending");
@@ -135,9 +175,38 @@ export function AdminDashboard({
                 value={inviteEmail}
                 onChange={(e) => setInviteEmail(e.target.value)}
                 required
+                disabled={isSubmittingInvite}
               />
-              <button type="submit" className="admin-btn admin-btn-primary">Send Invite</button>
+              <button
+                type="submit"
+                className="admin-btn admin-btn-primary"
+                disabled={isSubmittingInvite}
+              >
+                {isSubmittingInvite ? "Inviting…" : "Send Invite"}
+              </button>
             </form>
+
+            {inviteFeedback && (
+              <div className={`admin-feedback-banner ${inviteFeedback.type}`}>
+                <div>
+                  <strong>
+                    {inviteFeedback.type === "success" && "✅ Invite Dispatched"}
+                    {inviteFeedback.type === "warning" && "ℹ️ User Pre-approved (SMTP Email Delivery Unconfigured)"}
+                    {inviteFeedback.type === "error" && "❌ Invite Failed"}
+                  </strong>
+                  <p style={{ margin: "4px 0 0" }}>{inviteFeedback.message}</p>
+                </div>
+                <div className="admin-feedback-actions">
+                  <button
+                    type="button"
+                    className="copy-btn"
+                    onClick={() => copyInviteInstructions(inviteFeedback.email)}
+                  >
+                    {copiedEmail === inviteFeedback.email ? "✓ Copied Link & Text!" : "📋 Copy Invite Link & Text"}
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
 
           <div className="admin-card">
@@ -169,12 +238,22 @@ export function AdminDashboard({
                         <td>{item.decided_at ? new Date(item.decided_at).toLocaleString() : "-"}</td>
                         <td className="admin-actions-cell">
                           {item.status === "approved" ? (
-                            <button
-                              className="admin-btn admin-btn-danger"
-                              onClick={() => onDeny(item.email)}
-                            >
-                              Revoke Access
-                            </button>
+                            <>
+                              <button
+                                type="button"
+                                className="copy-btn"
+                                style={{ padding: "4px 10px", fontSize: "0.8rem" }}
+                                onClick={() => copyInviteInstructions(item.email)}
+                              >
+                                {copiedEmail === item.email ? "✓ Copied!" : "📋 Copy Link"}
+                              </button>
+                              <button
+                                className="admin-btn admin-btn-danger"
+                                onClick={() => onDeny(item.email)}
+                              >
+                                Revoke Access
+                              </button>
+                            </>
                           ) : (
                             <button
                               className="admin-btn admin-btn-success"

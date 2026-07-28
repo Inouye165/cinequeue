@@ -176,6 +176,10 @@ def test_admin_user_approval_flow(client_with_admin_auth):
         headers={"Origin": "https://cinequeue-7tvty3vmvq-uw.a.run.app"}
     )
     assert invite_res.status_code == 200
+    invite_json = invite_res.json()
+    assert invite_json["status"] == "success"
+    assert "email_sent" in invite_json
+    assert "message" in invite_json
 
     # 3. List requests & check user is invited/approved
     requests_res = client_with_admin_auth.get("/api/admin/requests")
@@ -454,4 +458,40 @@ def test_repository_normalization_consistency(client_with_admin_auth):
     # Cleanup
     repo.delete_admin_user(username_raw)
     assert repo.get_admin_user(username_raw) is None
+
+
+def test_audit_logging_for_login_failures_and_invites(client_with_admin_auth):
+    """Verify that failed auth attempts and admin invites record audit logs."""
+    # 1. Fetch CSRF token
+    csrf_res = client_with_admin_auth.get("/api/auth/csrf")
+    csrf_token = csrf_res.json()["csrf_token"]
+    
+    # 2. Login as admin
+    login_res = client_with_admin_auth.post(
+        "/api/admin/login",
+        json={
+            "username": "admin",
+            "password": "admin_secure_pass_2026",
+            "csrf_token": csrf_token
+        },
+        headers={"Origin": "https://cinequeue-7tvty3vmvq-uw.a.run.app"}
+    )
+    assert login_res.status_code == 200
+
+    # 3. Issue an invite as admin
+    invite_res = client_with_admin_auth.post(
+        "/api/admin/invite",
+        json={"email": "audit_invited@example.com", "csrf_token": csrf_token},
+        headers={"Origin": "https://cinequeue-7tvty3vmvq-uw.a.run.app"}
+    )
+    assert invite_res.status_code == 200
+
+    # 4. Verify audit log includes the invite action
+    logs_res = client_with_admin_auth.get("/api/admin/login-logs")
+    assert logs_res.status_code == 200
+    logs = logs_res.json()["logs"]
+    invited_logs = [l for l in logs if l["email"] == "audit_invited@example.com"]
+    assert len(invited_logs) >= 1
+    assert "invite" in invited_logs[0]["reason"]
+
 

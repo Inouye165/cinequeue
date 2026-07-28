@@ -79,6 +79,16 @@ if ENVIRONMENT == "development" and not ADMIN_PASSWORD:
 
 ADMIN_SESSION_COOKIE_NAME = "cinequeue_admin_session"
 
+# SMTP & Email Configurations
+SMTP_HOST = os.getenv("SMTP_HOST", "").strip()
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = os.getenv("SMTP_USER", "").strip()
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "").strip()
+SMTP_FROM = os.getenv("SMTP_FROM", SMTP_USER).strip()
+SMTP_USE_TLS = os.getenv("SMTP_USE_TLS", "true").strip().lower() == "true"
+
+APP_BASE_URL = os.getenv("APP_BASE_URL", "http://localhost:5180").strip()
+
 # Fail-closed validation for production
 if AUTH_ENABLED:
     if not FIREBASE_PROJECT_ID:
@@ -91,4 +101,5 @@ if AUTH_ENABLED:
         raise ValueError("AUTH_ALLOWED_ORIGINS must be set in production when AUTH_ENABLED is True")
     if ENVIRONMENT == "production" and not ADMIN_PASSWORD:
         raise ValueError("ADMIN_PASSWORD must be set in production when AUTH_ENABLED is True")
+
 

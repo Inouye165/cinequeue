@@ -133,8 +133,9 @@ function CinequeueApp() {
   const handleInvite = async (email: string) => {
     try {
       const csrfRes = await api.csrf();
-      await api.adminInvite(email, csrfRes.csrf_token, idToken || undefined);
+      const res = await api.adminInvite(email, csrfRes.csrf_token, idToken || undefined);
       await loadAdminData();
+      return res;
     } catch (err) {
       alert(err instanceof Error ? err.message : "Failed to invite user.");
       throw err;
