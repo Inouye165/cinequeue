@@ -236,7 +236,7 @@ export const api = {
     if (token) {
       headers["Authorization"] = `Bearer ${token}`;
     }
-    return request<{ status: string }>("/api/admin/invite", {
+    return request<{ status: string; email?: string; email_sent?: boolean; message?: string }>("/api/admin/invite", {
       method: "POST",
       headers,
       body: JSON.stringify({ email, csrf_token: csrfToken }),

@@ -193,16 +193,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                 setFirebaseUser(uInfo);
                 setIdToken(token);
                 setAuthReady(true);
-                setUser(uInfo);
                 setAuthInitialized(true);
-                setLoading(false);
                 setSessionReady(false);
                 setRoleLoading(true);
                 setProfileLoading(true);
                 setAuthorizationReady(false);
-                setError(null);
                 recordEvent("auth_context_state_update_completed", "success");
-                recordEvent("auth_loading_cleared", "success");
 
                 const performAuthSequence = async () => {
                   try {
@@ -217,6 +213,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                     if (!isCurrent()) return;
 
                     setSessionReady(true);
+                    setUser(uInfo);
+                    setLoading(false);
+                    setError(null);
+                    recordEvent("auth_loading_cleared", "success");
 
                     // Start secondary async requests concurrently (role lookup & session/profile verification)
                     const rolePromise = fetchAdminMe(token)
@@ -280,13 +280,24 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                     
                     recordEvent("auth_context_state_update_started", "start");
                     setError(err.message || "Session or role resolution failed");
+                    setUser(null);
+                    setFirebaseUser(null);
+                    setIdToken(null);
                     setSessionReady(false);
                     setIsAdmin(false);
                     setRole(null);
                     setRoleLoading(false);
                     setProfileLoading(false);
+                    setLoading(false);
                     recordEvent("authorization_ready", "failure");
                     setAuthorizationReady(true);
+                    
+                    try {
+                      await firebaseSignOut(auth);
+                    } catch (soErr) {
+                      console.error("Firebase signout on session creation failure failed:", soErr);
+                    }
+
                     recordEvent("auth_context_state_update_completed", "success");
                     recordEvent("auth_state_callback_completed", "success");
                     recordEvent("auth_trace_completed", "success");
@@ -299,11 +310,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                 if (!isCurrent()) return;
                 recordEvent("auth_context_state_update_started", "start");
                 setError(err.message || "Failed to resolve authentication");
+                setUser(null);
+                setFirebaseUser(null);
+                setIdToken(null);
                 setAuthInitialized(true);
                 setLoading(false);
                 setAuthorizationReady(true);
-                recordEvent("auth_context_state_update_completed", "success");
-                recordEvent("auth_state_callback_completed", "success");
+                try {
+                  await firebaseSignOut(auth);
+                } catch (soErr) {
+                  // ignore
+                }
                 recordEvent("auth_trace_completed", "success");
               }
             } else {

@@ -7,7 +7,7 @@ import re
 import time
 import asyncio
 from typing import Optional
-from fastapi import HTTPException, Depends
+from fastapi import HTTPException, Depends, Request
 from fastapi.security import APIKeyCookie
 from pydantic import BaseModel
 import firebase_admin
@@ -64,6 +64,7 @@ def verify_csrf_token(token_a: str, token_b: str) -> bool:
 
 
 async def get_current_user(
+    request: Request,
     session_cookie: Optional[str] = Depends(session_cookie_scheme)
 ) -> CurrentUser:
     """
@@ -116,10 +117,44 @@ async def get_current_user(
 
         email_normalized = email.strip().lower()
 
-        # Authorization check
-        if AUTH_MODE == "allowlist":
-            if email_normalized not in AUTH_ALLOWED_EMAILS:
-                logger.warning("User %s is not in the allowlist", email_normalized)
+        # Authorization check: check database approval first, fall back to static allowlist
+        repo = getattr(request.app.state, "watchlist_repo", None) if hasattr(request.app, "state") else None
+        
+        if repo:
+            approval = repo.get_user_approval(email_normalized)
+            if approval:
+                status = approval.get("status")
+                if status != "approved":
+                    ip_address = request.client.host if request.client else "unknown"
+                    user_agent = request.headers.get("user-agent", "unknown")
+                    repo.log_login_attempt(
+                        email=email_normalized,
+                        status="failed",
+                        reason=f"session_auth_status_{status}",
+                        ip_address=ip_address,
+                        user_agent=user_agent,
+                        timestamp=repo.utc_now_iso(),
+                    )
+                    logger.warning("User %s access status is %s", email_normalized, status)
+                    raise HTTPException(status_code=403, detail=f"Forbidden: User status is {status}")
+            else:
+                # No DB approval record found
+                if AUTH_MODE == "allowlist" and email_normalized not in AUTH_ALLOWED_EMAILS:
+                    ip_address = request.client.host if request.client else "unknown"
+                    user_agent = request.headers.get("user-agent", "unknown")
+                    repo.log_login_attempt(
+                        email=email_normalized,
+                        status="failed",
+                        reason="session_auth_not_approved_or_allowlisted",
+                        ip_address=ip_address,
+                        user_agent=user_agent,
+                        timestamp=repo.utc_now_iso(),
+                    )
+                    logger.warning("User %s is not approved in database or static allowlist", email_normalized)
+                    raise HTTPException(status_code=403, detail="Forbidden: User is not authorized")
+        else:
+            if AUTH_MODE == "allowlist" and email_normalized not in AUTH_ALLOWED_EMAILS:
+                logger.warning("User %s is not in static allowlist", email_normalized)
                 raise HTTPException(status_code=403, detail="Forbidden: User is not authorized")
 
         return CurrentUser(
@@ -128,6 +163,8 @@ async def get_current_user(
             display_name=decoded_claims.get("name"),
             photo_url=decoded_claims.get("picture"),
         )
+    except HTTPException:
+        raise
     except auth.RevokedSessionCookieError as exc:
         logger.warning("Session cookie has been revoked")
         raise HTTPException(status_code=401, detail="Session has been revoked") from exc

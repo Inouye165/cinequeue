@@ -18,6 +18,7 @@ from app.services.admin_auth import (
     generate_session_token,
     get_current_admin,
 )
+from app.services.email_service import send_invite_email
 
 logger = logging.getLogger(__name__)
 
@@ -192,7 +193,7 @@ async def invite_user(
     body: InviteRequest,
     request: Request,
     current_admin: str = Depends(get_current_admin)
-) -> dict[str, str]:
+) -> dict[str, Any]:
     validate_csrf(request, body.csrf_token)
     email_normalized = body.email.strip().lower()
 
@@ -221,7 +222,40 @@ async def invite_user(
             decided_by=current_admin,
         )
     logger.info("Admin %s invited/pre-approved user %s", current_admin, email_normalized)
-    return {"status": "success"}
+
+    # Determine origin/app URL from request headers
+    origin = request.headers.get("origin") or ""
+    if not origin and request.headers.get("referer"):
+        origin = request.headers.get("referer").rstrip("/")
+
+    email_sent, email_detail = await send_invite_email(
+        to_email=email_normalized,
+        app_url=origin,
+        sender_admin=current_admin,
+    )
+
+    ip_address = request.client.host if request.client else "unknown"
+    user_agent = request.headers.get("user-agent", "unknown")
+    log_status = "success" if email_sent else "warning"
+    log_reason = "invite_email_dispatched" if email_sent else f"invite_preapproved_no_email ({email_detail})"
+
+    repo.log_login_attempt(
+        email=email_normalized,
+        status=log_status,
+        reason=log_reason,
+        ip_address=ip_address,
+        user_agent=user_agent,
+        timestamp=decided_at,
+    )
+
+    msg = email_detail if email_sent else f"User {email_normalized} pre-approved! ({email_detail})"
+
+    return {
+        "status": "success",
+        "email": email_normalized,
+        "email_sent": email_sent,
+        "message": msg,
+    }
 
 @router.get("/login-logs")
 async def get_login_logs(
