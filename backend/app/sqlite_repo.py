@@ -3,8 +3,10 @@
 import json
 import logging
 import sqlite3
+import hashlib
+import time
 from contextlib import contextmanager
-from typing import Any
+from typing import Any, Optional
 
 from app.config import DATA_DIR, DB_PATH
 from app.repository import DuplicateItemError, WatchlistRepository
@@ -713,12 +715,61 @@ class SqliteWatchlistRepository(WatchlistRepository):
                 (email, timestamp, status, reason, ip_address, user_agent),
             )
 
-    def list_login_logs(self, limit: int = 100) -> list[dict[str, Any]]:
+    def list_login_logs(
+        self,
+        limit: int = 100,
+        email: Optional[str] = None,
+        status: Optional[str] = None,
+        reason: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
+        query = "SELECT * FROM login_logs WHERE 1=1"
+        params: list[Any] = []
+        if email:
+            query += " AND lower(email) LIKE ?"
+            params.append(f"%{email.strip().lower()}%")
+        if status:
+            query += " AND status = ?"
+            params.append(status.strip().lower())
+        if reason:
+            query += " AND reason = ?"
+            params.append(reason.strip().lower())
+        query += " ORDER BY timestamp DESC LIMIT ?"
+        params.append(limit)
         with self._connection() as conn:
-            rows = conn.execute(
-                "SELECT * FROM login_logs ORDER BY timestamp DESC LIMIT ?", (limit,)
-            ).fetchall()
+            rows = conn.execute(query, params).fetchall()
         return [dict(row) for row in rows]
+
+    def should_deduplicate_session_restoration(
+        self,
+        email: str,
+        user_agent: str,
+        ip_address: str,
+        window_seconds: int = 1800,
+    ) -> bool:
+        try:
+            key_raw = f"{email.strip().lower()}:{user_agent.strip()}:{ip_address.strip()}"
+            cache_key = hashlib.sha256(key_raw.encode("utf-8")).hexdigest()
+            now = time.time()
+
+            if not hasattr(self, "_restoration_cache"):
+                self._restoration_cache = {}
+
+            # Periodic cleanup of expired items if cache grows large
+            if len(self._restoration_cache) > 500:
+                self._restoration_cache = {
+                    k: t for k, t in self._restoration_cache.items()
+                    if (now - t) < window_seconds
+                }
+
+            last_time = self._restoration_cache.get(cache_key)
+            if last_time is not None and (now - last_time) < window_seconds:
+                return True
+
+            self._restoration_cache[cache_key] = now
+            return False
+        except Exception as e:
+            logger.error("Error evaluating session restoration deduplication: %s", e)
+            return False
 
     def get_agent_settings(self, user_id: str) -> dict[str, Any]:
         with self._connection() as conn:

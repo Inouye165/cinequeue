@@ -139,7 +139,10 @@ async def test_neutral_fallback_when_gemini_unavailable(repo, monkeypatch):
 @pytest.mark.asyncio
 async def test_live_gemini_provider_integration():
     """Optional live integration test using configured GEMINI_API_KEY."""
+    import os
     from app.config import GEMINI_API_KEY
+    if os.getenv("RUN_LIVE_GEMINI_TESTS") != "1":
+        pytest.skip("Set RUN_LIVE_GEMINI_TESTS=1 to run live Gemini tests")
     if not GEMINI_API_KEY:
         pytest.skip("GEMINI_API_KEY not configured")
 

@@ -5,7 +5,7 @@ Defines the contract that all watchlist storage backends must implement.
 
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Optional
 
 
 class DuplicateItemError(Exception):
@@ -166,8 +166,25 @@ class WatchlistRepository(ABC):
         ...
 
     @abstractmethod
-    def list_login_logs(self, limit: int = 100) -> list[dict[str, Any]]:
+    def list_login_logs(
+        self,
+        limit: int = 100,
+        email: Optional[str] = None,
+        status: Optional[str] = None,
+        reason: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
         """List recent login attempts."""
+        ...
+
+    @abstractmethod
+    def should_deduplicate_session_restoration(
+        self,
+        email: str,
+        user_agent: str,
+        ip_address: str,
+        window_seconds: int = 1800,
+    ) -> bool:
+        """Check if a successful session restoration event should be suppressed for audit logging."""
         ...
 
     @abstractmethod

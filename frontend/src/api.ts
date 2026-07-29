@@ -242,13 +242,19 @@ export const api = {
       body: JSON.stringify({ email, csrf_token: csrfToken }),
     });
   },
-  adminLoginLogs: (token?: string, signal?: AbortSignal) => {
+  adminLoginLogs: (params?: { limit?: number; email?: string; status?: string; reason?: string }, token?: string, signal?: AbortSignal) => {
     const headers: Record<string, string> = {};
     if (token) {
       headers["Authorization"] = `Bearer ${token}`;
     }
+    const query = new URLSearchParams();
+    if (params?.limit) query.set("limit", String(params.limit));
+    if (params?.email) query.set("email", params.email);
+    if (params?.status) query.set("status", params.status);
+    if (params?.reason) query.set("reason", params.reason);
+    const qs = query.toString() ? `?${query.toString()}` : "";
     return request<{ logs: Array<{ id: string | number; email: string; timestamp: string; status: string; reason: string; ip_address?: string; user_agent?: string }> }>(
-      "/api/admin/login-logs",
+      `/api/admin/login-logs${qs}`,
       { headers, signal }
     );
   },

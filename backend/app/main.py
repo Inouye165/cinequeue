@@ -18,7 +18,7 @@ from app.config import (
     PUBLIC_AUTH_DOMAIN,
 )
 from app.logging_config import setup_logging
-from app.routers import movies, watchlist, auth, admin, agent, ratings
+from app.routers import movies, watchlist, auth, admin, agent, ratings, sync
 from app.services.tmdb import TmdbClient
 
 setup_logging()
@@ -157,6 +157,7 @@ async def check_tmdb_key(request, call_next):
         and not request.url.path.startswith("/api/agent")
         and not request.url.path.startswith("/api/ratings")
         and not request.url.path.startswith("/api/watchlist")
+        and not request.url.path.startswith("/api/sync")
         and request.url.path != "/api/health"
     ):
         if not getattr(app.state, "tmdb", None):
@@ -287,6 +288,7 @@ app.include_router(agent.router)
 app.include_router(watchlist.router)
 app.include_router(movies.router)
 app.include_router(ratings.router)
+app.include_router(sync.router)
 
 
 

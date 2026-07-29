@@ -19,7 +19,12 @@ GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3.5-flash").s
 AGENT_DEBUG = os.getenv("AGENT_DEBUG", "false").strip().lower() == "true"
 
 
-DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
+if os.getenv("DATA_DIR"):
+    DATA_DIR = Path(os.getenv("DATA_DIR"))
+else:
+    DATA_DIR = ROOT_DIR / "backend" / "data"
+
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = DATA_DIR / "watchlist.db"
 # NOTE: SQLite data is temporary on Cloud Run (containers are ephemeral)
 # For persistent storage, set WATCHLIST_BACKEND=firestore
@@ -70,12 +75,9 @@ else:
     SESSION_COOKIE_NAME = "cinequeue_session"
 
 # Admin configurations
-ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin").strip()
+ENABLE_FALLBACK_ADMIN_AUTH = os.getenv("ENABLE_FALLBACK_ADMIN_AUTH", "false").strip().lower() == "true"
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "").strip()
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "").strip()
-
-# Default admin password for local development
-if ENVIRONMENT == "development" and not ADMIN_PASSWORD:
-    ADMIN_PASSWORD = "admin_secure_pass_2026"
 
 ADMIN_SESSION_COOKIE_NAME = "cinequeue_admin_session"
 
@@ -89,6 +91,13 @@ SMTP_USE_TLS = os.getenv("SMTP_USE_TLS", "true").strip().lower() == "true"
 
 APP_BASE_URL = os.getenv("APP_BASE_URL", "http://localhost:5180").strip()
 
+# Fail-closed validation for fallback admin authentication
+if ENABLE_FALLBACK_ADMIN_AUTH:
+    if not ADMIN_USERNAME:
+        raise ValueError("ADMIN_USERNAME must be configured non-empty when ENABLE_FALLBACK_ADMIN_AUTH is True")
+    if not ADMIN_PASSWORD:
+        raise ValueError("ADMIN_PASSWORD must be configured non-empty when ENABLE_FALLBACK_ADMIN_AUTH is True")
+
 # Fail-closed validation for production
 if AUTH_ENABLED:
     if not FIREBASE_PROJECT_ID:
@@ -99,7 +108,5 @@ if AUTH_ENABLED:
         raise ValueError("AUTH_ALLOWED_EMAILS must be set when AUTH_MODE is 'allowlist' and AUTH_ENABLED is True")
     if ENVIRONMENT == "production" and not AUTH_ALLOWED_ORIGINS:
         raise ValueError("AUTH_ALLOWED_ORIGINS must be set in production when AUTH_ENABLED is True")
-    if ENVIRONMENT == "production" and not ADMIN_PASSWORD:
-        raise ValueError("ADMIN_PASSWORD must be set in production when AUTH_ENABLED is True")
 
 

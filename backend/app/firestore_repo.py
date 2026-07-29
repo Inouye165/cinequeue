@@ -1,8 +1,10 @@
 """Firestore-backed watchlist repository."""
 
 import logging
+import hashlib
+import time
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Optional
 
 from google.cloud import firestore  # type: ignore[import-untyped]
 
@@ -303,10 +305,22 @@ class FirestoreWatchlistRepository(WatchlistRepository):
             "user_agent": user_agent
         })
 
-    def list_login_logs(self, limit: int = 100) -> list[dict[str, Any]]:
+    def list_login_logs(
+        self,
+        limit: int = 100,
+        email: Optional[str] = None,
+        status: Optional[str] = None,
+        reason: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
+        ref: Any = self._db.collection("login_logs")
+        if email:
+            ref = ref.where("email", "==", email.strip().lower())
+        if status:
+            ref = ref.where("status", "==", status.strip().lower())
+        if reason:
+            ref = ref.where("reason", "==", reason.strip().lower())
         docs = (
-            self._db.collection("login_logs")
-            .order_by("timestamp", direction=firestore.Query.DESCENDING)
+            ref.order_by("timestamp", direction=firestore.Query.DESCENDING)
             .limit(limit)
             .stream()
         )
@@ -317,6 +331,38 @@ class FirestoreWatchlistRepository(WatchlistRepository):
                 d["id"] = doc.id
                 res.append(d)
         return res
+
+    def should_deduplicate_session_restoration(
+        self,
+        email: str,
+        user_agent: str,
+        ip_address: str,
+        window_seconds: int = 1800,
+    ) -> bool:
+        try:
+            key_raw = f"{email.strip().lower()}:{user_agent.strip()}:{ip_address.strip()}"
+            cache_key = hashlib.sha256(key_raw.encode("utf-8")).hexdigest()
+            now = time.time()
+
+            if not hasattr(self, "_restoration_cache"):
+                self._restoration_cache = {}
+
+            # Periodic cleanup of expired items if cache grows large
+            if len(self._restoration_cache) > 500:
+                self._restoration_cache = {
+                    k: t for k, t in self._restoration_cache.items()
+                    if (now - t) < window_seconds
+                }
+
+            last_time = self._restoration_cache.get(cache_key)
+            if last_time is not None and (now - last_time) < window_seconds:
+                return True
+
+            self._restoration_cache[cache_key] = now
+            return False
+        except Exception as e:
+            logger.error("Error evaluating session restoration deduplication: %s", e)
+            return False
 
     def get_agent_settings(self, user_id: str) -> dict[str, Any]:
         doc_ref = self._db.collection("users").document(user_id).collection("agent").document("settings")

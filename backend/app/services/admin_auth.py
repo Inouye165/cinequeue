@@ -8,7 +8,7 @@ from typing import Optional
 from fastapi import Depends, HTTPException, Request
 from fastapi.security import APIKeyCookie
 
-from app.config import ADMIN_SESSION_COOKIE_NAME, ADMIN_USERNAME
+from app.config import ADMIN_SESSION_COOKIE_NAME, ADMIN_USERNAME, ENABLE_FALLBACK_ADMIN_AUTH
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +74,6 @@ async def get_current_admin(
                 raise HTTPException(status_code=401, detail="Invalid token claims: email missing")
 
             email_normalized = email.strip().lower()
-            admin_username_normalized = ADMIN_USERNAME.strip().lower()
 
             db_start = time.perf_counter()
             if perf:
@@ -82,7 +81,8 @@ async def get_current_admin(
 
             repo = request.app.state.watchlist_repo
             db_admin = repo.get_admin_user(email_normalized)
-            is_admin = bool(db_admin or email_normalized == admin_username_normalized)
+            is_fallback = bool(ENABLE_FALLBACK_ADMIN_AUTH and ADMIN_USERNAME and email_normalized == ADMIN_USERNAME.strip().lower())
+            is_admin = bool(db_admin or is_fallback)
 
             db_end = time.perf_counter()
             if perf:
@@ -90,10 +90,10 @@ async def get_current_admin(
                 perf["admin_lookup_duration_ms"] = (db_end - db_start) * 1000.0
 
             logger.info(
-                "Admin lookup via Firebase token for email: %s. DB record found: %s, matches ADMIN_USERNAME: %s, result: %s",
+                "Admin lookup via Firebase token for email: %s. DB record found: %s, fallback match: %s, result: %s",
                 email_normalized,
                 bool(db_admin),
-                email_normalized == admin_username_normalized,
+                is_fallback,
                 is_admin
             )
 
@@ -148,8 +148,9 @@ async def get_current_admin(
         raise HTTPException(status_code=401, detail="Invalid admin session")
 
     username = session["username"]
-    # Check that this admin user still exists in the database or matches ADMIN_USERNAME
-    if not (repo.get_admin_user(username) or username.strip().lower() == ADMIN_USERNAME.strip().lower()):
+    is_fallback = bool(ENABLE_FALLBACK_ADMIN_AUTH and ADMIN_USERNAME and username.strip().lower() == ADMIN_USERNAME.strip().lower())
+    # Check that this admin user still exists in the database or matches ENABLE_FALLBACK_ADMIN_AUTH
+    if not (repo.get_admin_user(username) or is_fallback):
         logger.warning("Admin session belongs to a deleted/revoked administrator: %s", username)
         repo.delete_admin_session(session_cookie)
         raise HTTPException(status_code=401, detail="Administrator privileges revoked")

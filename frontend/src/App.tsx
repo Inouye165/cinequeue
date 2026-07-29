@@ -41,7 +41,7 @@ function CinequeueApp() {
       const reqs = await api.adminRequests(idToken || undefined, signal);
       if (signal?.aborted) return;
       setApprovals(reqs.approvals);
-      const logs = await api.adminLoginLogs(idToken || undefined, signal);
+      const logs = await api.adminLoginLogs(undefined, idToken || undefined, signal);
       if (signal?.aborted) return;
       setLoginLogs(logs.logs);
       recordEvent("admin_requests_completed", "success");

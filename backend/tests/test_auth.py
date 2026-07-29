@@ -681,3 +681,341 @@ def test_origin_validation_policy(mock_create_cookie, mock_verify_token):
         importlib.reload(app.config)
         importlib.reload(app.routers.auth)
         importlib.reload(app.main)
+
+
+@patch("app.routers.auth.firebase_auth.verify_id_token")
+@patch("app.routers.auth.firebase_auth.create_session_cookie")
+def test_approved_user_fresh_login_audit_log(mock_create_cookie, mock_verify_token, client_with_auth):
+    """Approved user fresh login creates a success google_login audit log."""
+    mock_verify_token.return_value = {
+        "uid": "user_approved",
+        "email": "inouye165@gmail.com",
+        "email_verified": True,
+        "auth_time": time.time(),
+        "name": "Approved User"
+    }
+    mock_create_cookie.return_value = "mock_session_val"
+
+    csrf_res = client_with_auth.get("/api/auth/csrf")
+    csrf_token = csrf_res.json()["csrf_token"]
+
+    res = client_with_auth.post(
+        "/api/auth/session",
+        json={"id_token": "valid_token", "csrf_token": csrf_token},
+        headers={"Origin": "https://cinequeue-7tvty3vmvq-uw.a.run.app"}
+    )
+    assert res.status_code == 200
+
+    repo = client_with_auth.app.state.watchlist_repo
+    logs = repo.list_login_logs(email="inouye165@gmail.com")
+    assert len(logs) > 0
+    latest = logs[0]
+    assert latest["email"] == "inouye165@gmail.com"
+    assert latest["status"] == "success"
+    assert latest["reason"] == "google_login"
+
+
+@patch("app.auth.auth.verify_session_cookie")
+def test_session_restoration_audit_log(mock_verify_cookie, client_with_auth):
+    """Session restoration via GET /api/auth/me creates a success session_restoration audit log."""
+    from app.config import SESSION_COOKIE_NAME
+    mock_verify_cookie.return_value = {
+        "uid": "user_approved",
+        "email": "inouye165@gmail.com",
+        "name": "Approved User"
+    }
+    client_with_auth.cookies.set(SESSION_COOKIE_NAME, "valid_session_cookie")
+
+    res = client_with_auth.get("/api/auth/me")
+    assert res.status_code == 200
+
+    repo = client_with_auth.app.state.watchlist_repo
+    logs = repo.list_login_logs(email="inouye165@gmail.com")
+    assert len(logs) > 0
+    latest = logs[0]
+    assert latest["email"] == "inouye165@gmail.com"
+    assert latest["status"] == "success"
+    assert latest["reason"] == "session_restoration"
+
+
+@patch("app.routers.auth.firebase_auth.verify_id_token")
+def test_pending_user_login_audit_log(mock_verify_token, client_with_auth):
+    """New user first login creates pending_approval audit log and returns 403."""
+    mock_verify_token.return_value = {
+        "uid": "user_pending",
+        "email": "pending_user@example.com",
+        "email_verified": True,
+        "auth_time": time.time(),
+        "name": "Pending User"
+    }
+
+    csrf_res = client_with_auth.get("/api/auth/csrf")
+    csrf_token = csrf_res.json()["csrf_token"]
+
+    res = client_with_auth.post(
+        "/api/auth/session",
+        json={"id_token": "valid_pending_token", "csrf_token": csrf_token},
+        headers={"Origin": "https://cinequeue-7tvty3vmvq-uw.a.run.app"}
+    )
+    assert res.status_code == 403
+
+    repo = client_with_auth.app.state.watchlist_repo
+    logs = repo.list_login_logs(email="pending_user@example.com")
+    assert len(logs) > 0
+    latest = logs[0]
+    assert latest["email"] == "pending_user@example.com"
+    assert latest["status"] == "failed"
+    assert latest["reason"] == "pending_approval"
+
+
+@patch("app.routers.auth.firebase_auth.verify_id_token")
+def test_revoked_user_login_audit_log(mock_verify_token, client_with_auth):
+    """Revoked user login attempt creates revoked_user audit log and returns 403."""
+    repo = client_with_auth.app.state.watchlist_repo
+    now = repo.utc_now_iso()
+    repo.create_user_approval("revoked_user@example.com", "pending", now)
+    repo.update_user_approval("revoked_user@example.com", "revoked", now, "admin")
+
+    mock_verify_token.return_value = {
+        "uid": "user_revoked",
+        "email": "revoked_user@example.com",
+        "email_verified": True,
+        "auth_time": time.time(),
+        "name": "Revoked User"
+    }
+
+    csrf_res = client_with_auth.get("/api/auth/csrf")
+    csrf_token = csrf_res.json()["csrf_token"]
+
+    res = client_with_auth.post(
+        "/api/auth/session",
+        json={"id_token": "valid_revoked_token", "csrf_token": csrf_token},
+        headers={"Origin": "https://cinequeue-7tvty3vmvq-uw.a.run.app"}
+    )
+    assert res.status_code == 403
+
+    logs = repo.list_login_logs(email="revoked_user@example.com")
+    assert len(logs) > 0
+    latest = logs[0]
+    assert latest["email"] == "revoked_user@example.com"
+    assert latest["status"] == "failed"
+    assert latest["reason"] == "revoked_user"
+
+
+def test_csrf_failure_audit_log_unknown_email(client_with_auth):
+    """CSRF failure creates audit log with email set to unknown."""
+    res = client_with_auth.post(
+        "/api/auth/session",
+        json={"id_token": "token", "csrf_token": "bad_csrf"},
+        headers={"Origin": "https://cinequeue-7tvty3vmvq-uw.a.run.app"}
+    )
+    assert res.status_code == 401
+
+    repo = client_with_auth.app.state.watchlist_repo
+    logs = repo.list_login_logs(email="unknown")
+    assert len(logs) > 0
+    latest = logs[0]
+    assert latest["email"] == "unknown"
+    assert latest["status"] == "failed"
+    assert latest["reason"] == "csrf_validation_failed"
+
+
+def test_origin_failure_audit_log_unknown_email(client_with_auth):
+    """Origin header failure creates audit log with email set to unknown."""
+    csrf_res = client_with_auth.get("/api/auth/csrf")
+    csrf_token = csrf_res.json()["csrf_token"]
+
+    res = client_with_auth.post(
+        "/api/auth/session",
+        json={"id_token": "token", "csrf_token": csrf_token},
+        headers={"Origin": "https://disallowed-origin.com"}
+    )
+    assert res.status_code == 401
+
+    repo = client_with_auth.app.state.watchlist_repo
+    logs = repo.list_login_logs(email="unknown")
+    assert len(logs) > 0
+    latest = logs[0]
+    assert latest["email"] == "unknown"
+    assert latest["status"] == "failed"
+    assert latest["reason"] == "origin_validation_failed"
+
+
+def test_firestore_audit_write_failure_handling(client_with_auth):
+    """Exception inside log_login_attempt is caught gracefully without breaking log_failure response."""
+    repo = client_with_auth.app.state.watchlist_repo
+    with patch.object(repo, "log_login_attempt", side_effect=Exception("Database connection error")):
+        res = client_with_auth.post(
+            "/api/auth/session",
+            json={"id_token": "token", "csrf_token": "invalid_csrf"},
+            headers={"Origin": "https://cinequeue-7tvty3vmvq-uw.a.run.app"}
+        )
+        assert res.status_code == 401
+
+
+def test_admin_log_pagination_and_filtering(client_with_auth):
+    """Audit log repository supports limit, status, and email filtering."""
+    repo = client_with_auth.app.state.watchlist_repo
+    now = repo.utc_now_iso()
+
+    repo.log_login_attempt("user1@example.com", "success", "google_login", "1.1.1.1", "agent", now)
+    repo.log_login_attempt("user2@example.com", "failed", "pending_approval", "2.2.2.2", "agent", now)
+    repo.log_login_attempt("user1@example.com", "failed", "csrf_validation_failed", "1.1.1.1", "agent", now)
+
+    all_logs = repo.list_login_logs(limit=10)
+    assert len(all_logs) >= 3
+
+    u1_logs = repo.list_login_logs(email="user1@example.com")
+    assert all(l["email"] == "user1@example.com" for l in u1_logs)
+
+    failed_logs = repo.list_login_logs(status="failed")
+    assert all(l["status"] == "failed" for l in failed_logs)
+
+    limit_logs = repo.list_login_logs(limit=2)
+    assert len(limit_logs) == 2
+
+
+@patch("app.auth.auth.verify_session_cookie")
+def test_session_restoration_deduplication_within_window(mock_verify_cookie, client_with_auth):
+    """First restoration creates record; second within 30 min is deduplicated; third after 30 min creates record."""
+    from app.config import SESSION_COOKIE_NAME
+    repo = client_with_auth.app.state.watchlist_repo
+    repo.create_user_approval("dedup_user@example.com", "approved", repo.utc_now_iso())
+    # Reset deduplication cache
+    if hasattr(repo, "_restoration_cache"):
+        repo._restoration_cache.clear()
+
+    mock_verify_cookie.return_value = {
+        "uid": "user_approved",
+        "email": "dedup_user@example.com",
+        "name": "Approved User"
+    }
+    client_with_auth.cookies.set(SESSION_COOKIE_NAME, "valid_session_cookie")
+
+    start_time = 1000000.0
+
+    # 1. First call at start_time -> creates log
+    with patch("time.time", return_value=start_time):
+        res1 = client_with_auth.get("/api/auth/me", headers={"User-Agent": "DeviceA"})
+        assert res1.status_code == 200
+
+    logs_1 = repo.list_login_logs(email="dedup_user@example.com", reason="session_restoration")
+    assert len(logs_1) == 1
+
+    # 2. Second call 5 minutes later (1000300s) -> deduplicated (no new DB record)
+    with patch("time.time", return_value=start_time + 300):
+        res2 = client_with_auth.get("/api/auth/me", headers={"User-Agent": "DeviceA"})
+        assert res2.status_code == 200
+
+    logs_2 = repo.list_login_logs(email="dedup_user@example.com", reason="session_restoration")
+    assert len(logs_2) == 1
+
+    # 3. Third call 31 minutes later (1001860s) -> creates second log record
+    with patch("time.time", return_value=start_time + 1860):
+        res3 = client_with_auth.get("/api/auth/me", headers={"User-Agent": "DeviceA"})
+        assert res3.status_code == 200
+
+    logs_3 = repo.list_login_logs(email="dedup_user@example.com", reason="session_restoration")
+    assert len(logs_3) == 2
+
+
+@patch("app.auth.auth.verify_session_cookie")
+def test_two_different_users_restored_independently(mock_verify_cookie, client_with_auth):
+    """Two different users calling /api/auth/me are logged independently."""
+    from app.config import SESSION_COOKIE_NAME
+    repo = client_with_auth.app.state.watchlist_repo
+    repo.create_user_approval("user1_dedup@example.com", "approved", repo.utc_now_iso())
+    repo.create_user_approval("user2_dedup@example.com", "approved", repo.utc_now_iso())
+    if hasattr(repo, "_restoration_cache"):
+        repo._restoration_cache.clear()
+
+    # User 1
+    mock_verify_cookie.return_value = {"uid": "u1", "email": "user1_dedup@example.com", "name": "User 1"}
+    client_with_auth.cookies.set(SESSION_COOKIE_NAME, "session_u1")
+    res1 = client_with_auth.get("/api/auth/me", headers={"User-Agent": "SharedBrowser"})
+    assert res1.status_code == 200
+
+    # User 2
+    mock_verify_cookie.return_value = {"uid": "u2", "email": "user2_dedup@example.com", "name": "User 2"}
+    client_with_auth.cookies.set(SESSION_COOKIE_NAME, "session_u2")
+    res2 = client_with_auth.get("/api/auth/me", headers={"User-Agent": "SharedBrowser"})
+    assert res2.status_code == 200
+
+    logs_u1 = repo.list_login_logs(email="user1_dedup@example.com")
+    logs_u2 = repo.list_login_logs(email="user2_dedup@example.com")
+    assert len(logs_u1) == 1
+    assert len(logs_u2) == 1
+
+
+@patch("app.auth.auth.verify_session_cookie")
+def test_two_different_devices_same_user_logged(mock_verify_cookie, client_with_auth):
+    """Same user restoring from two different user agents creates records for each device."""
+    from app.config import SESSION_COOKIE_NAME
+    repo = client_with_auth.app.state.watchlist_repo
+    repo.create_user_approval("multidevice@example.com", "approved", repo.utc_now_iso())
+    if hasattr(repo, "_restoration_cache"):
+        repo._restoration_cache.clear()
+
+    mock_verify_cookie.return_value = {"uid": "u1", "email": "multidevice@example.com", "name": "Multi Device"}
+    client_with_auth.cookies.set(SESSION_COOKIE_NAME, "session_val")
+
+    # Device 1: Mobile
+    res1 = client_with_auth.get("/api/auth/me", headers={"User-Agent": "MobileSafari/1.0"})
+    assert res1.status_code == 200
+
+    # Device 2: Desktop
+    res2 = client_with_auth.get("/api/auth/me", headers={"User-Agent": "ChromeDesktop/1.0"})
+    assert res2.status_code == 200
+
+    logs = repo.list_login_logs(email="multidevice@example.com")
+    assert len(logs) == 2
+
+
+def test_failed_auth_attempts_never_deduplicated(client_with_auth):
+    """Repeated failed authentication attempts are never deduplicated or suppressed."""
+    # Attempt 1 invalid CSRF
+    res1 = client_with_auth.post("/api/auth/session", json={"id_token": "tok", "csrf_token": "bad1"})
+    assert res1.status_code == 401
+
+    # Attempt 2 invalid CSRF
+    res2 = client_with_auth.post("/api/auth/session", json={"id_token": "tok", "csrf_token": "bad2"})
+    assert res2.status_code == 401
+
+    repo = client_with_auth.app.state.watchlist_repo
+    failed_logs = repo.list_login_logs(status="failed", reason="csrf_validation_failed")
+    assert len(failed_logs) >= 2
+
+
+@patch("app.auth.auth.verify_session_cookie")
+def test_deduplication_error_fails_safe(mock_verify_cookie, client_with_auth):
+    """If should_deduplicate_session_restoration raises an Exception, /api/auth/me still returns 200 OK."""
+    from app.config import SESSION_COOKIE_NAME
+    repo = client_with_auth.app.state.watchlist_repo
+    repo.create_user_approval("failsafe@example.com", "approved", repo.utc_now_iso())
+
+    mock_verify_cookie.return_value = {"uid": "u1", "email": "failsafe@example.com", "name": "Failsafe User"}
+    client_with_auth.cookies.set(SESSION_COOKIE_NAME, "valid_cookie")
+
+    with patch.object(repo, "should_deduplicate_session_restoration", side_effect=Exception("Cache error")):
+        res = client_with_auth.get("/api/auth/me")
+        assert res.status_code == 200
+        assert res.json()["email"] == "failsafe@example.com"
+
+
+def test_reason_filtering_in_repository(client_with_auth):
+    """Verify repo.list_login_logs filters accurately by reason."""
+    repo = client_with_auth.app.state.watchlist_repo
+    now = repo.utc_now_iso()
+
+    repo.log_login_attempt("filter_test@example.com", "success", "google_login", "127.0.0.1", "ua", now)
+    repo.log_login_attempt("filter_test@example.com", "success", "session_restoration", "127.0.0.1", "ua", now)
+    repo.log_login_attempt("filter_test@example.com", "failed", "pending_approval", "127.0.0.1", "ua", now)
+
+    google_logs = repo.list_login_logs(email="filter_test@example.com", reason="google_login")
+    assert len(google_logs) == 1
+    assert google_logs[0]["reason"] == "google_login"
+
+    restoration_logs = repo.list_login_logs(email="filter_test@example.com", reason="session_restoration")
+    assert len(restoration_logs) == 1
+    assert restoration_logs[0]["reason"] == "session_restoration"
+
