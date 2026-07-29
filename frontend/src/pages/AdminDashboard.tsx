@@ -32,7 +32,53 @@ export function AdminDashboard({
     emailSent?: boolean;
   } | null>(null);
   const [copiedEmail, setCopiedEmail] = useState<string | null>(null);
+  const [logSearchEmail, setLogSearchEmail] = useState("");
+  const [logFilterStatus, setLogFilterStatus] = useState<string>("all");
+  const [logFilterReason, setLogFilterReason] = useState<string>("all");
 
+  const formatAuditReason = (reason: string): string => {
+    switch (reason) {
+      case "google_login":
+        return "Google Sign-In";
+      case "session_restoration":
+        return "Session Restored";
+      case "admin_login":
+        return "Admin Login";
+      case "pending_approval":
+        return "Pending Approval";
+      case "revoked_user":
+        return "Access Revoked";
+      case "csrf_validation_failed":
+        return "CSRF Failure";
+      case "origin_validation_failed":
+        return "Origin Failure";
+      case "invalid_id_token":
+        return "Invalid Token";
+      case "auth_time_expired":
+        return "Token Expired";
+      case "email_not_verified":
+        return "Unverified Email";
+      case "invite_email_dispatched":
+      case "invite_preapproved_no_email":
+        return "Invited / Pre-approved";
+      default:
+        return reason ? reason.replace(/_/g, " ") : "Unknown";
+    }
+  };
+
+  const filteredLogs = loginLogs.filter((log) => {
+    if (logSearchEmail) {
+      const target = logSearchEmail.trim().toLowerCase();
+      if (!log.email.toLowerCase().includes(target)) return false;
+    }
+    if (logFilterStatus !== "all") {
+      if (log.status !== logFilterStatus) return false;
+    }
+    if (logFilterReason !== "all") {
+      if (log.reason !== logFilterReason) return false;
+    }
+    return true;
+  });
   const copyInviteInstructions = (email: string) => {
     const inviteUrl = window.location.origin;
     const text = `Hey! I've pre-approved your email (${email}) for CineQueue. You can sign in here: ${inviteUrl}`;
@@ -105,7 +151,7 @@ export function AdminDashboard({
           className={`admin-tab ${adminTab === "logs" ? "active" : ""}`}
           onClick={() => setAdminTab("logs")}
         >
-          Security Audit Logs ({loginLogs.length})
+          Authentication Activity ({loginLogs.length})
         </button>
         <button
           className={`admin-tab ${adminTab === "decisions" ? "active" : ""}`}
@@ -275,9 +321,44 @@ export function AdminDashboard({
 
       {adminTab === "logs" && (
         <div className="admin-card">
-          <h2>Security Audit Logs</h2>
-          {loginLogs.length === 0 ? (
-            <p style={{ color: "var(--text-muted)" }}>No login logs available.</p>
+          <h2>Authentication Activity</h2>
+          <div style={{ display: "flex", gap: "12px", marginBottom: "16px", alignItems: "center", flexWrap: "wrap" }}>
+            <input
+              type="text"
+              className="admin-input"
+              style={{ maxWidth: "260px" }}
+              placeholder="Search by email..."
+              value={logSearchEmail}
+              onChange={(e) => setLogSearchEmail(e.target.value)}
+            />
+            <select
+              className="admin-input"
+              style={{ maxWidth: "150px" }}
+              value={logFilterStatus}
+              onChange={(e) => setLogFilterStatus(e.target.value)}
+            >
+              <option value="all">All Statuses</option>
+              <option value="success">Success</option>
+              <option value="failed">Failed</option>
+            </select>
+            <select
+              className="admin-input"
+              style={{ maxWidth: "200px" }}
+              value={logFilterReason}
+              onChange={(e) => setLogFilterReason(e.target.value)}
+            >
+              <option value="all">All Event Reasons</option>
+              <option value="google_login">Google Sign-In</option>
+              <option value="session_restoration">Session Restored</option>
+              <option value="admin_login">Admin Login</option>
+              <option value="pending_approval">Pending Approval</option>
+              <option value="revoked_user">Access Revoked</option>
+              <option value="csrf_validation_failed">CSRF Failure</option>
+              <option value="origin_validation_failed">Origin Failure</option>
+            </select>
+          </div>
+          {filteredLogs.length === 0 ? (
+            <p style={{ color: "var(--text-muted)" }}>No matching authentication activity records available.</p>
           ) : (
             <div className="admin-table-container">
               <table className="admin-table">
@@ -286,13 +367,13 @@ export function AdminDashboard({
                     <th>User / Email</th>
                     <th>Time</th>
                     <th>Result</th>
-                    <th>Reason</th>
+                    <th>Event Reason</th>
                     <th>IP Address</th>
                     <th>User Agent</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {loginLogs.map((log) => (
+                  {filteredLogs.map((log) => (
                     <tr key={log.id}>
                       <td><strong>{log.email}</strong></td>
                       <td>{new Date(log.timestamp).toLocaleString()}</td>
@@ -301,11 +382,15 @@ export function AdminDashboard({
                           {log.status}
                         </span>
                       </td>
-                      <td><code>{log.reason}</code></td>
+                      <td>
+                        <strong>{formatAuditReason(log.reason)}</strong>
+                        <br />
+                        <code style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>{log.reason}</code>
+                      </td>
                       <td>{log.ip_address || "unknown"}</td>
                       <td>
                         <span className="admin-meta-info" title={log.user_agent}>
-                          {log.user_agent ? (log.user_agent.length > 40 ? log.user_agent.substring(0, 40) + "..." : log.user_agent) : "unknown"}
+                          {log.user_agent ? (log.user_agent.length > 35 ? log.user_agent.substring(0, 35) + "..." : log.user_agent) : "unknown"}
                         </span>
                       </td>
                     </tr>

@@ -10,9 +10,10 @@ import { Tabs, TabType } from "../components/Tabs";
 import { useAuth } from "../context/AuthContext";
 import { StarRating } from "../components/StarRating";
 import { BatchRateModal } from "../components/BatchRateModal";
+import { SyncStatusBar } from "../components/SyncStatusBar";
+import { movieService } from "../services/movieService";
+import { syncService } from "../services/syncService";
 import type { MediaDetails, MediaItem, RatedMovie, WatchlistItem } from "../types";
-
-
 
 const TABS: { id: TabType; label: string }[] = [
   { id: "watchlist", label: "My Queue" },
@@ -25,9 +26,9 @@ const TABS: { id: TabType; label: string }[] = [
   { id: "trending", label: "Trending" },
 ];
 
-
 export function CinequeueDashboard() {
   const { user, logout } = useAuth();
+  const ownerId = user?.uid || user?.email || "guest_local";
 
   const [tab, setTab] = useState<TabType>("watchlist");
   const [query, setQuery] = useState("");
@@ -35,10 +36,9 @@ export function CinequeueDashboard() {
   const [watchlist, setWatchlist] = useState<WatchlistItem[]>([]);
   const [ratedMovies, setRatedMovies] = useState<RatedMovie[]>([]);
   const [selected, setSelected] = useState<MediaDetails | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isBatchRateModalOpen, setIsBatchRateModalOpen] = useState(false);
-
   const queueKeys = useMemo(
     () => new Set(watchlist.filter((item) => !item.is_owned && (item.status === "queue" || !item.status)).map((item) => `${item.media_type}:${item.tmdb_id ?? item.id}`)),
     [watchlist],
@@ -54,39 +54,52 @@ export function CinequeueDashboard() {
     [watchlist],
   );
 
+  const reloadFromDb = useCallback(async () => {
+    const localWatch = await movieService.getWatchlistForOwner(ownerId);
+    const localRatings = await movieService.getRatingsForOwner(ownerId);
+    setWatchlist(localWatch);
+    setRatedMovies(localRatings);
+  }, [ownerId]);
+
+  // Initial load: IndexedDB rendering FIRST (0ms delay)
+  useEffect(() => {
+    void reloadFromDb();
+  }, [reloadFromDb]);
+
   const loadWatchlist = useCallback(async () => {
-    if (!user) return [];
     try {
-      const data = await api.watchlist();
-      setWatchlist(data);
-      return data;
+      if (user && navigator.onLine) {
+        const data = await api.watchlist();
+        await movieService.migrateServerData(data, [], ownerId);
+      }
+      await reloadFromDb();
     } catch (err) {
-      console.error("Failed to load watchlist:", err);
-      return [];
+      console.error("Failed to load watchlist from server:", err);
+      await reloadFromDb();
     }
-  }, [user]);
+  }, [user, ownerId, reloadFromDb]);
 
   const loadRatedMovies = useCallback(async () => {
-    if (!user) return [];
     try {
-      const data = await api.getRatings();
-      setRatedMovies(data);
-      return data;
+      if (user && navigator.onLine) {
+        const data = await api.getRatings();
+        await movieService.migrateServerData([], data, ownerId);
+      }
+      await reloadFromDb();
     } catch (err) {
-      console.error("Failed to load ratings:", err);
-      return [];
+      console.error("Failed to load ratings from server:", err);
+      await reloadFromDb();
     }
-  }, [user]);
+  }, [user, ownerId, reloadFromDb]);
 
-  // Initial watchlist fetch on mount or user change
+  // Background server fetch & sync
   useEffect(() => {
-    if (user) {
-      setLoading(true);
+    if (user && navigator.onLine) {
       Promise.all([loadWatchlist(), loadRatedMovies()]).finally(() => {
-        setLoading(false);
+        void syncService.triggerSync(ownerId);
       });
     }
-  }, [user, loadWatchlist, loadRatedMovies]);
+  }, [user, ownerId, loadWatchlist, loadRatedMovies]);
 
   useEffect(() => {
     if (user && tab === "rated") {
@@ -164,17 +177,33 @@ export function CinequeueDashboard() {
 
   const addToWatchlist = async (item: MediaItem) => {
     try {
-      await api.addToWatchlist({
-        media_type: item.media_type,
-        tmdb_id: item.id,
-        title: item.title,
-        poster_path: item.poster_url?.replace("https://image.tmdb.org/t/p/w342", "") ?? undefined,
-        release_date: item.release_date ?? undefined,
-      });
-      await loadWatchlist();
+      await movieService.saveMovie(
+        {
+          tmdbId: item.id,
+          mediaType: item.media_type,
+          title: item.title,
+          posterPath: item.poster_url?.replace("https://image.tmdb.org/t/p/w342", "") ?? undefined,
+          releaseDate: item.release_date ?? undefined,
+          status: "queue",
+        },
+        ownerId
+      );
+      await reloadFromDb();
       setQuery("");
       setTab("watchlist");
       setSelected(null);
+
+      if (user && navigator.onLine) {
+        void api.addToWatchlist({
+          media_type: item.media_type,
+          tmdb_id: item.id,
+          title: item.title,
+          poster_path: item.poster_url?.replace("https://image.tmdb.org/t/p/w342", "") ?? undefined,
+          release_date: item.release_date ?? undefined,
+        }).then(() => syncService.triggerSync(ownerId)).catch(console.error);
+      } else {
+        void syncService.triggerSync(ownerId);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not add to queue");
     }
@@ -182,11 +211,20 @@ export function CinequeueDashboard() {
 
   const removeFromWatchlist = async (item: MediaItem) => {
     const tmdbId = "tmdb_id" in item ? (item as WatchlistItem).tmdb_id : item.id;
+    const itemId = `${item.media_type}_${tmdbId}`;
     try {
-      await api.removeFromWatchlist(item.media_type, tmdbId);
-      await loadWatchlist();
+      await movieService.deleteMovie(itemId, tmdbId, item.media_type, ownerId);
+      await reloadFromDb();
       if (selected && selected.id === item.id) {
         setSelected(null);
+      }
+
+      if (user && navigator.onLine) {
+        void api.removeFromWatchlist(item.media_type, tmdbId)
+          .then(() => syncService.triggerSync(ownerId))
+          .catch(console.error);
+      } else {
+        void syncService.triggerSync(ownerId);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not remove from watchlist");
@@ -196,8 +234,24 @@ export function CinequeueDashboard() {
   const moveToFollowing = async (item: MediaItem) => {
     const tmdbId = "tmdb_id" in item ? (item as WatchlistItem).tmdb_id : item.id;
     try {
-      await api.updateWatchlistItem(item.media_type, tmdbId, undefined, undefined, "following");
-      await loadWatchlist();
+      await movieService.saveMovie(
+        {
+          tmdbId,
+          mediaType: item.media_type,
+          title: item.title,
+          status: "following",
+        },
+        ownerId
+      );
+      await reloadFromDb();
+
+      if (user && navigator.onLine) {
+        void api.updateWatchlistItem(item.media_type, tmdbId, undefined, undefined, "following")
+          .then(() => syncService.triggerSync(ownerId))
+          .catch(console.error);
+      } else {
+        void syncService.triggerSync(ownerId);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not move to following");
     }
@@ -206,8 +260,24 @@ export function CinequeueDashboard() {
   const moveToQueue = async (item: MediaItem) => {
     const tmdbId = "tmdb_id" in item ? (item as WatchlistItem).tmdb_id : item.id;
     try {
-      await api.updateWatchlistItem(item.media_type, tmdbId, undefined, undefined, "queue");
-      await loadWatchlist();
+      await movieService.saveMovie(
+        {
+          tmdbId,
+          mediaType: item.media_type,
+          title: item.title,
+          status: "queue",
+        },
+        ownerId
+      );
+      await reloadFromDb();
+
+      if (user && navigator.onLine) {
+        void api.updateWatchlistItem(item.media_type, tmdbId, undefined, undefined, "queue")
+          .then(() => syncService.triggerSync(ownerId))
+          .catch(console.error);
+      } else {
+        void syncService.triggerSync(ownerId);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not move to queue");
     }
@@ -219,33 +289,44 @@ export function CinequeueDashboard() {
     format: "electronic" | "cloud" | "hard_copy" = "electronic"
   ) => {
     const tmdbId = "tmdb_id" in item ? (item as WatchlistItem).tmdb_id : item.id;
-    const key = `${item.media_type}:${tmdbId}`;
-    const exists = watchlist.some((i) => `${i.media_type}:${i.tmdb_id ?? i.id}` === key);
-
     try {
-      if (exists) {
-        if (isOwned) {
-          await api.updateWatchlistItem(item.media_type, tmdbId, true, format);
-        } else {
-          await api.removeFromWatchlist(item.media_type, tmdbId);
-          if (selected && selected.id === item.id) {
-            setSelected(null);
-          }
-        }
+      if (isOwned) {
+        await movieService.saveMovie(
+          {
+            tmdbId,
+            mediaType: item.media_type,
+            title: item.title,
+            isOwned: true,
+            status: "library",
+          },
+          ownerId
+        );
       } else {
+        const itemId = `${item.media_type}_${tmdbId}`;
+        await movieService.deleteMovie(itemId, tmdbId, item.media_type, ownerId);
+        if (selected && selected.id === item.id) {
+          setSelected(null);
+        }
+      }
+      await reloadFromDb();
+
+      if (user && navigator.onLine) {
         if (isOwned) {
-          await api.addToWatchlist({
+          void api.addToWatchlist({
             media_type: item.media_type,
             tmdb_id: tmdbId,
             title: item.title,
-            poster_path: item.poster_url?.replace("https://image.tmdb.org/t/p/w342", "") ?? undefined,
-            release_date: item.release_date ?? undefined,
             is_owned: true,
             owned_format: format,
-          });
+          }).then(() => syncService.triggerSync(ownerId)).catch(console.error);
+        } else {
+          void api.removeFromWatchlist(item.media_type, tmdbId)
+            .then(() => syncService.triggerSync(ownerId))
+            .catch(console.error);
         }
+      } else {
+        void syncService.triggerSync(ownerId);
       }
-      await loadWatchlist();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not update library status");
     }
@@ -266,7 +347,7 @@ export function CinequeueDashboard() {
         watchFreeStreaming,
         watchOnSaleBuy
       );
-      await loadWatchlist();
+      await reloadFromDb();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not update watch options");
     }
@@ -274,44 +355,33 @@ export function CinequeueDashboard() {
 
   const handleUpdateRating = async (item: MediaItem, rating: number) => {
     const tmdbId = "tmdb_id" in item ? (item as WatchlistItem).tmdb_id : item.id;
-    const key = `${item.media_type}:${tmdbId}`;
-    const exists = watchlist.some((i) => `${i.media_type}:${i.tmdb_id ?? i.id}` === key);
-
     try {
-      if (rating === 0) {
-        await api.deleteRating(item.media_type, tmdbId);
-      } else {
-        let posterPath: string | undefined = (item as any).poster_path;
-        if (!posterPath && item.poster_url) {
-          posterPath = item.poster_url.replace(/^https?:\/\/image\.tmdb\.org\/t\/p\/w\d+/, "");
-        }
-        await api.rateMovie({
-          media_type: item.media_type,
-          tmdb_id: tmdbId,
-          title: item.title,
-          poster_path: posterPath ?? undefined,
-          release_date: item.release_date ?? undefined,
-          rating,
-        });
-      }
-
-      if (exists) {
-        await api.updateWatchlistItem(
-          item.media_type,
+      await movieService.saveMovie(
+        {
           tmdbId,
-          undefined,
-          undefined,
-          undefined,
-          undefined,
-          undefined,
-          rating
-        );
-      }
-      const updatedList = await loadWatchlist();
-      await loadRatedMovies();
-      if (selected && selected.id === tmdbId) {
-        const updatedItem = updatedList.find((i) => `${i.media_type}:${i.tmdb_id ?? i.id}` === key);
-        setSelected((prev) => (prev ? { ...prev, user_rating: updatedItem?.user_rating ?? rating } : null));
+          mediaType: item.media_type,
+          title: item.title,
+          rating,
+          status: rating > 0 ? "watched" : "queue",
+          watchStatus: rating > 0 ? "watched" : "unwatched",
+        },
+        ownerId
+      );
+      await reloadFromDb();
+
+      if (user && navigator.onLine) {
+        if (rating === 0) {
+          void api.deleteRating(item.media_type, tmdbId).then(() => syncService.triggerSync(ownerId)).catch(console.error);
+        } else {
+          void api.rateMovie({
+            media_type: item.media_type,
+            tmdb_id: tmdbId,
+            title: item.title,
+            rating,
+          }).then(() => syncService.triggerSync(ownerId)).catch(console.error);
+        }
+      } else {
+        void syncService.triggerSync(ownerId);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not save rating");
@@ -320,20 +390,33 @@ export function CinequeueDashboard() {
 
   const handleEditRatedMovie = async (movie: RatedMovie, rating: number) => {
     try {
-      if (rating === 0) {
-        await api.deleteRating(movie.media_type, movie.tmdb_id);
-      } else {
-        await api.rateMovie({
-          media_type: movie.media_type,
-          tmdb_id: movie.tmdb_id,
+      await movieService.saveMovie(
+        {
+          tmdbId: movie.tmdb_id,
+          mediaType: movie.media_type,
           title: movie.title,
-          poster_path: movie.poster_path,
-          release_date: movie.release_date,
           rating,
-        });
+          status: rating > 0 ? "watched" : "queue",
+          watchStatus: rating > 0 ? "watched" : "unwatched",
+        },
+        ownerId
+      );
+      await reloadFromDb();
+
+      if (user && navigator.onLine) {
+        if (rating === 0) {
+          void api.deleteRating(movie.media_type, movie.tmdb_id).then(() => syncService.triggerSync(ownerId)).catch(console.error);
+        } else {
+          void api.rateMovie({
+            media_type: movie.media_type,
+            tmdb_id: movie.tmdb_id,
+            title: movie.title,
+            rating,
+          }).then(() => syncService.triggerSync(ownerId)).catch(console.error);
+        }
+      } else {
+        void syncService.triggerSync(ownerId);
       }
-      await loadRatedMovies();
-      await loadWatchlist();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not update rating");
     }
@@ -415,6 +498,8 @@ export function CinequeueDashboard() {
       <AgentLoginBriefing onOpenChat={() => openAgentModal("chat")} />
 
       {error ? <div className="error-banner">{error}</div> : null}
+
+      <SyncStatusBar ownerId={ownerId} onDataCleared={reloadFromDb} />
 
       <Tabs tabsList={TABS} activeTab={tab} onChangeTab={setTab} />
 

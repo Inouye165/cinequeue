@@ -1,12 +1,12 @@
+import secrets
 import logging
 from datetime import datetime, timezone, timedelta
 from typing import Any, Optional
 from fastapi import APIRouter, HTTPException, Request, Response, Depends
 from pydantic import BaseModel
 
+import app.config as config
 from app.config import (
-    ADMIN_USERNAME,
-    ADMIN_PASSWORD,
     ADMIN_SESSION_COOKIE_NAME,
     SESSION_COOKIE_SECURE,
 )
@@ -59,12 +59,11 @@ async def admin_login(
     success = False
     reason = "invalid_credentials"
 
-    if admin_user:
-        if verify_password(body.password, admin_user["password_hash"], admin_user["salt"]):
-            success = True
-    elif body.username == ADMIN_USERNAME and body.password == ADMIN_PASSWORD:
-        # Fallback to env default if DB user not initialized or matches default
+    if admin_user and verify_password(body.password, admin_user["password_hash"], admin_user["salt"]):
         success = True
+    elif config.ENABLE_FALLBACK_ADMIN_AUTH and config.ADMIN_USERNAME and config.ADMIN_PASSWORD:
+        if secrets.compare_digest(body.username, config.ADMIN_USERNAME) and secrets.compare_digest(body.password, config.ADMIN_PASSWORD):
+            success = True
 
     if not success:
         repo.log_login_attempt(
@@ -260,10 +259,14 @@ async def invite_user(
 @router.get("/login-logs")
 async def get_login_logs(
     request: Request,
+    limit: int = 100,
+    email: Optional[str] = None,
+    status: Optional[str] = None,
+    reason: Optional[str] = None,
     current_admin: str = Depends(get_current_admin)
 ) -> dict[str, Any]:
     repo = request.app.state.watchlist_repo
-    logs = repo.list_login_logs(limit=100)
+    logs = repo.list_login_logs(limit=limit, email=email, status=status, reason=reason)
     return {"logs": logs}
 
 

@@ -12,14 +12,18 @@ def client_with_admin_auth():
         "AUTH_ALLOWED_EMAILS": "inouye165@gmail.com,test@example.com",
         "AUTH_ALLOWED_ORIGINS": "https://cinequeue-7tvty3vmvq-uw.a.run.app",
         "ENVIRONMENT": "production",
-        "SESSION_COOKIE_SECURE": "true",
+        "SESSION_COOKIE_SECURE": "false",
         "FIREBASE_API_KEY": "mock_firebase_api_key",
+        "ENABLE_FALLBACK_ADMIN_AUTH": "true",
         "ADMIN_USERNAME": "admin",
         "ADMIN_PASSWORD": "admin_secure_pass_2026"
     }):
         import importlib
         import app.config
         importlib.reload(app.config)
+        app.config.ENABLE_FALLBACK_ADMIN_AUTH = True
+        app.config.ADMIN_USERNAME = "admin"
+        app.config.ADMIN_PASSWORD = "admin_secure_pass_2026"
         import app.auth
         importlib.reload(app.auth)
         import app.services.admin_auth
@@ -494,4 +498,87 @@ def test_audit_logging_for_login_failures_and_invites(client_with_admin_auth):
     assert len(invited_logs) >= 1
     assert "invite" in invited_logs[0]["reason"]
 
+
+def test_fallback_admin_auth_disabled_by_default(client_with_admin_auth):
+    """Fallback admin auth is disabled by default and fails closed if ENABLE_FALLBACK_ADMIN_AUTH is False."""
+    import app.config as config
+    with patch.object(config, "ENABLE_FALLBACK_ADMIN_AUTH", False), \
+         patch.object(config, "ADMIN_USERNAME", "fallback_only_admin"), \
+         patch.object(config, "ADMIN_PASSWORD", "fallback_pass_123"):
+        csrf_res = client_with_admin_auth.get("/api/auth/csrf")
+        csrf_token = csrf_res.json()["csrf_token"]
+
+        response = client_with_admin_auth.post(
+            "/api/admin/login",
+            json={
+                "username": "fallback_only_admin",
+                "password": "fallback_pass_123",
+                "csrf_token": csrf_token
+            },
+            headers={"Origin": "https://cinequeue-7tvty3vmvq-uw.a.run.app"}
+        )
+        assert response.status_code == 401
+        assert "Invalid admin credentials" in response.json()["detail"]
+
+
+def test_fallback_admin_auth_works_when_explicitly_enabled(client_with_admin_auth):
+    """Fallback admin auth works when ENABLE_FALLBACK_ADMIN_AUTH is True for non-DB fallback admin."""
+    import app.config as config
+    with patch.object(config, "ENABLE_FALLBACK_ADMIN_AUTH", True), \
+         patch.object(config, "ADMIN_USERNAME", "fallback_only_admin"), \
+         patch.object(config, "ADMIN_PASSWORD", "fallback_pass_123"):
+        csrf_res = client_with_admin_auth.get("/api/auth/csrf")
+        csrf_token = csrf_res.json()["csrf_token"]
+
+        response = client_with_admin_auth.post(
+            "/api/admin/login",
+            json={
+                "username": "fallback_only_admin",
+                "password": "fallback_pass_123",
+                "csrf_token": csrf_token
+            },
+            headers={"Origin": "https://cinequeue-7tvty3vmvq-uw.a.run.app"}
+        )
+        assert response.status_code == 200
+
+
+def test_fallback_admin_auth_fails_closed_on_blank_credentials(client_with_admin_auth):
+    """Fallback admin auth fails closed if username or password is blank or invalid."""
+    csrf_res = client_with_admin_auth.get("/api/auth/csrf")
+    csrf_token = csrf_res.json()["csrf_token"]
+
+    # Blank password
+    response1 = client_with_admin_auth.post(
+        "/api/admin/login",
+        json={"username": "admin", "password": "", "csrf_token": csrf_token},
+        headers={"Origin": "https://cinequeue-7tvty3vmvq-uw.a.run.app"}
+    )
+    assert response1.status_code == 401
+
+    # Blank username
+    response2 = client_with_admin_auth.post(
+        "/api/admin/login",
+        json={"username": "", "password": "admin_secure_pass_2026", "csrf_token": csrf_token},
+        headers={"Origin": "https://cinequeue-7tvty3vmvq-uw.a.run.app"}
+    )
+    assert response2.status_code == 401
+
+
+def test_fallback_admin_config_startup_validation():
+    """Config raises ValueError if ENABLE_FALLBACK_ADMIN_AUTH is True but credentials are missing."""
+    import importlib
+    with patch("app.config.load_dotenv"):
+        with patch.dict("os.environ", {
+            "ENABLE_FALLBACK_ADMIN_AUTH": "true",
+            "ADMIN_USERNAME": "",
+            "ADMIN_PASSWORD": ""
+        }):
+            with pytest.raises(ValueError) as exc_info:
+                import app.config
+                importlib.reload(app.config)
+            assert "ENABLE_FALLBACK_ADMIN_AUTH" in str(exc_info.value)
+
+    # Restore config
+    import app.config
+    importlib.reload(app.config)
 
