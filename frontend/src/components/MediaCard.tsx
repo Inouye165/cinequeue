@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { MediaItem, WatchlistItem } from "../types";
 import { StarRating } from "./StarRating";
+import { formatPosterUrl } from "../utils/mediaUtils";
 
 interface Props {
   item: MediaItem;
@@ -41,6 +42,8 @@ export function MediaCard({
 }: Props) {
   const [imageError, setImageError] = useState(false);
   const watchItem = item as WatchlistItem;
+  const rawPoster = item.poster_url || watchItem.poster_path;
+  const posterUrl = formatPosterUrl(rawPoster);
   const isFreeAlert = !isOwned && watchItem.is_free_streaming_alert;
   const isOnSaleAlert = !isOwned && watchItem.is_on_sale_alert;
   const buyPrice = watchItem.buy_current_price;
@@ -51,9 +54,9 @@ export function MediaCard({
     <article className={`media-card ${hasAlert ? "alert-active" : ""}`}>
       <button className="card-hit" onClick={() => onOpen(item)} aria-label={`View details for ${item.title}`}>
         <div className="poster-wrap">
-          {item.poster_url && !imageError ? (
+          {posterUrl && !imageError ? (
             <img
-              src={item.poster_url}
+              src={posterUrl}
               alt=""
               loading="lazy"
               onError={() => setImageError(true)}

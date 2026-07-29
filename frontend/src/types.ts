@@ -27,6 +27,7 @@ export interface MediaItem {
   media_type: MediaType;
   title: string;
   overview?: string;
+  poster_path?: string | null;
   poster_url?: string | null;
   backdrop_url?: string | null;
   release_date?: string | null;
