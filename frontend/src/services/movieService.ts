@@ -1,5 +1,6 @@
 import { db, type LocalMovie, type SyncOperation } from "../db/cinequeueDb";
 import type { RatedMovie, WatchlistItem } from "../types";
+import { formatPosterUrl } from "../utils/mediaUtils";
 
 export function watchlistItemToLocalMovie(
   item: WatchlistItem,
@@ -19,7 +20,7 @@ export function watchlistItemToLocalMovie(
     mediaType: item.media_type || "movie",
     title: item.title || "Untitled",
     overview: item.overview,
-    posterPath: item.poster_path || item.poster_url,
+    posterPath: item.poster_path || item.poster_url || undefined,
     releaseDate: item.release_date,
     status,
     watchStatus: "unwatched",
@@ -36,6 +37,7 @@ export function watchlistItemToLocalMovie(
 
 export function localMovieToWatchlistItem(movie: LocalMovie): WatchlistItem {
   const numericId = movie.tmdbId ?? 0;
+  const formattedUrl = formatPosterUrl(movie.posterPath);
   return {
     id: numericId,
     tmdb_id: numericId,
@@ -43,7 +45,7 @@ export function localMovieToWatchlistItem(movie: LocalMovie): WatchlistItem {
     title: movie.title,
     overview: movie.overview || undefined,
     poster_path: movie.posterPath || undefined,
-    poster_url: movie.posterPath || undefined,
+    poster_url: formattedUrl || movie.posterPath || undefined,
     release_date: movie.releaseDate || undefined,
     added_at: movie.createdAt,
     status: movie.status,
@@ -75,17 +77,20 @@ export const movieService = {
     const movies = await this.getMoviesForOwner(ownerId);
     return movies
       .filter((m) => typeof m.rating === "number" && m.rating > 0)
-      .map((m) => ({
-        id: m.id,
-        media_type: (m.mediaType as any) || "movie",
-        tmdb_id: m.tmdbId ?? 0,
-        title: m.title,
-        poster_path: m.posterPath,
-        poster_url: m.posterPath,
-        release_date: m.releaseDate,
-        rating: m.rating!,
-        updated_at: m.updatedAt,
-      }));
+      .map((m) => {
+        const formattedUrl = formatPosterUrl(m.posterPath);
+        return {
+          id: m.id,
+          media_type: (m.mediaType as any) || "movie",
+          tmdb_id: m.tmdbId ?? 0,
+          title: m.title,
+          poster_path: m.posterPath,
+          poster_url: formattedUrl || m.posterPath || undefined,
+          release_date: m.releaseDate,
+          rating: m.rating!,
+          updated_at: m.updatedAt,
+        };
+      });
   },
 
   async saveMovie(

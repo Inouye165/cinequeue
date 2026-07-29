@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { MediaDetails, Trailer } from "../types";
 import { StarRating } from "./StarRating";
+import { formatPosterUrl } from "../utils/mediaUtils";
 
 interface Props {
   details: MediaDetails;
@@ -115,7 +116,9 @@ export function DetailModal({
           }
         >
           <div className="detail-hero-content">
-            {details.poster_url ? <img src={details.poster_url} alt="" /> : null}
+            {formatPosterUrl(details.poster_url || details.poster_path) ? (
+              <img src={formatPosterUrl(details.poster_url || details.poster_path)!} alt="" />
+            ) : null}
             <div>
               <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 10 }}>
                 <p style={{ margin: 0 }}>{details.media_type === "tv" ? "TV Series" : "Movie"}</p>

@@ -13,6 +13,7 @@ import { BatchRateModal } from "../components/BatchRateModal";
 import { SyncStatusBar } from "../components/SyncStatusBar";
 import { movieService } from "../services/movieService";
 import { syncService } from "../services/syncService";
+import { formatPosterUrl } from "../utils/mediaUtils";
 import type { MediaDetails, MediaItem, RatedMovie, WatchlistItem } from "../types";
 
 const TABS: { id: TabType; label: string }[] = [
@@ -538,60 +539,63 @@ export function CinequeueDashboard() {
       ) : tab === "rated" ? (
         ratedMovies.length ? (
           <div className="media-grid">
-            {ratedMovies.map((movie) => (
-              <div key={`${movie.media_type}:${movie.tmdb_id}`} className="media-card rated-card" style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
-                <div
-                  className="poster-wrapper"
-                  onClick={() => void openDetails({ id: movie.tmdb_id, media_type: movie.media_type, title: movie.title })}
-                  style={{ cursor: "pointer" }}
-                >
-                  {movie.poster_url ? (
-                    <img src={movie.poster_url} alt={movie.title} className="poster-img" />
-                  ) : (
-                    <div className="poster-fallback">
-                      <span>{movie.title}</span>
+            {ratedMovies.map((movie) => {
+              const posterUrl = formatPosterUrl(movie.poster_url || movie.poster_path);
+              return (
+                <div key={`${movie.media_type}:${movie.tmdb_id}`} className="media-card rated-card" style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                  <div
+                    className="poster-wrapper"
+                    onClick={() => void openDetails({ id: movie.tmdb_id, media_type: movie.media_type, title: movie.title })}
+                    style={{ cursor: "pointer" }}
+                  >
+                    {posterUrl ? (
+                      <img src={posterUrl} alt={movie.title} className="poster-img" />
+                    ) : (
+                      <div className="poster-fallback">
+                        <span>{movie.title}</span>
+                      </div>
+                    )}
+                    {movie.media_type === "tv" ? <span className="media-type-badge">TV</span> : null}
+                  </div>
+                  <div className="card-info" style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+                    <h3 className="card-title" onClick={() => void openDetails({ id: movie.tmdb_id, media_type: movie.media_type, title: movie.title })} style={{ cursor: "pointer" }}>
+                      {movie.title}
+                    </h3>
+                    {movie.release_date ? <span className="card-year">{movie.release_date.slice(0, 4)}</span> : null}
+                    <div style={{ margin: "4px 0" }}>
+                      <StarRating
+                        rating={movie.rating}
+                        onRate={(r) => void handleEditRatedMovie(movie, r)}
+                        size="md"
+                      />
                     </div>
-                  )}
-                  {movie.media_type === "tv" ? <span className="media-type-badge">TV</span> : null}
-                </div>
-                <div className="card-info" style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
-                  <h3 className="card-title" onClick={() => void openDetails({ id: movie.tmdb_id, media_type: movie.media_type, title: movie.title })} style={{ cursor: "pointer" }}>
-                    {movie.title}
-                  </h3>
-                  {movie.release_date ? <span className="card-year">{movie.release_date.slice(0, 4)}</span> : null}
-                  <div style={{ margin: "4px 0" }}>
-                    <StarRating
-                      rating={movie.rating}
-                      onRate={(r) => void handleEditRatedMovie(movie, r)}
-                      size="md"
-                    />
-                  </div>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "4px" }}>
-                    <span style={{ fontSize: "0.75rem", color: "rgba(255, 255, 255, 0.5)" }}>
-                      Rated {movie.rated_ago || "recently"}
-                    </span>
-                    <button
-                      type="button"
-                      title="Remove rating"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        void handleEditRatedMovie(movie, 0);
-                      }}
-                      style={{
-                        background: "none",
-                        border: "none",
-                        color: "rgba(255, 99, 132, 0.8)",
-                        cursor: "pointer",
-                        fontSize: "0.85rem",
-                        padding: "2px 6px",
-                      }}
-                    >
-                      🗑️
-                    </button>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "4px" }}>
+                      <span style={{ fontSize: "0.75rem", color: "rgba(255, 255, 255, 0.5)" }}>
+                        Rated {movie.rated_ago || "recently"}
+                      </span>
+                      <button
+                        type="button"
+                        title="Remove rating"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void handleEditRatedMovie(movie, 0);
+                        }}
+                        style={{
+                          background: "none",
+                          border: "none",
+                          color: "rgba(255, 99, 132, 0.8)",
+                          cursor: "pointer",
+                          fontSize: "0.85rem",
+                          padding: "2px 6px",
+                        }}
+                      >
+                        🗑️
+                      </button>
+                    </div>
                   </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         ) : (
           <div className="empty-state">
