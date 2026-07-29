@@ -180,7 +180,6 @@ async def create_session(body: SessionRequest, request: Request, response: Respo
             http_status=http_status,
             correlation_id=correlation_id,
         )
-
     # Stage 2: CSRF Validation
     try:
         validate_csrf(request, body.csrf_token)

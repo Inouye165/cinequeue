@@ -97,7 +97,6 @@ if ENABLE_FALLBACK_ADMIN_AUTH:
         raise ValueError("ADMIN_USERNAME must be configured non-empty when ENABLE_FALLBACK_ADMIN_AUTH is True")
     if not ADMIN_PASSWORD:
         raise ValueError("ADMIN_PASSWORD must be configured non-empty when ENABLE_FALLBACK_ADMIN_AUTH is True")
-
 # Fail-closed validation for production
 if AUTH_ENABLED:
     if not FIREBASE_PROJECT_ID:
@@ -108,5 +107,6 @@ if AUTH_ENABLED:
         raise ValueError("AUTH_ALLOWED_EMAILS must be set when AUTH_MODE is 'allowlist' and AUTH_ENABLED is True")
     if ENVIRONMENT == "production" and not AUTH_ALLOWED_ORIGINS:
         raise ValueError("AUTH_ALLOWED_ORIGINS must be set in production when AUTH_ENABLED is True")
+
 
 

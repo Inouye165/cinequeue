@@ -79,7 +79,6 @@ export function AdminDashboard({
     }
     return true;
   });
-
   const copyInviteInstructions = (email: string) => {
     const inviteUrl = window.location.origin;
     const text = `Hey! I've pre-approved your email (${email}) for CineQueue. You can sign in here: ${inviteUrl}`;
