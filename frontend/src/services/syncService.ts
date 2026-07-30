@@ -21,6 +21,10 @@ export interface SyncStatusInfo {
 type SyncListener = (status: SyncStatusInfo) => void;
 
 class SyncService {
+  // Debounce interval for sync triggers (ms)
+  private static readonly DEBOUNCE_MS = 300;
+  private lastTriggerMs = 0;
+
   private syncInProgress = false;
   private listeners: Set<SyncListener> = new Set();
   private statusInfo: SyncStatusInfo = {
@@ -73,6 +77,12 @@ class SyncService {
 
   public async triggerSync(ownerId?: string): Promise<boolean> {
     if (this.syncInProgress) return false;
+    // Debounce rapid consecutive calls
+    const now = Date.now();
+    if (now - this.lastTriggerMs < SyncService.DEBOUNCE_MS) {
+      return false;
+    }
+    this.lastTriggerMs = now;
     if (!navigator.onLine) {
       const count = await this.getPendingCount();
       this.updateStatus({ state: "offline", pendingCount: count });
@@ -113,6 +123,10 @@ class SyncService {
               }
             }
           }
+          // Record the time of a successful push so that UI can display recent sync
+          const pushTime = new Date().toISOString();
+          localStorage.setItem("cinequeue_last_sync_time", pushTime);
+          this.updateStatus({ lastSyncTime: pushTime });
         } else if (res.status === 401 || res.status === 403) {
           this.updateStatus({ state: "sign_in_to_sync" });
           this.syncInProgress = false;
@@ -137,6 +151,7 @@ class SyncService {
           );
         }
         const nowIso = new Date().toISOString();
+        // Update last sync timestamp after a successful pull
         localStorage.setItem("cinequeue_last_sync_time", nowIso);
         const remainingCount = await this.getPendingCount();
         this.updateStatus({
@@ -159,6 +174,27 @@ class SyncService {
       });
       this.syncInProgress = false;
       return false;
+    }
+  }
+
+  /**
+   * Initialize UI from cached movies without contacting the server.
+   * If movies exist locally, we report a synced state immediately.
+   */
+  public async initializeFromCache(): Promise<void> {
+    try {
+      const count = await db.movies.count();
+      if (count > 0) {
+        this.updateStatus({
+          state: "synced",
+          pendingCount: await this.getPendingCount(),
+          lastSyncTime: localStorage.getItem("cinequeue_last_sync_time"),
+        });
+      } else {
+        this.updateStatus({ state: "available_offline", pendingCount: 0 });
+      }
+    } catch (e) {
+      console.error("Failed to init from cache", e);
     }
   }
 }

@@ -49,7 +49,8 @@ def validate_origin(request: Request):
 
     origin = request.headers.get("origin")
     if origin:
-        if origin not in AUTH_ALLOWED_ORIGINS:
+        normalized_origin = origin.rstrip("/")
+        if normalized_origin not in AUTH_ALLOWED_ORIGINS:
             logger.warning("Origin validation failed: %s not in %s", origin, AUTH_ALLOWED_ORIGINS)
             raise HTTPException(status_code=401, detail="Origin not allowed")
     else:
