@@ -390,11 +390,11 @@ def test_config_auth_domain_local(client_with_auth):
 
 
 def test_config_auth_domain_production(client_with_auth):
-    """Config endpoint returns PUBLIC_AUTH_DOMAIN when configured."""
+    """Config endpoint always returns FIREBASE_AUTH_DOMAIN for Firebase SDK auth, even when PUBLIC_AUTH_DOMAIN is configured."""
     with patch("app.routers.auth.PUBLIC_AUTH_DOMAIN", "cinequeue-568212960791.us-west1.run.app"):
         response = client_with_auth.get("/api/auth/config")
         assert response.status_code == 200
-        assert response.json()["authDomain"] == "cinequeue-568212960791.us-west1.run.app"
+        assert response.json()["authDomain"] == "cinequeue-inouye-2026.firebaseapp.com"
 
 
 @patch("httpx.AsyncClient.request")
