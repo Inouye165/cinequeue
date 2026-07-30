@@ -105,3 +105,28 @@ def test_logs_disabled_by_default(mock_logger):
         assert log_json["authorizationHeaderPresent"] is True
         assert log_json["authorizationHeaderScheme"] == "Bearer"
         assert log_json["result"] == "success"
+
+
+def test_firebase_keepalive_adapters_and_warmup():
+    """Test that KeepAliveHTTPAdapter and warmup_firebase_auth execute without error and configure session adapters."""
+    from app.auth import configure_firebase_adapters, warmup_firebase_auth, KeepAliveHTTPAdapter
+    import firebase_admin
+    from firebase_admin import auth
+
+    try:
+        app_inst = firebase_admin.get_app()
+    except ValueError:
+        pytest.skip("Firebase app not initialized")
+
+    # Verify adapter configuration
+    configure_firebase_adapters(app_inst)
+    client = auth._get_client(app_inst)
+    if hasattr(client, "_token_generator") and hasattr(client._token_generator, "http_client"):
+        sess = getattr(client._token_generator.http_client, "session", None)
+        if sess and hasattr(sess, "adapters"):
+            assert "https://" in sess.adapters
+            assert isinstance(sess.adapters["https://"], KeepAliveHTTPAdapter)
+
+    # Verify warmup execution
+    warmup_firebase_auth()
+
