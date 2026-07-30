@@ -87,7 +87,7 @@ async def get_current_user(
         try:
             # Verify the session cookie, checking for revoked or disabled sessions.
             # Local verification is used (check_revoked=False) to avoid network overhead.
-            decoded_claims = auth.verify_session_cookie(session_cookie, check_revoked=False)
+            decoded_claims = auth.verify_session_cookie(session_cookie, check_revoked=False, clock_skew_seconds=60)
         except Exception as e:  # pylint: disable=broad-exception-caught
             if "Token used too early" in str(e):
                 match = re.search(r"Token used too early,\s*(\d+)\s*<\s*(\d+)", str(e))
@@ -98,7 +98,7 @@ async def get_current_user(
                     token_time_val = int(match.group(2))
                     drift_seconds = token_time_val - local_time_val
                     drift_val = str(drift_seconds)
-                    sleep_time = float(drift_seconds) + 2.0
+                    sleep_time = float(drift_seconds) + 1.0
 
                 logger.warning(
                     "Session cookie used too early due to clock skew (%s seconds drift). "

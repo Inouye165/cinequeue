@@ -62,7 +62,7 @@ async def get_current_admin(
 
         try:
             from firebase_admin import auth as firebase_auth
-            decoded_token = firebase_auth.verify_id_token(token)
+            decoded_token = firebase_auth.verify_id_token(token, clock_skew_seconds=60)
             
             tv_end = time.perf_counter()
             if perf:

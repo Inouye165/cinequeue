@@ -644,7 +644,7 @@ def test_origin_validation_policy(mock_create_cookie, mock_verify_token):
                     headers={"Origin": "https://cinequeue-568212960791.us-west1.run.app"}
                 )
                 assert res.status_code == 200
-                mock_verify_token.assert_called_once_with("dummy_id_prod")
+                mock_verify_token.assert_called_once_with("dummy_id_prod", clock_skew_seconds=60)
 
                 # 2. localhost remains accepted where intended
                 mock_verify_token.reset_mock()
@@ -654,7 +654,7 @@ def test_origin_validation_policy(mock_create_cookie, mock_verify_token):
                     headers={"Origin": "http://localhost:5180"}
                 )
                 assert res.status_code == 200
-                mock_verify_token.assert_called_once_with("dummy_id_local")
+                mock_verify_token.assert_called_once_with("dummy_id_local", clock_skew_seconds=60)
 
                 # 3. an unknown origin is rejected
                 mock_verify_token.reset_mock()

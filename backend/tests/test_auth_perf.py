@@ -29,7 +29,7 @@ def test_admin_token_verification_success(mock_verify, client):
     """Test that a valid admin Bearer token returns 200 and timing headers."""
     mock_verify.return_value = {"email": "admin@example.com"}
     
-    with patch("app.services.admin_auth.ADMIN_USERNAME", "admin@example.com"):
+    with patch("app.services.admin_auth.ADMIN_USERNAME", "admin@example.com"), patch("app.services.admin_auth.ENABLE_FALLBACK_ADMIN_AUTH", True):
         response = client.get(
             "/api/admin/me",
             headers={
