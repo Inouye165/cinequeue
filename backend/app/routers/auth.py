@@ -71,7 +71,7 @@ async def get_config():
     """Return only public Firebase configuration."""
     return {
         "apiKey": FIREBASE_API_KEY,
-        "authDomain": PUBLIC_AUTH_DOMAIN or FIREBASE_AUTH_DOMAIN,
+        "authDomain": FIREBASE_AUTH_DOMAIN or (f"{FIREBASE_PROJECT_ID}.firebaseapp.com" if FIREBASE_PROJECT_ID else "cinequeue-inouye-2026.firebaseapp.com"),
         "projectId": FIREBASE_PROJECT_ID,
         "appId": FIREBASE_APP_ID,
         "messagingSenderId": FIREBASE_MESSAGING_SENDER_ID,
