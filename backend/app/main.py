@@ -89,6 +89,15 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error("Failed to initialize default admin user: %s", e)
 
+    # -- Firebase Auth Pre-warming ---------------------------------------------
+    from app.auth import warmup_firebase_auth
+    import asyncio
+    try:
+        asyncio.create_task(asyncio.to_thread(warmup_firebase_auth))
+        logger.info("Started background Firebase Auth pre-warming task")
+    except Exception as e:
+        logger.warning("Failed to start Firebase Auth pre-warming task: %s", e)
+
     yield
     if app.state.tmdb:
         await app.state.tmdb.close()
