@@ -473,8 +473,8 @@ def test_security_headers_csp(client):
     
     # Assert standard origins are preserved
     assert "default-src 'self'" in csp
-    assert "img-src 'self' data: https://image.tmdb.org" in csp
-    assert "connect-src 'self' https://image.tmdb.org" in csp
+    assert "img-src 'self' data: https://image.tmdb.org https://*.tmdb.org" in csp
+    assert "connect-src 'self' https://image.tmdb.org https://*.tmdb.org" in csp
     assert "https://*.googleusercontent.com" in csp
     assert "https://cinequeue-inouye-2026.firebaseapp.com" in csp
     assert "https://*.firebaseapp.com" in csp
