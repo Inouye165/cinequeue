@@ -465,7 +465,7 @@ def test_watchlist_patch_status(client, app_with_mock):
 
 
 def test_security_headers_csp(client):
-    """Test that Content-Security-Policy header contains required YouTube origins."""
+    """Test that Content-Security-Policy header contains required TMDB and YouTube origins."""
     response = client.get("/api/health")
     assert response.status_code == 200
     assert "Content-Security-Policy" in response.headers
@@ -473,12 +473,13 @@ def test_security_headers_csp(client):
     
     # Assert standard origins are preserved
     assert "default-src 'self'" in csp
-    assert "https://image.tmdb.org" in csp
+    assert "img-src 'self' data: https://image.tmdb.org" in csp
+    assert "connect-src 'self' https://image.tmdb.org" in csp
     assert "https://*.googleusercontent.com" in csp
     assert "https://cinequeue-inouye-2026.firebaseapp.com" in csp
     assert "https://*.firebaseapp.com" in csp
     
-    # Assert new YouTube origins are present
+    # Assert YouTube origins are present
     assert "https://img.youtube.com" in csp
     assert "https://i.ytimg.com" in csp
     assert "https://www.youtube.com" in csp
