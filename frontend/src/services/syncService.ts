@@ -104,6 +104,7 @@ class SyncService {
         const res = await fetch("/api/sync/movies/push", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
+          credentials: "include",
           body: JSON.stringify({ operations: pendingOps }),
         });
 
@@ -140,7 +141,9 @@ class SyncService {
         ? `/api/sync/movies/pull?since_cursor=${encodeURIComponent(lastSync)}`
         : `/api/sync/movies/pull`;
 
-      const pullRes = await fetch(url);
+      const pullRes = await fetch(url, {
+        credentials: "include",
+      });
       if (pullRes.ok) {
         const pullData = await pullRes.json();
         if (ownerId && (pullData.watchlist || pullData.ratings)) {

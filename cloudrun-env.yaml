@@ -1,3 +1,4 @@
+ENVIRONMENT: "production"
 AUTH_ENABLED: "true"
 AUTH_ALLOWED_EMAILS: "inouye165@gmail.com"
 WATCHLIST_BACKEND: "firestore"
