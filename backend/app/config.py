@@ -46,7 +46,7 @@ _raw_emails = os.getenv("AUTH_ALLOWED_EMAILS", "")
 AUTH_ALLOWED_EMAILS = [e.strip().lower() for e in _raw_emails.split(",") if e.strip()]
 
 _raw_origins = os.getenv("AUTH_ALLOWED_ORIGINS", "")
-AUTH_ALLOWED_ORIGINS = [o.strip() for o in _raw_origins.split(",") if o.strip()] or [
+AUTH_ALLOWED_ORIGINS = [o.strip().rstrip("/") for o in _raw_origins.split(",") if o.strip()] or [
     "http://localhost:5180",
     "http://127.0.0.1:5180",
     "http://localhost:8080",

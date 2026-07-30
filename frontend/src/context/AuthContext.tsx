@@ -4,8 +4,6 @@ import {
   getAuth,
   GoogleAuthProvider,
   signInWithPopup,
-  signInWithRedirect,
-  getRedirectResult,
   signOut as firebaseSignOut,
   Auth as FirebaseAuth
 } from "firebase/auth";
@@ -50,7 +48,6 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 let firebaseAuthInstance: FirebaseAuth | null = null;
 let firebaseAuthPromise: Promise<FirebaseAuth> | null = null;
-let authInitPromise: Promise<{ user: UserInfo | null; error: string | null }> | null = null;
 
 async function getFirebaseAuth(): Promise<FirebaseAuth> {
   if (firebaseAuthInstance) {
@@ -215,6 +212,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                     setSessionReady(true);
                     setUser(uInfo);
                     setLoading(false);
+      console.log('[TIMING] loading false', performance.now());
                     setError(null);
                     recordEvent("auth_loading_cleared", "success");
 
@@ -271,6 +269,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                     }
                     recordEvent("authorization_ready", "success");
                     setAuthorizationReady(true);
+      console.log('[TIMING] authorizationReady true', performance.now());
                     recordEvent("auth_context_state_update_completed", "success");
                     recordEvent("auth_state_callback_completed", "success");
                     recordEvent("auth_trace_completed", "success");
@@ -278,8 +277,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                   } catch (err: any) {
                     if (!isCurrent()) return;
                     
+                    const errMsg = err.message || "Session or role resolution failed";
                     recordEvent("auth_context_state_update_started", "start");
-                    setError(err.message || "Session or role resolution failed");
+                    setError(errMsg);
                     setUser(null);
                     setFirebaseUser(null);
                     setIdToken(null);
@@ -298,6 +298,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                       console.error("Firebase signout on session creation failure failed:", soErr);
                     }
 
+                    // Preserve error message after signout triggers state callback
+                    setError(errMsg);
+
                     recordEvent("auth_context_state_update_completed", "success");
                     recordEvent("auth_state_callback_completed", "success");
                     recordEvent("auth_trace_completed", "success");
@@ -308,8 +311,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
               } catch (err: any) {
                 if (!isCurrent()) return;
+                const errMsg = err.message || "Failed to resolve authentication";
                 recordEvent("auth_context_state_update_started", "start");
-                setError(err.message || "Failed to resolve authentication");
+                setError(errMsg);
                 setUser(null);
                 setFirebaseUser(null);
                 setIdToken(null);
@@ -321,6 +325,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                 } catch (soErr) {
                   // ignore
                 }
+                setError(errMsg);
                 recordEvent("auth_trace_completed", "success");
               }
             } else {
@@ -339,7 +344,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
               setRoleLoading(false);
               setProfileLoading(false);
               setAuthorizationReady(true);
-              setError(null);
               setAuthInitialized(true);
               setLoading(false);
               recordEvent("auth_context_state_update_completed", "success");
@@ -353,64 +357,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           recordEvent("auth_state_listener_registered", "success");
         }
 
-        const isLocal = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
-        
-        if (isLocal) {
-          // No-op: the onIdTokenChanged observer will fire immediately and handle it.
-        } else {
-          if (!authInitPromise) {
-            authInitPromise = (async () => {
-              let errorMsg: string | null = null;
-              try {
-                recordEvent("id_token_request_started", "start", { source: "getRedirectResult" });
-                const userCredential = await getRedirectResult(auth);
-                recordEvent("id_token_request_completed", "success");
-
-                if (userCredential) {
-                  incrementCount("getIdTokenCalls");
-                  recordEvent("id_token_request_started", "start");
-                  const idToken = await userCredential.user.getIdToken();
-                  recordEvent("id_token_request_completed", "success");
-                  
-                  const csrfData = await api.csrf();
-                  await api.createSession(idToken, csrfData.csrf_token);
-                  await firebaseSignOut(auth);
-                }
-              } catch (err: any) {
-                console.error("Redirect authentication failed:", err);
-                errorMsg = "Google Sign-In failed. Please try again.";
-              }
-
-              let loggedInUser: UserInfo | null = null;
-              try {
-                const data = await api.me();
-                loggedInUser = {
-                  uid: data.uid,
-                  email: data.email,
-                  display_name: data.display_name ?? null,
-                  photo_url: data.photo_url ?? null
-                };
-              } catch (err) {
-                loggedInUser = null;
-              }
-
-              return { user: loggedInUser, error: errorMsg };
-            })();
-          }
-
-          const result = await authInitPromise;
-          if (!isCurrent()) return;
-
-          recordEvent("auth_context_state_update_started", "start");
-          setUser(result.user);
-          setFirebaseUser(result.user);
-          setError(result.error);
-          setAuthInitialized(true);
-          setLoading(false);
-          setAuthReady(true);
-          setAuthorizationReady(true);
-          recordEvent("auth_context_state_update_completed", "success");
-        }
+        // The onIdTokenChanged observer handles initial state resolution and session creation universally across all environments.
 
       } catch (err: any) {
         if (!isCurrent()) return;
@@ -444,6 +391,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const handleUnauthorized = () => {
       setUser(null);
       setIsAdmin(false);
+      setAuthorizationReady(true);
+      setLoading(false);
     };
     window.addEventListener("cinequeue-unauthorized", handleUnauthorized);
     return () => {
@@ -465,16 +414,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const provider = new GoogleAuthProvider();
       provider.setCustomParameters({ prompt: "select_account" });
       
-      const isLocal = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
-      if (isLocal) {
-        incrementCount("popupLogins");
-        recordEvent("popup_login_started", "start");
-        const userCredential = await signInWithPopup(auth, provider);
-        recordEvent("popup_login_completed", "success", { uid: userCredential.user.uid });
-      } else {
-        recordEvent("popup_login_started", "start", { method: "redirect" });
-        await signInWithRedirect(auth, provider);
-      }
+      incrementCount("popupLogins");
+      recordEvent("popup_login_started", "start");
+      const userCredential = await signInWithPopup(auth, provider);
+      recordEvent("popup_login_completed", "success", { uid: userCredential.user.uid });
     } catch (err: any) {
       console.error("Popup login failed:", err);
       recordEvent("popup_login_failed", "failure", {
@@ -487,6 +430,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         msg = "Sign-in popup was blocked by your browser. Please enable popups for this site.";
       } else if (err.code === "auth/popup-closed-by-user") {
         msg = "Sign-in popup was closed before completion.";
+      } else if (err.code === "auth/unauthorized-domain") {
+        msg = "This domain is not authorized in Firebase Console. Please add your Cloud Run URL to Firebase Authorized Domains.";
       }
       
       recordEvent("auth_context_state_update_started", "start");
@@ -594,5 +539,4 @@ export function useAuth() {
 export function __resetFirebaseAuthForTests() {
   firebaseAuthInstance = null;
   firebaseAuthPromise = null;
-  authInitPromise = null;
 }
