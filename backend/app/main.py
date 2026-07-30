@@ -140,7 +140,7 @@ async def add_security_headers(request, call_next):
             "font-src 'self' https://fonts.gstatic.com; "
             "img-src 'self' data: https://image.tmdb.org https://*.googleusercontent.com https://img.youtube.com https://i.ytimg.com; "
             "frame-src 'self' https://cinequeue-inouye-2026.firebaseapp.com https://*.firebaseapp.com https://www.youtube.com https://www.youtube-nocookie.com; "
-            "connect-src 'self' https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://*.googleapis.com;"
+            "connect-src 'self' https://image.tmdb.org https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://*.googleapis.com;"
         )
         response.headers["Content-Security-Policy"] = csp
     else:
