@@ -13,6 +13,7 @@ import {
   recordEvent,
   incrementCount,
 } from "../utils/authPerformanceMonitor";
+import { authLog } from "../utils/authDebugLog";
 
 export interface UserInfo {
   uid: string;
@@ -51,22 +52,28 @@ let firebaseAuthPromise: Promise<FirebaseAuth> | null = null;
 
 async function getFirebaseAuth(): Promise<FirebaseAuth> {
   if (firebaseAuthInstance) {
+    authLog.debug("getFirebaseAuth: reusing cached instance");
     recordEvent("firebase_app_reused", "success");
     recordEvent("firebase_auth_instance_ready", "success");
     return firebaseAuthInstance;
   }
 
   if (firebaseAuthPromise) {
+    authLog.debug("getFirebaseAuth: awaiting existing init promise");
     return firebaseAuthPromise;
   }
 
+  authLog.info("getFirebaseAuth: starting fresh initialization");
   firebaseAuthPromise = (async () => {
     incrementCount("configFetches");
     recordEvent("firebase_config_fetch_started", "start");
+    authLog.info("fetching /api/auth/config…");
     const config = await api.firebaseConfig();
+    authLog.info("firebase config received", { projectId: config.projectId, authDomain: config.authDomain });
     recordEvent("firebase_config_fetch_completed", "success");
     
     if (!config || !config.apiKey) {
+      authLog.error("firebase config missing apiKey!");
       throw new Error("Firebase API key is missing or empty. Please verify your backend .env file contains FIREBASE_API_KEY and restart the backend server.");
     }
     
@@ -74,15 +81,18 @@ async function getFirebaseAuth(): Promise<FirebaseAuth> {
     incrementCount("initAttempts");
     recordEvent("firebase_initialization_started", "start");
     if (getApps().length === 0) {
+      authLog.info("initializeApp: creating new Firebase app");
       app = initializeApp(config);
       recordEvent("firebase_app_created", "success");
     } else {
+      authLog.info("initializeApp: reusing existing Firebase app");
       app = getApp();
       recordEvent("firebase_app_reused", "success");
     }
     recordEvent("firebase_initialization_completed", "success");
     
     firebaseAuthInstance = getAuth(app);
+    authLog.info("firebase Auth instance created");
     recordEvent("firebase_auth_instance_ready", "success");
     return firebaseAuthInstance;
   })();
@@ -90,6 +100,7 @@ async function getFirebaseAuth(): Promise<FirebaseAuth> {
   try {
     return await firebaseAuthPromise;
   } catch (err) {
+    authLog.error("getFirebaseAuth FAILED", { error: (err as Error).message });
     firebaseAuthPromise = null;
     throw err;
   }
@@ -141,42 +152,56 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     startTrace();
     incrementCount("mounts");
     recordEvent("auth_provider_mounted", "success", { instanceId: providerInstanceId.current, generation });
+    authLog.info("AuthProvider mounted", { instanceId: providerInstanceId.current, generation });
 
     const initializeAuth = async () => {
+      authLog.info("initializeAuth: setting loading=true");
       recordEvent("auth_context_state_update_started", "start");
       setLoading(true);
       setError(null);
       recordEvent("auth_context_state_update_completed", "success");
 
       try {
+        authLog.info("initializeAuth: calling getFirebaseAuth()");
         const auth = await getFirebaseAuth();
+        authLog.info("initializeAuth: getFirebaseAuth() resolved");
         if (!isCurrent()) {
+          authLog.warn("initializeAuth: stale generation after getFirebaseAuth", { generation, current: generationRef.current });
           recordEvent("auth_generation_stale", "skipped", { generation, current: generationRef.current });
           return;
         }
 
         if (!unsubscribeRef.current) {
           incrementCount("listenersRegistered");
+          authLog.info("initializeAuth: registering onIdTokenChanged listener");
           
           const unsubscribe = auth.onIdTokenChanged(async (firebaseUser) => {
             recordEvent("auth_state_callback_started", "start");
             incrementCount("callbacks");
+            authLog.info("onIdTokenChanged fired", { hasUser: !!firebaseUser });
 
             if (!isCurrent()) {
+              authLog.warn("onIdTokenChanged: stale generation, skipping");
               recordEvent("auth_state_callback_stale", "skipped", { generation, current: generationRef.current });
               return;
             }
 
             if (firebaseUser) {
+              authLog.info("onIdTokenChanged: user present", { uid: firebaseUser.uid, email: firebaseUser.email });
               recordEvent("auth_state_user_available", "success", { uid: firebaseUser.uid, email: firebaseUser.email });
               
               try {
                 incrementCount("getIdTokenCalls");
                 recordEvent("id_token_request_started", "start");
+                authLog.info("calling firebaseUser.getIdToken()…");
                 const token = await firebaseUser.getIdToken();
+                authLog.info("getIdToken() resolved", { tokenLength: token.length });
                 recordEvent("id_token_request_completed", "success");
 
-                if (!isCurrent()) return;
+                if (!isCurrent()) {
+                  authLog.warn("stale generation after getIdToken");
+                  return;
+                }
 
                 const uInfo: UserInfo = {
                   uid: firebaseUser.uid,
@@ -186,6 +211,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                 };
 
                 // Fast Auth Resolution: set core state immediately and clear global loading!
+                authLog.info("setting fast-auth states: authInitialized=true, authorizationReady=false");
                 recordEvent("auth_context_state_update_started", "start");
                 setFirebaseUser(uInfo);
                 setIdToken(token);
@@ -199,26 +225,75 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
                 const performAuthSequence = async () => {
                   try {
+                    // Pre-check: decode JWT auth_time client-side to avoid slow backend rejection
+                    // If the cached Firebase session is stale (> 5 min), sign out immediately.
+                    try {
+                      const payloadPart = token.split(".")[1];
+                      const decoded = JSON.parse(atob(payloadPart));
+                      const authTime = decoded.auth_time;
+                      if (authTime) {
+                        const ageSeconds = Math.floor(Date.now() / 1000) - authTime;
+                        authLog.info("auth_time pre-check", { authTime, ageSeconds, maxAge: 300 });
+                        if (ageSeconds > 5 * 60) {
+                          authLog.warn(
+                            `auth_time is ${ageSeconds}s old (${(ageSeconds / 86400).toFixed(1)} days) — ` +
+                            "stale cached session, signing out immediately"
+                          );
+                          // Sign out without showing error — user just needs to click login again
+                          setAuthorizationReady(true);
+                          setLoading(false);
+                          setUser(null);
+                          setFirebaseUser(null);
+                          setIdToken(null);
+                          setSessionReady(false);
+                          setRoleLoading(false);
+                          setProfileLoading(false);
+                          setAuthInitialized(true);
+                          try { await firebaseSignOut(auth); } catch (_) { /* ignore */ }
+                          return;
+                        }
+                      }
+                    } catch (preErr) {
+                      authLog.debug("auth_time pre-check failed (non-fatal)", { error: (preErr as Error).message });
+                    }
+
+                    authLog.info("performAuthSequence: requesting CSRF token…");
                     recordEvent("csrf_request_started", "start");
                     const csrfData = await api.csrf();
+                    authLog.info("performAuthSequence: CSRF token received");
                     recordEvent("csrf_request_completed", "success");
-                    if (!isCurrent()) return;
+                    if (!isCurrent()) { authLog.warn("stale after CSRF"); return; }
 
+                    authLog.info("performAuthSequence: calling createSession…");
                     recordEvent("session_creation_started", "start");
                     await api.createSession(token, csrfData.csrf_token);
+                    authLog.info("performAuthSequence: createSession succeeded");
                     recordEvent("session_creation_completed", "success");
-                    if (!isCurrent()) return;
+                    if (!isCurrent()) { authLog.warn("stale after createSession"); return; }
 
+                    authLog.info("performAuthSequence: setting sessionReady=true, loading=false");
                     setSessionReady(true);
                     setUser(uInfo);
                     setLoading(false);
-      console.log('[TIMING] loading false', performance.now());
                     setError(null);
                     recordEvent("auth_loading_cleared", "success");
 
-                    // Start secondary async requests concurrently (role lookup & session/profile verification)
+                    // Set profile immediately from Firebase user data — no need to wait
+                    // for /api/auth/me which uses the session cookie and may hit clock-skew sleep.
+                    authLog.info("performAuthSequence: setting profile from Firebase data (non-blocking)");
+                    setProfile({
+                      uid: uInfo.uid,
+                      email: uInfo.email,
+                      display_name: uInfo.display_name ?? null,
+                      photo_url: uInfo.photo_url ?? null
+                    });
+                    setProfileLoading(false);
+
+                    // Start admin role check (uses Bearer token, not session cookie — fast)
+                    authLog.info("performAuthSequence: starting adminMe role check");
                     const rolePromise = fetchAdminMe(token)
                       .then(() => {
+                        authLog.info("adminMe resolved: isAdmin=true");
                         recordEvent("admin_me_request_completed", "success");
                         if (!isCurrent()) return { isAdmin: true, role: "admin", error: null };
                         setIsAdmin(true);
@@ -227,9 +302,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                         return { isAdmin: true, role: "admin", error: null };
                       })
                       .catch((err: any) => {
+                        authLog.warn("adminMe failed", { error: err.message, status: err.status });
                         recordEvent("admin_me_request_failed", "failure", { error: err.message });
                         if (!isCurrent()) return { isAdmin: false, role: null, error: err.message };
-                        const isForbidden = err.message?.includes("403") || err.status === 403;
+                        const isForbidden =
+                          err.status === 403 ||
+                          err.message?.includes("403") ||
+                          err.message?.toLowerCase().includes("not authorized") ||
+                          err.message?.toLowerCase().includes("forbidden");
                         setIsAdmin(false);
                         setRole(isForbidden ? "user" : null);
                         setRoleLoading(false);
@@ -240,27 +320,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                         };
                       });
 
-                    const profilePromise = (async () => {
-                      try {
-                        recordEvent("profile_request_started", "start");
-                        const pData = await api.me();
-                        recordEvent("profile_request_completed", "success");
-                        if (!isCurrent()) return;
-
-                        setProfile({
-                          uid: pData.uid,
-                          email: pData.email,
-                          display_name: pData.display_name ?? null,
-                          photo_url: pData.photo_url ?? null
-                        });
-                      } catch (profileErr: any) {
-                        recordEvent("profile_request_failed", "failure", { error: profileErr.message });
-                      } finally {
-                        setProfileLoading(false);
-                      }
-                    })();
-
-                    const [roleResult] = await Promise.all([rolePromise, profilePromise]);
+                    authLog.info("performAuthSequence: awaiting rolePromise only (profile set from Firebase data)…");
+                    const roleResult = await rolePromise;
+                    authLog.info("performAuthSequence: role resolved", { roleError: roleResult.error || null });
                     if (!isCurrent()) return;
 
                     recordEvent("auth_context_state_update_started", "start");
@@ -269,15 +331,37 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                     }
                     recordEvent("authorization_ready", "success");
                     setAuthorizationReady(true);
-      console.log('[TIMING] authorizationReady true', performance.now());
+                    authLog.info("performAuthSequence: COMPLETE — authorizationReady=true");
                     recordEvent("auth_context_state_update_completed", "success");
                     recordEvent("auth_state_callback_completed", "success");
                     recordEvent("auth_trace_completed", "success");
+
+                    // Background: verify session cookie works by calling /api/auth/me
+                    // This is non-blocking — user already sees the dashboard.
+                    // If it fails, the next real API call will catch the issue.
+                    authLog.info("performAuthSequence: starting background session cookie verification (/api/auth/me)");
+                    recordEvent("profile_request_started", "start");
+                    api.me().then((pData) => {
+                      authLog.info("background profile verification succeeded", { email: pData.email });
+                      recordEvent("profile_request_completed", "success");
+                      if (!isCurrent()) return;
+                      // Update profile with server-verified data
+                      setProfile({
+                        uid: pData.uid,
+                        email: pData.email,
+                        display_name: pData.display_name ?? null,
+                        photo_url: pData.photo_url ?? null
+                      });
+                    }).catch((profileErr: any) => {
+                      authLog.warn("background profile verification failed (non-fatal)", { error: profileErr.message });
+                      recordEvent("profile_request_failed", "failure", { error: profileErr.message });
+                    });
 
                   } catch (err: any) {
                     if (!isCurrent()) return;
                     
                     const errMsg = err.message || "Session or role resolution failed";
+                    authLog.error("performAuthSequence FAILED", { error: errMsg });
                     recordEvent("auth_context_state_update_started", "start");
                     setError(errMsg);
                     setUser(null);
@@ -293,8 +377,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                     setAuthorizationReady(true);
                     
                     try {
+                      authLog.info("signing out of Firebase after auth sequence failure");
                       await firebaseSignOut(auth);
                     } catch (soErr) {
+                      authLog.error("Firebase signout on failure also failed", { error: (soErr as Error).message });
                       console.error("Firebase signout on session creation failure failed:", soErr);
                     }
 
@@ -312,6 +398,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
               } catch (err: any) {
                 if (!isCurrent()) return;
                 const errMsg = err.message || "Failed to resolve authentication";
+                authLog.error("getIdToken / user-present block FAILED", { error: errMsg });
                 recordEvent("auth_context_state_update_started", "start");
                 setError(errMsg);
                 setUser(null);
@@ -329,6 +416,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                 recordEvent("auth_trace_completed", "success");
               }
             } else {
+              authLog.info("onIdTokenChanged: NO user (signed out or first load with no session)");
               recordEvent("auth_state_no_user", "success");
               if (!isCurrent()) return;
 
@@ -346,6 +434,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
               setAuthorizationReady(true);
               setAuthInitialized(true);
               setLoading(false);
+              authLog.info("no-user path: authInitialized=true, loading=false, authorizationReady=true");
               recordEvent("auth_context_state_update_completed", "success");
               recordEvent("auth_state_callback_completed", "success");
               recordEvent("auth_loading_cleared", "success");
@@ -361,6 +450,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
       } catch (err: any) {
         if (!isCurrent()) return;
+        authLog.error("initializeAuth TOP-LEVEL CATCH", { error: err.message });
         recordEvent("auth_context_state_update_started", "start");
         setError(err.message || "Authentication initialization failed");
         setUser(null);
@@ -401,6 +491,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const loginWithGoogle = async () => {
+    authLog.info("loginWithGoogle: starting");
     startTrace();
     recordEvent("auth_context_state_update_started", "start");
     setError(null);
@@ -410,15 +501,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const coopReferrer = document.referrer || "unknown";
 
     try {
+      authLog.info("loginWithGoogle: getting firebase auth instance");
       const auth = await getFirebaseAuth();
       const provider = new GoogleAuthProvider();
       provider.setCustomParameters({ prompt: "select_account" });
       
       incrementCount("popupLogins");
       recordEvent("popup_login_started", "start");
+      authLog.info("loginWithGoogle: opening popup…");
       const userCredential = await signInWithPopup(auth, provider);
+      authLog.info("loginWithGoogle: popup returned user", { uid: userCredential.user.uid, email: userCredential.user.email });
       recordEvent("popup_login_completed", "success", { uid: userCredential.user.uid });
+      authLog.info("loginWithGoogle: popup complete — onIdTokenChanged will fire next");
     } catch (err: any) {
+      authLog.error("loginWithGoogle: popup FAILED", { code: err.code, message: err.message });
       console.error("Popup login failed:", err);
       recordEvent("popup_login_failed", "failure", {
         code: err.code,

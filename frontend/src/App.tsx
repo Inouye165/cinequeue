@@ -7,6 +7,7 @@ import { UserLogin } from "./pages/UserLogin";
 import { CinequeueDashboard } from "./pages/CinequeueDashboard";
 import { AuthDiagnosticsPanel } from "./components/AuthDiagnosticsPanel";
 import { recordEvent } from "./utils/authPerformanceMonitor";
+import { authLog } from "./utils/authDebugLog";
 
 function CinequeueApp() {
   const {
@@ -141,6 +142,29 @@ function CinequeueApp() {
       throw err;
     }
   };
+
+  // Debug: log the spinner-controlling state on every render so we can see what's blocking
+  useEffect(() => {
+    const showingSpinner = !authInitialized || authLoading || (user !== null && !authorizationReady);
+    if (showingSpinner) {
+      authLog.warn("RENDERING SPINNER", {
+        authInitialized,
+        authLoading,
+        hasUser: !!user,
+        authorizationReady,
+        authError: authError || null,
+      });
+    } else {
+      authLog.info("App render: spinner check", {
+        showingSpinner: false,
+        authInitialized,
+        authLoading,
+        hasUser: !!user,
+        authorizationReady,
+        authError: authError || null,
+      });
+    }
+  }, [authInitialized, authLoading, user, authorizationReady, authError]);
 
   if (!authInitialized || authLoading || (user && !authorizationReady)) {
     return (

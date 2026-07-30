@@ -7,6 +7,7 @@ import {
   detectDuplicateMeRequest,
   detectPrematureMeRequest,
 } from "./utils/authPerformanceMonitor";
+import { authLog } from "./utils/authDebugLog";
 
 export interface FirebaseConfig {
   apiKey: string;
@@ -91,11 +92,19 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     requestStartTime = performance.now();
   }
 
+  const isAuthPath = path.startsWith("/api/auth/") || path.startsWith("/api/admin/me");
+  if (isAuthPath) {
+    authLog.debug(`fetch START: ${method} ${path}`);
+  }
+
   let response: Response;
   try {
     response = await fetch(path, reqInit);
     if (isAdminMe) {
       headersArrivedTime = performance.now();
+    }
+    if (isAuthPath) {
+      authLog.debug(`fetch HEADERS: ${method} ${path} → ${response.status}`);
     }
   } catch (err: any) {
     if (isAdminMe) {
@@ -141,7 +150,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
         : error.detail
         ? JSON.stringify(error.detail)
         : "Request failed";
-    throw new Error(detailMsg);
+    const reqError = new Error(detailMsg);
+    (reqError as any).status = response.status;
+    throw reqError;
   }
 
 

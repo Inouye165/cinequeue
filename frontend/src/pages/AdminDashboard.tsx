@@ -1,5 +1,6 @@
 import { FormEvent, useState } from "react";
 import { AiAgentDecisionsTab } from "../components/admin/AiAgentDecisionsTab";
+import { AuthDebugLogsTab } from "../components/admin/AuthDebugLogsTab";
 
 interface AdminDashboardProps {
   adminUsername: string;
@@ -23,7 +24,7 @@ export function AdminDashboard({
   onInvite,
 }: AdminDashboardProps) {
   const [inviteEmail, setInviteEmail] = useState("");
-  const [adminTab, setAdminTab] = useState<"requests" | "users" | "logs" | "decisions">("requests");
+  const [adminTab, setAdminTab] = useState<"requests" | "users" | "logs" | "decisions" | "debug">("requests");
   const [isSubmittingInvite, setIsSubmittingInvite] = useState(false);
   const [inviteFeedback, setInviteFeedback] = useState<{
     type: "success" | "warning" | "error";
@@ -159,10 +160,20 @@ export function AdminDashboard({
         >
           🤖 AI Agent Decisions
         </button>
+        <button
+          className={`admin-tab ${adminTab === "debug" ? "active" : ""}`}
+          onClick={() => setAdminTab("debug")}
+        >
+          🔍 Auth Debug Logs
+        </button>
       </div>
 
       {adminTab === "decisions" && (
         <AiAgentDecisionsTab authToken={authToken} />
+      )}
+
+      {adminTab === "debug" && (
+        <AuthDebugLogsTab />
       )}
 
 

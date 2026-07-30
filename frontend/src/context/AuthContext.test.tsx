@@ -334,7 +334,7 @@ describe("AuthContext and AuthProvider", () => {
     expect(latestState.loading).toBe(false);
     expect(latestState.firebaseUser.uid).toBe("cached-uid");
     expect(latestState.idToken).toBe("cached-token");
-    expect(latestState.authorizationReady).toBe(false);
+    expect(latestState.authorizationReady).toBe(true);
 
     resolveMe({ uid: "cached-uid", email: "cached@example.com" });
   });
@@ -361,7 +361,7 @@ describe("AuthContext and AuthProvider", () => {
     expect(api.createSession).not.toHaveBeenCalled();
   });
 
-  it("Test 3: Slow profile request - App shell becomes available, profile-dependent UI remains loading", async () => {
+  it("Test 3: Slow profile request - App shell becomes available, profile is populated from Firebase user and updated upon background fetch", async () => {
     let resolveMe: any;
     const mePromise = new Promise<any>((resolve) => { resolveMe = resolve; });
     vi.mocked(api.me).mockReturnValue(mePromise);
@@ -387,8 +387,13 @@ describe("AuthContext and AuthProvider", () => {
     });
 
     expect(latestState.loading).toBe(false);
-    expect(latestState.profileLoading).toBe(true);
-    expect(latestState.profile).toBeNull();
+    expect(latestState.profileLoading).toBe(false);
+    expect(latestState.profile).toEqual({
+      uid: "uid-3",
+      email: "user3@example.com",
+      display_name: null,
+      photo_url: null,
+    });
 
     await act(async () => {
       resolveMe({ uid: "uid-3", email: "user3@example.com", display_name: "User Three" });
