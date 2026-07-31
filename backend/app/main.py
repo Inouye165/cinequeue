@@ -300,6 +300,13 @@ app.include_router(ratings.router)
 app.include_router(sync.router)
 
 
+@app.get("/sw.js")
+async def serve_sw():
+    file_path = FRONTEND_DIST / "sw.js"
+    headers = {"Cache-Control": "no-cache, max-age=0, must-revalidate"}
+    if file_path.is_file():
+        return FileResponse(file_path, headers=headers)
+    return Response(status_code=404, headers=headers)
 
 
 if FRONTEND_DIST.exists():
@@ -307,11 +314,12 @@ if FRONTEND_DIST.exists():
         app.mount("/assets", StaticFiles(directory=FRONTEND_DIST / "assets"), name="assets")
 
     @app.get("/{full_path:path}")
-
     async def serve_spa(full_path: str):
         if full_path.startswith("api"):
             return {"detail": "Not found"}
         file_path = FRONTEND_DIST / full_path
         if file_path.is_file():
-            return FileResponse(file_path)
+            headers = {}
+            if full_path == "sw.js":
+                headers["Cache-Control"] = "no-cache, max-age=0, must-revalidate"
         return FileResponse(FRONTEND_DIST / "index.html")
