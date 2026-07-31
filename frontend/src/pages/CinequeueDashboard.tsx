@@ -7,10 +7,10 @@ import { MediaCard } from "../components/MediaCard";
 import { MediaCardSkeleton } from "../components/MediaCardSkeleton";
 import { SearchHeader } from "../components/SearchHeader";
 import { Tabs, TabType } from "../components/Tabs";
+import { MobileBottomNav } from "../components/MobileBottomNav";
 import { useAuth } from "../context/AuthContext";
 import { StarRating } from "../components/StarRating";
 import { BatchRateModal } from "../components/BatchRateModal";
-import { SyncStatusBar } from "../components/SyncStatusBar";
 import { movieService } from "../services/movieService";
 import { syncService } from "../services/syncService";
 import { formatPosterUrl } from "../utils/mediaUtils";
@@ -501,15 +501,17 @@ export function CinequeueDashboard() {
         user={user}
         onLogout={logout}
         onOpenAgentModal={openAgentModal}
+        ownerId={ownerId}
+        onDataCleared={reloadFromDb}
       />
 
       <AgentLoginBriefing onOpenChat={() => openAgentModal("chat")} />
 
       {error ? <div className="error-banner">{error}</div> : null}
 
-      <SyncStatusBar ownerId={ownerId} onDataCleared={reloadFromDb} />
-
-      <Tabs tabsList={TABS} activeTab={tab} onChangeTab={setTab} />
+      <div className="desktop-only-tabs">
+        <Tabs tabsList={TABS} activeTab={tab} onChangeTab={setTab} />
+      </div>
 
       <AgentModal
         isOpen={agentModalOpen}
@@ -702,6 +704,8 @@ export function CinequeueDashboard() {
           );
         })()
       ) : null}
+
+      <MobileBottomNav activeTab={tab} onChangeTab={setTab} />
     </div>
   );
 }
