@@ -164,6 +164,10 @@ class TmdbClient:
             "status": data.get("status"),
             "homepage": data.get("homepage"),
             "seasons": data.get("seasons") if media_type == "tv" else None,
+            "number_of_episodes": data.get("number_of_episodes") if media_type == "tv" else None,
+            "number_of_seasons": data.get("number_of_seasons") if media_type == "tv" else None,
+            "next_episode_to_air": data.get("next_episode_to_air") if media_type == "tv" else None,
+            "last_episode_to_air": data.get("last_episode_to_air") if media_type == "tv" else None,
         }
         self._set_cached(cache_key, res)
         return res
@@ -426,11 +430,11 @@ class TmdbClient:
             }
         data = await self._get(f"/tv/{tmdb_id}")
         next_episode = data.get("next_episode_to_air")
-        if not next_episode:
-            return {"next_episode": None}
-        air_date = next_episode.get("air_date")
-        return {
-            "next_episode": {
+        last_episode = data.get("last_episode_to_air")
+        next_ep_info = None
+        if next_episode:
+            air_date = next_episode.get("air_date")
+            next_ep_info = {
                 "name": next_episode.get("name"),
                 "season": next_episode.get("season_number"),
                 "episode": next_episode.get("episode_number"),
@@ -438,6 +442,21 @@ class TmdbClient:
                 "days_away": days_until(air_date),
                 "days_label": days_label(days_until(air_date)),
             }
+        last_ep_info = None
+        if last_episode:
+            last_air_date = last_episode.get("air_date")
+            last_ep_info = {
+                "name": last_episode.get("name"),
+                "season": last_episode.get("season_number"),
+                "episode": last_episode.get("episode_number"),
+                "air_date": last_air_date,
+            }
+        return {
+            "next_episode": next_ep_info,
+            "last_episode": last_ep_info,
+            "number_of_episodes": data.get("number_of_episodes"),
+            "number_of_seasons": data.get("number_of_seasons"),
+            "status": data.get("status"),
         }
 
 

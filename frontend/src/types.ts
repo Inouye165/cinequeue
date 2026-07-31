@@ -1,11 +1,56 @@
 export type MediaType = "movie" | "tv";
 
+export type QueueAvailabilityState =
+  | "available"
+  | "partially_available"
+  | "upcoming"
+  | "releasing_today"
+  | "confirmed_tbd"
+  | "complete"
+  | "unknown";
+
+export interface QueueAvailabilityStatus {
+  state: QueueAvailabilityState;
+  primaryText: string;
+  secondaryText?: string;
+  tertiaryText?: string;
+  date?: string;
+  availableEpisodeCount?: number;
+  totalEpisodeCount?: number;
+  nextEpisodeDate?: string;
+  seasonNumber?: number;
+  accessibilityLabel: string;
+}
+
 export interface NextSeasonInfo {
   name: string;
   season_number: number;
   air_date?: string | null;
   days_away?: number | null;
   days_label?: string;
+}
+
+export interface TVEpisodeDetails {
+  name?: string | null;
+  season?: number | null;
+  season_number?: number | null;
+  episode?: number | null;
+  episode_number?: number | null;
+  air_date?: string | null;
+  days_away?: number | null;
+  days_label?: string | null;
+}
+
+export interface ReleaseInfo {
+  theatrical?: string | null;
+  digital?: string | null;
+  theatrical_days_away?: number | null;
+  digital_days_away?: number | null;
+  next_episode?: TVEpisodeDetails | null;
+  last_episode?: TVEpisodeDetails | null;
+  number_of_episodes?: number | null;
+  number_of_seasons?: number | null;
+  status?: string | null;
 }
 
 export interface CastChangeItem {
@@ -31,13 +76,29 @@ export interface MediaItem {
   poster_url?: string | null;
   backdrop_url?: string | null;
   release_date?: string | null;
+  theatrical_release_date?: string | null;
+  digital_release_date?: string | null;
   days_away?: number | null;
   days_label?: string;
   vote_average?: number;
   vote_count?: number;
   popularity?: number;
   next_season?: NextSeasonInfo | null;
+  release_info?: ReleaseInfo | null;
+  watch_providers?: WatchProviders | null;
   user_rating?: number | null;
+  number_of_episodes?: number | null;
+  number_of_seasons?: number | null;
+  status?: string | null;
+  next_episode_to_air?: TVEpisodeDetails | null;
+  last_episode_to_air?: TVEpisodeDetails | null;
+  seasons?: Array<{
+    id?: number;
+    name?: string;
+    season_number?: number;
+    episode_count?: number;
+    air_date?: string | null;
+  }> | null;
 }
 
 export interface WatchlistItem extends MediaItem {
@@ -57,6 +118,7 @@ export interface WatchlistItem extends MediaItem {
 }
 
 export type PersonalityPreset = "cinephile" | "noir" | "scifi" | "sarcastic" | "custom";
+
 
 export interface AgentSettings {
   user_id?: string;

@@ -24,6 +24,11 @@ async def refresh_cache_in_background(repo, user_id: str, media_type: str, tmdb_
             details["watch_providers"] = providers
         except Exception as exc:
             logger.warning(f"Failed to fetch watch providers for {media_type}/{tmdb_id} in background: {exc}")
+        try:
+            rel_info = await tmdb.get_release_info(media_type, tmdb_id)
+            details["release_info"] = rel_info
+        except Exception as exc:
+            logger.warning(f"Failed to fetch release info for {media_type}/{tmdb_id} in background: {exc}")
         repo.update_item_cache(user_id, media_type, tmdb_id, details)
         logger.info(f"Background cache refresh succeeded for {media_type}/{tmdb_id}")
     except Exception as exc:
@@ -99,6 +104,11 @@ async def list_watchlist(
                             details["watch_providers"] = providers
                         except Exception:
                             pass
+                        try:
+                            rel_info = await tmdb.get_release_info(enriched["media_type"], enriched["tmdb_id"])
+                            details["release_info"] = rel_info
+                        except Exception:
+                            pass
                         repo.update_item_cache(
                             current_user.uid,
                             enriched["media_type"],
@@ -119,6 +129,7 @@ async def list_watchlist(
             
             # Check alerts
             providers = details.get("watch_providers", {})
+            release_info = details.get("release_info", {})
             is_free_streaming_alert = False
             is_on_sale_alert = False
 
@@ -128,8 +139,21 @@ async def list_watchlist(
                 is_on_sale_alert = True
 
             next_season = None
-            if enriched["media_type"] == "tv" and details.get("seasons") and tmdb:
-                next_season = tmdb.get_next_season(details["seasons"])
+            if enriched["media_type"] == "tv":
+                if details.get("seasons") and tmdb:
+                    next_season = tmdb.get_next_season(details["seasons"])
+                elif details.get("next_season"):
+                    next_season = details["next_season"]
+                elif tmdb:
+                    try:
+                        full_details = await tmdb.get_details(enriched["media_type"], enriched["tmdb_id"])
+                        if full_details.get("seasons"):
+                            next_season = tmdb.get_next_season(full_details["seasons"])
+                    except Exception as exc:
+                        logger.warning(f"Could not retrieve next season for {enriched['tmdb_id']}: {exc}")
+
+            theatrical_date = release_info.get("theatrical") if isinstance(release_info, dict) else None
+            digital_date = release_info.get("digital") if isinstance(release_info, dict) else None
 
             enriched.update(
                 {
@@ -144,6 +168,16 @@ async def list_watchlist(
                     "buy_original_price": providers.get("buy_original_price"),
                     "buy_current_price": providers.get("buy_current_price"),
                     "next_season": next_season,
+                    "release_info": release_info,
+                    "watch_providers": providers,
+                    "theatrical_release_date": theatrical_date,
+                    "digital_release_date": digital_date,
+                    "number_of_episodes": details.get("number_of_episodes") or (release_info.get("number_of_episodes") if isinstance(release_info, dict) else None),
+                    "number_of_seasons": details.get("number_of_seasons") or (release_info.get("number_of_seasons") if isinstance(release_info, dict) else None),
+                    "status": details.get("status") or (release_info.get("status") if isinstance(release_info, dict) else None),
+                    "next_episode_to_air": details.get("next_episode_to_air") or (release_info.get("next_episode") if isinstance(release_info, dict) else None),
+                    "last_episode_to_air": details.get("last_episode_to_air") or (release_info.get("last_episode") if isinstance(release_info, dict) else None),
+                    "seasons": details.get("seasons"),
                 }
             )
             if "overview" in details:

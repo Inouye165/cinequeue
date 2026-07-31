@@ -14,6 +14,7 @@ import { SyncStatusBar } from "../components/SyncStatusBar";
 import { movieService } from "../services/movieService";
 import { syncService } from "../services/syncService";
 import { formatPosterUrl } from "../utils/mediaUtils";
+import { buildQueueAvailabilityStatus, sortQueueItems } from "../utils/queueStatusUtils";
 import type { MediaDetails, MediaItem, RatedMovie, WatchlistItem } from "../types";
 
 const TABS: { id: TabType; label: string }[] = [
@@ -441,31 +442,21 @@ export function CinequeueDashboard() {
         }
         return false;
       });
-      return [...queueItems].sort((a, b) => {
-        const dateA = (a.media_type === "tv" && a.next_season?.air_date) ? a.next_season.air_date : (a.release_date || "");
-        const dateB = (b.media_type === "tv" && b.next_season?.air_date) ? b.next_season.air_date : (b.release_date || "");
-        if (!dateA && !dateB) return 0;
-        if (!dateA) return 1;
-        if (!dateB) return -1;
-        return dateA.localeCompare(dateB);
-      });
+      return sortQueueItems(queueItems);
     }
     if (tab === "following") {
-      const followingItems = watchlist.filter((item) => !item.is_owned && item.status === "following");
-      return [...followingItems].sort((a, b) => {
-        const dateA = (a.media_type === "tv" && a.next_season?.air_date) ? a.next_season.air_date : (a.release_date || "");
-        const dateB = (b.media_type === "tv" && b.next_season?.air_date) ? b.next_season.air_date : (b.release_date || "");
-        if (!dateA && !dateB) return 0;
-        if (!dateA) return 1;
-        if (!dateB) return -1;
-        return dateA.localeCompare(dateB);
-      });
+      const followingItems = watchlist.filter(
+        (item) => !item.is_owned && item.status === "following"
+      );
+      return sortQueueItems(followingItems);
     }
     if (tab === "library") {
-      return watchlist.filter((item) => item.is_owned);
+      return sortQueueItems(watchlist.filter((item) => item.is_owned));
     }
     return [];
   }, [watchlist, tab]);
+
+  const [queueFilter, setQueueFilter] = useState<"all" | "available" | "upcoming" | "tv" | "movies">("all");
 
   const [agentModalOpen, setAgentModalOpen] = useState(false);
   const [agentModalTab, setAgentModalTab] = useState<"chat" | "settings" | "logs">("chat");
@@ -476,7 +467,23 @@ export function CinequeueDashboard() {
   };
 
   const isLocalTab = ["watchlist", "following", "library"].includes(tab);
-  const items = isLocalTab ? localItems : remoteItems;
+  const rawItems = isLocalTab ? localItems : remoteItems;
+
+  const items = useMemo(() => {
+    if (queueFilter === "all") return rawItems;
+    return rawItems.filter((item) => {
+      const status = buildQueueAvailabilityStatus(item);
+      if (queueFilter === "available") {
+        return status.state === "available" || status.state === "partially_available" || status.state === "complete";
+      }
+      if (queueFilter === "upcoming") {
+        return status.state === "upcoming" || status.state === "releasing_today" || status.state === "confirmed_tbd";
+      }
+      if (queueFilter === "tv") return item.media_type === "tv";
+      if (queueFilter === "movies") return item.media_type === "movie";
+      return true;
+    });
+  }, [rawItems, queueFilter]);
 
   const sectionTitle =
     tab === "search"
@@ -521,8 +528,32 @@ export function CinequeueDashboard() {
         onRatingsAdded={() => void loadRatedMovies()}
       />
 
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px", flexWrap: "wrap", gap: "12px" }}>
         <h2 className="section-title" style={{ margin: 0 }}>{sectionTitle}</h2>
+        {isLocalTab && (
+          <div className="queue-filter-chips" role="tablist" aria-label="Filter queue items">
+            {(
+              [
+                { id: "all", label: "All" },
+                { id: "available", label: "Available now" },
+                { id: "upcoming", label: "Upcoming" },
+                { id: "tv", label: "TV" },
+                { id: "movies", label: "Movies" },
+              ] as const
+            ).map((chip) => (
+              <button
+                key={chip.id}
+                type="button"
+                className={`filter-chip ${queueFilter === chip.id ? "active" : ""}`}
+                onClick={() => setQueueFilter(chip.id)}
+                role="tab"
+                aria-selected={queueFilter === chip.id}
+              >
+                {chip.label}
+              </button>
+            ))}
+          </div>
+        )}
         {tab === "rated" && (
           <button
             className="btn-primary"
@@ -611,10 +642,11 @@ export function CinequeueDashboard() {
             const isFollowing = followingKeys.has(key);
             const watchItem = watchlist.find((i) => `${i.media_type}:${i.tmdb_id ?? i.id}` === key);
             const ownedFormat = watchItem?.owned_format || null;
+            const cardItem = watchItem ? { ...item, ...watchItem } : item;
             return (
               <MediaCard
                 key={key}
-                item={item}
+                item={cardItem}
                 onOpen={openDetails}
                 onAdd={addToWatchlist}
                 onRemove={removeFromWatchlist}

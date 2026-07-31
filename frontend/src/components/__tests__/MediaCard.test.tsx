@@ -1,4 +1,3 @@
-
 import { describe, expect, it, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import { MediaCard } from "../MediaCard";
@@ -11,12 +10,11 @@ const mockMovie: MediaItem = {
   overview: "A thief who steals corporate secrets through the use of dream-sharing technology.",
   poster_url: "https://image.tmdb.org/t/p/w342/poster.jpg",
   release_date: "2010-07-16",
-  days_label: "Released 16 years ago",
   vote_average: 8.8,
 };
 
 describe("MediaCard", () => {
-  it("renders movie details correctly", () => {
+  it("renders movie title, metadata, and normalized availability status", () => {
     render(
       <MediaCard
         item={mockMovie}
@@ -28,45 +26,53 @@ describe("MediaCard", () => {
       />
     );
 
-    expect(screen.getByText("Inception")).not.toBeNull();
+    expect(screen.getByRole("heading", { name: "Inception" })).not.toBeNull();
     expect(screen.getByText("★ 8.8")).not.toBeNull();
-    expect(screen.getByText("Released 16 years ago")).not.toBeNull();
-    expect(screen.getByText("2010")).not.toBeNull();
+    expect(screen.getByText("Movie · 2010")).not.toBeNull();
+    expect(screen.getByText("Released")).not.toBeNull();
   });
 
-  it("calls onOpen when clicked", () => {
+  it("renders TV series season availability status", () => {
+    const tvShow: MediaItem = {
+      id: 456,
+      media_type: "tv",
+      title: "Severance",
+      release_date: "2022-02-18",
+      number_of_seasons: 4,
+      number_of_episodes: 34,
+      next_season: {
+        name: "Season 4",
+        season_number: 4,
+        air_date: "2026-09-18",
+      },
+    };
+
+    render(
+      <MediaCard
+        item={tvShow}
+        onOpen={() => {}}
+      />
+    );
+
+    expect(screen.getByRole("heading", { name: "Severance" })).not.toBeNull();
+    expect(screen.getByText("Season 4 premieres Sep 18")).not.toBeNull();
+  });
+
+  it("calls onOpen when View details primary button is clicked", () => {
     const handleOpen = vi.fn();
     render(
       <MediaCard
         item={mockMovie}
         onOpen={handleOpen}
-        isOnWatchlist={false}
       />
     );
 
-    const cardButton = screen.getByRole("button", { name: /view details for inception|open inception/i });
-    fireEvent.click(cardButton);
+    const viewButton = screen.getByRole("button", { name: "View details for Inception" });
+    fireEvent.click(viewButton);
     expect(handleOpen).toHaveBeenCalledWith(mockMovie);
   });
 
-  it("shows + Queue button when not on watchlist and triggers onAdd", () => {
-    const handleAdd = vi.fn();
-    render(
-      <MediaCard
-        item={mockMovie}
-        onOpen={() => {}}
-        onAdd={handleAdd}
-        isOnWatchlist={false}
-        isOwned={false}
-      />
-    );
-
-    const addButton = screen.getByRole("button", { name: /add inception to queue|\+ queue/i });
-    fireEvent.click(addButton);
-    expect(handleAdd).toHaveBeenCalledWith(mockMovie);
-  });
-
-  it("shows Remove button when on watchlist and triggers onRemove", () => {
+  it("opens overflow menu and triggers onRemove when Remove option is clicked", () => {
     const handleRemove = vi.fn();
     render(
       <MediaCard
@@ -74,12 +80,34 @@ describe("MediaCard", () => {
         onOpen={() => {}}
         onRemove={handleRemove}
         isOnQueue={true}
-        isOwned={false}
       />
     );
 
-    const removeButton = screen.getByRole("button", { name: /remove inception from queue|remove/i });
-    fireEvent.click(removeButton);
+    const optionsButton = screen.getByRole("button", { name: "Options for Inception" });
+    fireEvent.click(optionsButton);
+
+    const removeOption = screen.getByRole("menuitem", { name: "Remove" });
+    fireEvent.click(removeOption);
     expect(handleRemove).toHaveBeenCalledWith(mockMovie);
+  });
+
+  it("opens overflow menu and triggers onAdd when + Add to Queue option is clicked", () => {
+    const handleAdd = vi.fn();
+    render(
+      <MediaCard
+        item={mockMovie}
+        onOpen={() => {}}
+        onAdd={handleAdd}
+        isOnQueue={false}
+        isOnWatchlist={false}
+      />
+    );
+
+    const optionsButton = screen.getByRole("button", { name: "Options for Inception" });
+    fireEvent.click(optionsButton);
+
+    const addOption = screen.getByRole("menuitem", { name: "+ Add to Queue" });
+    fireEvent.click(addOption);
+    expect(handleAdd).toHaveBeenCalledWith(mockMovie);
   });
 });
