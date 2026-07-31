@@ -622,6 +622,7 @@ def test_watchlist_watch_alerts(client, app_with_mock):
     client.delete("/api/watchlist/movie/8888")
 
 
-
-
-
+def test_sw_js_cache_control_headers(client):
+    """Verify GET /sw.js returns Cache-Control: no-cache, max-age=0, must-revalidate."""
+    response = client.get("/sw.js")
+    assert response.headers.get("Cache-Control") == "no-cache, max-age=0, must-revalidate"
