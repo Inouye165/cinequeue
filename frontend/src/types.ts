@@ -128,6 +128,9 @@ export interface AgentSettings {
   notify_on_login: boolean;
   auto_add_mentioned: boolean;
   track_price_drops: boolean;
+  ai_calls_enabled?: boolean;
+  gemini_provider_enabled?: boolean;
+  gemini_api_key_configured?: boolean;
   updated_at?: string;
 }
 
@@ -309,3 +312,19 @@ export interface MediaDetails extends MediaItem {
   trailers?: Trailer[];
   cast_changes?: CastChanges | null;
 }
+
+export type YearFilterType = "any" | "exact" | "before" | "after" | "range";
+
+export interface SearchFilterState {
+  query: string;
+  actors: string[];
+  director: string;
+  yearType: YearFilterType;
+  year?: number;
+  yearBefore?: number;
+  yearAfter?: number;
+  yearFrom?: number;
+  yearTo?: number;
+  mediaType: "all" | "movie" | "tv";
+}
+

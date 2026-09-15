@@ -303,6 +303,22 @@ export function AgentModal({ isOpen, onClose, onWatchlistUpdated, initialTab = "
         <div className="agent-modal-body">
           {activeTab === "chat" ? (
             <div className="agent-chat-view">
+              {settings.ai_calls_enabled === false && (
+                <div
+                  style={{
+                    padding: "8px 12px",
+                    marginBottom: "8px",
+                    borderRadius: "8px",
+                    backgroundColor: "rgba(234, 179, 8, 0.12)",
+                    border: "1px solid rgba(234, 179, 8, 0.3)",
+                    color: "#fef08a",
+                    fontSize: "0.82rem",
+                    lineHeight: "1.4",
+                  }}
+                >
+                  ⚡ <strong>AI API Calls Disabled (Dev Mode)</strong>: External AI calls are currently paused to save API costs (<code>ENABLE_AI_CALLS=false</code>). Instant deterministic fallbacks are active.
+                </div>
+              )}
               {/* Messages Area */}
               <div className="agent-messages-container">
                 {loadingChat ? (

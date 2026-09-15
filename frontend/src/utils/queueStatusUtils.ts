@@ -203,7 +203,11 @@ export function buildQueueAvailabilityStatus(
 
   const totalEps = item.number_of_episodes || releaseInfo?.number_of_episodes;
   const totalSeasons = item.number_of_seasons || releaseInfo?.number_of_seasons;
-  const showStatus = item.status || releaseInfo?.status;
+  const showStatus =
+    (item as any).media_status ||
+    (item as any).show_status ||
+    (item.status && !["queue", "following", "library", "watched"].includes(item.status) ? item.status : null) ||
+    releaseInfo?.status;
   const premiereRaw = item.release_date;
 
   const nextEpAirDate = nextEp?.air_date;
@@ -212,10 +216,48 @@ export function buildQueueAvailabilityStatus(
 
   const isShowEnded = showStatus === "Ended" || showStatus === "Canceled";
 
+  // Find upcoming new season from next_season or seasons array
+  let upcomingSeason = nextSeason && nextSeason.air_date && !isDatePastOrToday(nextSeason.air_date, currentDate)
+    ? nextSeason
+    : null;
+
+  if (!upcomingSeason && item.seasons && item.seasons.length > 0) {
+    const futureSeasons = item.seasons
+      .filter((s) => (s.season_number ?? 0) > 0 && s.air_date && !isDatePastOrToday(s.air_date, currentDate))
+      .sort((a, b) => (a.air_date || "").localeCompare(b.air_date || ""));
+    if (futureSeasons.length > 0) {
+      const fs = futureSeasons[0];
+      upcomingSeason = {
+        name: fs.name || `Season ${fs.season_number ?? 1}`,
+        season_number: fs.season_number ?? 1,
+        air_date: fs.air_date,
+      };
+    }
+  }
+
+  // Find latest released season from next_season or seasons array
+  let latestReleasedSeason = nextSeason && nextSeason.air_date && isDatePastOrToday(nextSeason.air_date, currentDate)
+    ? nextSeason
+    : null;
+
+  if (!latestReleasedSeason && item.seasons && item.seasons.length > 0) {
+    const pastSeasons = item.seasons
+      .filter((s) => (s.season_number ?? 0) > 0 && s.air_date && isDatePastOrToday(s.air_date, currentDate))
+      .sort((a, b) => (b.season_number ?? 0) - (a.season_number ?? 0));
+    if (pastSeasons.length > 0) {
+      const ps = pastSeasons[0];
+      latestReleasedSeason = {
+        name: ps.name || `Season ${ps.season_number ?? 1}`,
+        season_number: ps.season_number ?? 1,
+        air_date: ps.air_date,
+      };
+    }
+  }
+
   // A. Next Season Known (Upcoming Season Premiere)
-  if (nextSeason && nextSeason.air_date && !isDatePastOrToday(nextSeason.air_date, currentDate)) {
-    const nsMonthDay = formatMonthDay(nextSeason.air_date);
-    const nsNum = nextSeason.season_number;
+  if (upcomingSeason && upcomingSeason.air_date) {
+    const nsMonthDay = formatMonthDay(upcomingSeason.air_date);
+    const nsNum = upcomingSeason.season_number;
 
     let secText: string | undefined = undefined;
     if (totalSeasons && totalSeasons > 1 && totalEps) {
@@ -224,15 +266,17 @@ export function buildQueueAvailabilityStatus(
       secText = `${totalSeasons - 1} seasons available`;
     } else if (totalEps) {
       secText = `${totalEps} episodes released`;
+    } else if (nsNum && nsNum > 1) {
+      secText = `${nsNum - 1} season${nsNum - 1 > 1 ? "s" : ""} available`;
     }
 
-    const primaryText = `Season ${nsNum} premieres ${nsMonthDay}`;
+    const primaryText = nsNum && nsNum > 1 ? `Season ${nsNum} premieres ${nsMonthDay}` : `Premieres ${nsMonthDay}`;
     return {
       state: "upcoming",
       primaryText,
       secondaryText: secText,
       seasonNumber: nsNum,
-      date: nextSeason.air_date,
+      date: upcomingSeason.air_date,
       accessibilityLabel: `${primaryText}.${secText ? ` ${secText}` : ""}`,
     };
   }
@@ -248,7 +292,6 @@ export function buildQueueAvailabilityStatus(
 
     if (epNum && epNum > 1) {
       availableEpCount = epNum - 1;
-      // Get current season total if available
       const currentSeasonObj = item.seasons?.find((s) => s.season_number === seasonNum);
       const currentSeasonTotal = currentSeasonObj?.episode_count;
 
@@ -278,7 +321,7 @@ export function buildQueueAvailabilityStatus(
   if (
     (showStatus === "Returning Series" || showStatus === "In Production") &&
     (!nextEp || !nextEpAirDate) &&
-    (!nextSeason || !nextSeason.air_date)
+    (!upcomingSeason || !upcomingSeason.air_date)
   ) {
     const nextSeasonNum = (totalSeasons ? totalSeasons + 1 : 2);
     const primaryText = `Season ${nextSeasonNum} confirmed`;
@@ -308,7 +351,39 @@ export function buildQueueAvailabilityStatus(
     };
   }
 
-  // E. Complete Series or Ended / Canceled Show
+  // E. Released Series or Released New Season (Same color and state as other released titles)
+  const isPremierePastOrToday = premiereRaw ? isDatePastOrToday(premiereRaw, currentDate) : false;
+  const isLatestSeasonPastOrToday = latestReleasedSeason?.air_date
+    ? isDatePastOrToday(latestReleasedSeason.air_date, currentDate)
+    : false;
+
+  if (isLatestSeasonPastOrToday || isPremierePastOrToday || isFreeStreaming) {
+    const effectiveDate = latestReleasedSeason?.air_date || premiereRaw;
+    const releaseDateText = effectiveDate ? formatFullDate(effectiveDate) : null;
+    const isMultiSeason = Boolean(latestReleasedSeason && (latestReleasedSeason.season_number ?? 1) > 1);
+
+    if (isFreeStreaming) {
+      return {
+        state: "available",
+        primaryText: "Available now",
+        secondaryText: releaseDateText ? `Released ${releaseDateText}` : "Streaming available",
+        seasonNumber: latestReleasedSeason?.season_number,
+        date: effectiveDate || undefined,
+        accessibilityLabel: `Available now. ${releaseDateText ? `Released ${releaseDateText}` : "Streaming available"}`,
+      };
+    }
+
+    return {
+      state: "available",
+      primaryText: "Released",
+      secondaryText: releaseDateText ? `Released ${releaseDateText}` : undefined,
+      seasonNumber: isMultiSeason ? latestReleasedSeason?.season_number : undefined,
+      date: effectiveDate || undefined,
+      accessibilityLabel: `Released${releaseDateText ? ` on ${releaseDateText}` : ""}`,
+    };
+  }
+
+  // F. Complete Series or Ended / Canceled Show (without known premiere date)
   if (isShowEnded || (totalEps && totalEps > 0 && !nextEp)) {
     let primaryText: string;
     if (totalEps) {
@@ -333,7 +408,7 @@ export function buildQueueAvailabilityStatus(
     };
   }
 
-  // F. Partially Aired Episodes (Last episode in past)
+  // G. Partially Aired Episodes (Last episode in past)
   if (lastEp && lastEp.episode_number) {
     const epCount = lastEp.episode_number;
     const seasonNum = lastEp.season_number || 1;
@@ -354,7 +429,7 @@ export function buildQueueAvailabilityStatus(
     };
   }
 
-  // G. Fallback Unknown
+  // H. Fallback Unknown
   return {
     state: "unknown",
     primaryText: premiereRaw ? `First Air: ${formatFullDate(premiereRaw)}` : "Release schedule unavailable",
@@ -401,10 +476,20 @@ export function sortQueueItems<T extends MediaItem>(items: T[]): T[] {
       return rankA - rankB;
     }
 
+    if (statusA.state === "available" && statusB.state === "available") {
+      const dateA = statusA.date || a.release_date || "0000-00-00";
+      const dateB = statusB.date || b.release_date || "0000-00-00";
+      const cmp = dateA.localeCompare(dateB);
+      if (cmp !== 0) return cmp;
+      return a.title.localeCompare(b.title);
+    }
+
     if (statusA.state === "upcoming" && statusB.state === "upcoming") {
       const dateA = statusA.date || a.release_date || "9999-99-99";
       const dateB = statusB.date || b.release_date || "9999-99-99";
-      return dateA.localeCompare(dateB);
+      const cmp = dateA.localeCompare(dateB);
+      if (cmp !== 0) return cmp;
+      return a.title.localeCompare(b.title);
     }
 
     return a.title.localeCompare(b.title);

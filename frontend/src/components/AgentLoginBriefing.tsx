@@ -115,13 +115,6 @@ export function AgentLoginBriefing({ onOpenChat }: AgentLoginBriefingProps) {
       const data = await api.agentBriefing(sessionId, forceRefresh);
       if (data && data.enabled && data.briefing) {
         setBriefing(data);
-
-        if (timerRef.current) clearTimeout(timerRef.current);
-        timerRef.current = setTimeout(() => {
-          if (data.briefing) {
-            speakText(data.briefing);
-          }
-        }, 1200);
       }
     } catch (err) {
       console.error("Failed to load agent briefing:", err);
@@ -144,13 +137,13 @@ export function AgentLoginBriefing({ onOpenChat }: AgentLoginBriefingProps) {
     };
   }, []);
 
-  if (loading || !briefing || !briefing.briefing || isDismissed) {
+  const count = briefing?.updates_count ?? briefing?.updates?.length ?? 0;
+  if (loading || !briefing || !briefing.briefing || count === 0 || isDismissed) {
     return null;
   }
 
   const cleanedText = cleanBriefingForDisplay(briefing.briefing);
   const { headline, supportingText } = formatSummaryLines(cleanedText, briefing.updates, briefing.updates_count);
-  const count = briefing.updates_count ?? briefing.updates?.length ?? 0;
 
   return (
     <>
@@ -215,12 +208,15 @@ export function AgentLoginBriefing({ onOpenChat }: AgentLoginBriefingProps) {
             type="button"
             className={`audio-toggle-btn ${isSpeaking ? "speaking" : ""}`}
             onClick={() => {
-              if (briefing.briefing) {
+              if (isSpeaking) {
+                if ("speechSynthesis" in window) window.speechSynthesis.cancel();
+                setIsSpeaking(false);
+              } else if (briefing.briefing) {
                 speakText(briefing.briefing);
               }
             }}
             aria-label={isSpeaking ? "Stop audio" : "Listen out loud"}
-            title="Listen out loud"
+            title={isSpeaking ? "Stop audio" : "Listen out loud"}
           >
             {isSpeaking ? "⏹️" : "🔊"}
           </button>

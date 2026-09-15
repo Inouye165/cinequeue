@@ -138,7 +138,7 @@ export function AccountSheet({
         {/* AI Agent Features */}
         {onOpenAgentModal && (
           <div className="account-section">
-            <span className="section-heading">CineQueue AI Assistant</span>
+            <span className="section-heading">CineQueue AI Assistant <span style={{ fontSize: "0.75rem", opacity: 0.7, fontWeight: "normal" }}>(AI Calls Disabled in Dev)</span></span>
             <div className="account-menu-list">
               <button
                 type="button"

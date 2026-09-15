@@ -16,6 +16,7 @@ TMDB_IMAGE_BASE = "https://image.tmdb.org/t/p"
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 GEMINI_PRIMARY_MODEL = os.getenv("GEMINI_PRIMARY_MODEL", "gemini-3.6-flash").strip()
 GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3.5-flash").strip()
+ENABLE_AI_CALLS = os.getenv("ENABLE_AI_CALLS", "false").strip().lower() == "true"
 AGENT_DEBUG = os.getenv("AGENT_DEBUG", "false").strip().lower() == "true"
 
 

@@ -58,6 +58,73 @@ class TmdbClient:
         response.raise_for_status()
         return response.json()
 
+    async def get_person_credits(self, name: str) -> list[dict[str, Any]]:
+        person = await self.search_person(name)
+        if not person or not person.get("id"):
+            return []
+        person_id = person["id"]
+        cache_key = f"credits:actor:{person_id}"
+        cached = self._get_cached(cache_key, 21600.0)
+        if cached is not None:
+            return cached
+
+        try:
+            data = await self._get(f"/person/{person_id}/combined_credits", language="en-US")
+            cast = data.get("cast", [])
+            filtered: list[dict[str, Any]] = []
+            for item in cast:
+                char = (item.get("character") or "").lower().strip()
+                media_type = item.get("media_type")
+                if media_type not in {"movie", "tv"}:
+                    continue
+                # Exclude talk show / self appearances unless high vote count
+                is_self = (
+                    char.startswith("self")
+                    or char.startswith("himself")
+                    or char.startswith("herself")
+                )
+                if not is_self or item.get("vote_count", 0) > 500:
+                    enriched = enrich_media_item(item, media_type)
+                    filtered.append(enriched)
+
+            filtered.sort(key=lambda x: x.get("popularity") or 0, reverse=True)
+            self._set_cached(cache_key, filtered)
+            return filtered
+        except Exception as e:
+            logger.warning(f"Error fetching credits for person '{name}': {e}")
+            return []
+
+    async def get_director_credits(self, name: str) -> list[dict[str, Any]]:
+        person = await self.search_person(name)
+        if not person or not person.get("id"):
+            return []
+        person_id = person["id"]
+        cache_key = f"credits:director:{person_id}"
+        cached = self._get_cached(cache_key, 21600.0)
+        if cached is not None:
+            return cached
+
+        try:
+            data = await self._get(f"/person/{person_id}/combined_credits", language="en-US")
+            crew = data.get("crew", [])
+            filtered: list[dict[str, Any]] = []
+            for item in crew:
+                job = item.get("job")
+                dept = item.get("department")
+                media_type = item.get("media_type")
+                if media_type not in {"movie", "tv"}:
+                    continue
+                if job == "Director" or dept == "Directing":
+                    enriched = enrich_media_item(item, media_type)
+                    filtered.append(enriched)
+
+            filtered.sort(key=lambda x: x.get("popularity") or 0, reverse=True)
+            self._set_cached(cache_key, filtered)
+            return filtered
+        except Exception as e:
+            logger.warning(f"Error fetching director credits for '{name}': {e}")
+            return []
+
     async def search(self, query: str) -> list[dict[str, Any]]:
         from app.decision_models import get_current_run_context
         ctx = get_current_run_context()
@@ -68,6 +135,7 @@ class TmdbClient:
                 ctx.record_external_cache_hit("tmdb_search")
             return cached
 
+        # 1. Search movies and tv by title
         movie_data = await self._get("/search/movie", query=query, region="US", language="en-US")
         tv_data = await self._get("/search/tv", query=query, region="US", language="en-US")
         results: list[dict[str, Any]] = []
@@ -75,10 +143,212 @@ class TmdbClient:
             results.append(enrich_media_item(item, "movie"))
         for item in tv_data.get("results", [])[:8]:
             results.append(enrich_media_item(item, "tv"))
+
+        # 2. If the query also matches an actor/director (e.g. "Chris Pratt"), include their filmography
+        try:
+            person = await self.search_person(query)
+            if person and (person.get("popularity", 0) > 2.0 or len(person.get("known_for", [])) > 0):
+                dept = person.get("known_for_department")
+                if dept == "Directing":
+                    person_credits = await self.get_director_credits(person.get("name") or query)
+                else:
+                    person_credits = await self.get_person_credits(person.get("name") or query)
+
+                seen_keys = {f"{item['media_type']}:{item['id']}" for item in results}
+                for item in person_credits[:12]:
+                    k = f"{item['media_type']}:{item['id']}"
+                    if k not in seen_keys:
+                        results.append(item)
+                        seen_keys.add(k)
+        except Exception as e:
+            logger.debug(f"Person search fallback check for '{query}': {e}")
+
         results.sort(key=lambda x: x.get("popularity") or 0, reverse=True)
-        res = results[:12]
+        res = results[:24]
         self._set_cached(cache_key, res)
         return res
+
+    async def search_person(self, name: str) -> dict[str, Any] | None:
+        name_clean = name.strip()
+        if not name_clean:
+            return None
+        cache_key = f"person:{name_clean.lower()}"
+        cached = self._get_cached(cache_key, 86400.0)
+        if cached is not None:
+            return cached
+
+        try:
+            data = await self._get("/search/person", query=name_clean, language="en-US")
+            results = data.get("results", [])
+            if not results:
+                return None
+            results.sort(key=lambda x: x.get("popularity") or 0, reverse=True)
+            top = results[0]
+            self._set_cached(cache_key, top)
+            return top
+        except Exception as e:
+            logger.warning(f"Error searching person '{name}': {e}")
+            return None
+
+    async def discover(
+        self,
+        *,
+        query: str | None = None,
+        actors: list[str] | None = None,
+        director: str | None = None,
+        year: int | None = None,
+        year_before: int | None = None,
+        year_after: int | None = None,
+        year_from: int | None = None,
+        year_to: int | None = None,
+        media_type: str = "all",
+    ) -> list[dict[str, Any]]:
+        from app.decision_models import get_current_run_context
+        ctx = get_current_run_context()
+
+        # Clean actor list
+        actor_names: list[str] = []
+        if actors:
+            for a in actors:
+                if isinstance(a, str):
+                    for part in a.split(","):
+                        cleaned = part.strip()
+                        if cleaned and cleaned not in actor_names:
+                            actor_names.append(cleaned)
+
+        director_clean = director.strip() if director and director.strip() else None
+
+        cache_key = f"discover:{query}:{','.join(sorted(actor_names))}:{director_clean}:{year}:{year_before}:{year_after}:{year_from}:{year_to}:{media_type}".lower()
+        cached = self._get_cached(cache_key, 21600.0)
+        if cached is not None:
+            if ctx:
+                ctx.record_external_cache_hit("tmdb_search")
+            return cached
+
+        results: list[dict[str, Any]] = []
+
+        # If actors or director are provided, use accurate person combined credits
+        if actor_names or director_clean:
+            candidate_lists: list[list[dict[str, Any]]] = []
+
+            # 1. Fetch credits for each actor
+            if actor_names:
+                for a_name in actor_names:
+                    a_credits = await self.get_person_credits(a_name)
+                    if not a_credits:
+                        return []  # Actor specified but has no matching credits
+                    candidate_lists.append(a_credits)
+
+            # 2. Fetch credits for director
+            if director_clean:
+                d_credits = await self.get_director_credits(director_clean)
+                if not d_credits:
+                    return []  # Director specified but has no matching credits
+                candidate_lists.append(d_credits)
+
+            # Intersect all candidate lists (AND logic across all actors and director)
+            if candidate_lists:
+                first_list = candidate_lists[0]
+                intersected = []
+                for item in first_list:
+                    k = f"{item['media_type']}:{item['id']}"
+                    in_all = True
+                    for other_list in candidate_lists[1:]:
+                        if not any(f"{o['media_type']}:{o['id']}" == k for o in other_list):
+                            in_all = False
+                            break
+                    if in_all:
+                        intersected.append(item)
+                results = intersected
+
+        else:
+            # When no person is specified, query TMDB discover endpoints
+            eff_year_from = year_after or year_from
+            eff_year_to = year_before or year_to
+
+            movie_params: dict[str, Any] = {
+                "sort_by": "popularity.desc",
+                "language": "en-US",
+                "include_adult": False,
+                "region": "US",
+            }
+            tv_params: dict[str, Any] = {
+                "sort_by": "popularity.desc",
+                "language": "en-US",
+                "include_adult": False,
+            }
+
+            if year:
+                movie_params["primary_release_year"] = year
+                tv_params["first_air_date_year"] = year
+
+            if eff_year_from:
+                movie_params["primary_release_date.gte"] = f"{eff_year_from}-01-01"
+                tv_params["first_air_date.gte"] = f"{eff_year_from}-01-01"
+
+            if eff_year_to:
+                movie_params["primary_release_date.lte"] = f"{eff_year_to}-12-31"
+                tv_params["first_air_date.lte"] = f"{eff_year_to}-12-31"
+
+            if media_type in {"all", "movie"}:
+                try:
+                    m_data = await self._get("/discover/movie", **movie_params)
+                    for item in m_data.get("results", [])[:20]:
+                        results.append(enrich_media_item(item, "movie"))
+                except Exception as e:
+                    logger.warning(f"Failed discover movie query: {e}")
+
+            if media_type in {"all", "tv"}:
+                try:
+                    tv_data = await self._get("/discover/tv", **tv_params)
+                    for item in tv_data.get("results", [])[:20]:
+                        results.append(enrich_media_item(item, "tv"))
+                except Exception as e:
+                    logger.warning(f"Failed discover tv query: {e}")
+
+        # Filter by media_type
+        if media_type and media_type != "all":
+            results = [r for r in results if r.get("media_type") == media_type]
+
+        # Filter by year constraints
+        eff_year_from = year_after or year_from
+        eff_year_to = year_before or year_to
+
+        if year:
+            results = [
+                r for r in results
+                if r.get("release_date") and r["release_date"][:4] == str(year)
+            ]
+
+        if eff_year_from:
+            results = [
+                r for r in results
+                if r.get("release_date") and r["release_date"][:4] >= str(eff_year_from)
+            ]
+
+        if eff_year_to:
+            results = [
+                r for r in results
+                if r.get("release_date") and r["release_date"][:4] <= str(eff_year_to)
+            ]
+
+        # Filter by query text if provided
+        if query and query.strip():
+            q_lower = query.strip().lower()
+            filtered = []
+            for item in results:
+                title = (item.get("title") or "").lower()
+                overview = (item.get("overview") or "").lower()
+                if q_lower in title or q_lower in overview:
+                    filtered.append(item)
+            results = filtered
+
+        results.sort(key=lambda x: x.get("popularity") or 0, reverse=True)
+        res = results[:24]
+        self._set_cached(cache_key, res)
+        return res
+
+
 
     async def upcoming_movies(self) -> list[dict[str, Any]]:
         cache_key = "upcoming_movies"

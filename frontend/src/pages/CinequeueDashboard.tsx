@@ -15,7 +15,15 @@ import { movieService } from "../services/movieService";
 import { syncService } from "../services/syncService";
 import { formatPosterUrl } from "../utils/mediaUtils";
 import { buildQueueAvailabilityStatus, sortQueueItems } from "../utils/queueStatusUtils";
-import type { MediaDetails, MediaItem, RatedMovie, WatchlistItem } from "../types";
+import type { MediaDetails, MediaItem, RatedMovie, SearchFilterState, WatchlistItem } from "../types";
+
+const initialSearchFilters: SearchFilterState = {
+  query: "",
+  actors: [],
+  director: "",
+  yearType: "any",
+  mediaType: "all",
+};
 
 const TABS: { id: TabType; label: string }[] = [
   { id: "watchlist", label: "My Queue" },
@@ -34,6 +42,7 @@ export function CinequeueDashboard() {
 
   const [tab, setTab] = useState<TabType>("watchlist");
   const [query, setQuery] = useState("");
+  const [searchFilters, setSearchFilters] = useState<SearchFilterState>(initialSearchFilters);
   const [remoteItems, setRemoteItems] = useState<MediaItem[]>([]);
   const [watchlist, setWatchlist] = useState<WatchlistItem[]>([]);
   const [ratedMovies, setRatedMovies] = useState<RatedMovie[]>([]);
@@ -43,6 +52,7 @@ export function CinequeueDashboard() {
   const [isBatchRateModalOpen, setIsBatchRateModalOpen] = useState(false);
   const queueKeys = useMemo(
     () => new Set(watchlist.filter((item) => !item.is_owned && (item.status === "queue" || !item.status)).map((item) => `${item.media_type}:${item.tmdb_id ?? item.id}`)),
+
     [watchlist],
   );
 
@@ -110,6 +120,75 @@ export function CinequeueDashboard() {
     }
   }, [tab, user, loadRatedMovies]);
 
+  // Auto-enrich TV series in watchlist with seasons/next_season if missing from offline storage
+  useEffect(() => {
+    if (!user || !navigator.onLine || !watchlist.length) return;
+    const tvShowsNeedingEnrichment = watchlist.filter(
+      (item) => item.media_type === "tv" && !item.next_season && (!item.seasons || item.seasons.length === 0)
+    );
+    if (!tvShowsNeedingEnrichment.length) return;
+
+    let active = true;
+    const enrichTvShows = async () => {
+      let anyEnriched = false;
+      for (const item of tvShowsNeedingEnrichment) {
+        if (!active) break;
+        const tmdbId = item.tmdb_id ?? item.id;
+        if (!tmdbId) continue;
+        try {
+          const details = await api.details("tv", tmdbId);
+          if (!active) break;
+          await movieService.saveMovie(
+            {
+              tmdbId,
+              mediaType: "tv",
+              title: item.title,
+              next_season: details.next_season,
+              seasons: details.seasons,
+              numberOfEpisodes: details.number_of_episodes,
+              numberOfSeasons: details.number_of_seasons,
+              nextEpisodeToAir: details.next_episode_to_air,
+              lastEpisodeToAir: details.last_episode_to_air,
+              showStatus: details.status,
+              releaseInfo: details.release_info,
+              theatricalAvailability: details.theatrical_release_date,
+            },
+            ownerId,
+            "patch"
+          );
+          anyEnriched = true;
+        } catch (err) {
+          console.warn(`Could not enrich TV show ${item.title}:`, err);
+        }
+      }
+      if (active && anyEnriched) {
+        await reloadFromDb();
+      }
+    };
+
+    void enrichTvShows();
+    return () => {
+      active = false;
+    };
+  }, [user, watchlist, ownerId, reloadFromDb]);
+
+
+  const handleSetQuery = (q: string) => {
+    setQuery(q);
+    setSearchFilters((prev) => ({ ...prev, query: q }));
+  };
+
+  const handleUpdateFilters = (newFilters: SearchFilterState) => {
+    setSearchFilters(newFilters);
+    if (newFilters.query !== query) {
+      setQuery(newFilters.query);
+    }
+  };
+
+  const handleResetFilters = () => {
+    setSearchFilters(initialSearchFilters);
+    setQuery("");
+  };
 
   // Handle remote data fetching when tab is a remote tab
   useEffect(() => {
@@ -132,8 +211,18 @@ export function CinequeueDashboard() {
         } else if (tab === "on-air") {
           data = await api.onAir();
         } else if (tab === "search") {
-          if (query.trim()) {
-            data = await api.search(query.trim());
+          const hasContent = Boolean(
+            query.trim() ||
+            searchFilters.actors.length > 0 ||
+            searchFilters.director.trim() ||
+            searchFilters.yearType !== "any" ||
+            searchFilters.mediaType !== "all"
+          );
+          if (hasContent) {
+            data = await api.search({
+              ...searchFilters,
+              query: query.trim(),
+            });
           } else {
             data = [];
           }
@@ -158,13 +247,21 @@ export function CinequeueDashboard() {
     return () => {
       active = false;
     };
-  }, [tab, user, query]);
+  }, [tab, user, query, searchFilters]);
 
   const handleSearch = (event: FormEvent) => {
     event.preventDefault();
-    if (!query.trim()) return;
+    const hasContent = Boolean(
+      query.trim() ||
+      searchFilters.actors.length > 0 ||
+      searchFilters.director.trim() ||
+      searchFilters.yearType !== "any" ||
+      searchFilters.mediaType !== "all"
+    );
+    if (!hasContent) return;
     setTab("search");
   };
+
 
   const openDetails = async (item: MediaItem) => {
     setError(null);
@@ -339,17 +436,33 @@ export function CinequeueDashboard() {
     watchOnSaleBuy: boolean
   ) => {
     if (!selected) return;
+    const tmdbId = "tmdb_id" in selected ? (selected as WatchlistItem).tmdb_id : selected.id;
     try {
-      await api.updateWatchlistItem(
-        selected.media_type,
-        selected.id,
-        undefined,
-        undefined,
-        undefined,
-        watchFreeStreaming,
-        watchOnSaleBuy
+      await movieService.saveMovie(
+        {
+          tmdbId,
+          mediaType: selected.media_type,
+          title: selected.title,
+          watchFreeStreaming,
+          watchOnSaleBuy,
+        },
+        ownerId
       );
       await reloadFromDb();
+
+      if (user && navigator.onLine) {
+        void api.updateWatchlistItem(
+          selected.media_type,
+          tmdbId,
+          undefined,
+          undefined,
+          undefined,
+          watchFreeStreaming,
+          watchOnSaleBuy
+        ).then(() => syncService.triggerSync(ownerId)).catch(console.error);
+      } else {
+        void syncService.triggerSync(ownerId);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not update watch options");
     }
@@ -485,10 +598,35 @@ export function CinequeueDashboard() {
     });
   }, [rawItems, queueFilter]);
 
-  const sectionTitle =
-    tab === "search"
-      ? `Results for “${query.trim()}”`
-      : TABS.find((entry) => entry.id === tab)?.label ?? "Browse";
+  const sectionTitle = useMemo(() => {
+    if (tab !== "search") {
+      return TABS.find((entry) => entry.id === tab)?.label ?? "Browse";
+    }
+    const filterParts: string[] = [];
+    if (query.trim()) filterParts.push(`“${query.trim()}”`);
+    if (searchFilters.actors.length > 0) {
+      filterParts.push(`Actor: ${searchFilters.actors.join(" & ")}`);
+    }
+    if (searchFilters.director.trim()) {
+      filterParts.push(`Director: ${searchFilters.director.trim()}`);
+    }
+    if (searchFilters.yearType === "exact" && searchFilters.year) {
+      filterParts.push(`Year ${searchFilters.year}`);
+    } else if (searchFilters.yearType === "before" && searchFilters.yearBefore) {
+      filterParts.push(`Before ${searchFilters.yearBefore}`);
+    } else if (searchFilters.yearType === "after" && searchFilters.yearAfter) {
+      filterParts.push(`After ${searchFilters.yearAfter}`);
+    } else if (searchFilters.yearType === "range" && (searchFilters.yearFrom || searchFilters.yearTo)) {
+      filterParts.push(`${searchFilters.yearFrom || "..."}–${searchFilters.yearTo || "..."}`);
+    }
+    if (searchFilters.mediaType === "movie") filterParts.push("Movies only");
+    if (searchFilters.mediaType === "tv") filterParts.push("TV shows only");
+
+    if (filterParts.length > 0) {
+      return `Results for ${filterParts.join(" • ")}`;
+    }
+    return "Search Results";
+  }, [tab, query, searchFilters]);
 
   if (!user) return null;
 
@@ -496,8 +634,11 @@ export function CinequeueDashboard() {
     <div className="app-shell">
       <SearchHeader
         query={query}
-        setQuery={setQuery}
+        setQuery={handleSetQuery}
         onSubmit={handleSearch}
+        filters={searchFilters}
+        onUpdateFilters={handleUpdateFilters}
+        onResetFilters={handleResetFilters}
         user={user}
         onLogout={logout}
         onOpenAgentModal={openAgentModal}

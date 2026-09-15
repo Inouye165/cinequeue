@@ -82,4 +82,50 @@ describe("AgentLoginBriefing Frontend Behavior & Accessibility", () => {
     expect(collapseBtn).toHaveAttribute("aria-expanded", "true");
     expect(document.getElementById("briefing-expanded-content")).toBeInTheDocument();
   });
+
+  it("does not render when updates_count is 0", async () => {
+    vi.mocked(api.agentBriefing).mockResolvedValueOnce({
+      enabled: true,
+      briefing: "No new releases on your watchlist today or since your last visit.",
+      updates_count: 0,
+      updates: [],
+      personality_preset: "cinephile",
+    } as any);
+
+    const { container } = render(<AgentLoginBriefing onOpenChat={() => {}} />);
+
+    await waitFor(() => {
+      expect(api.agentBriefing).toHaveBeenCalledTimes(1);
+    });
+
+    expect(container.querySelector(".concise-daily-update")).toBeNull();
+    expect(screen.queryByText("TODAY")).not.toBeInTheDocument();
+  });
+
+  it("does not auto-speak briefing audio on mount", async () => {
+    const speakMock = vi.fn();
+    window.speechSynthesis = {
+      speak: speakMock,
+      cancel: vi.fn(),
+      paused: false,
+      pending: false,
+      speaking: false,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+      getVoices: vi.fn().mockReturnValue([]),
+      pause: vi.fn(),
+      resume: vi.fn(),
+    } as any;
+
+    render(<AgentLoginBriefing onOpenChat={() => {}} />);
+
+    await waitFor(() => {
+      expect(api.agentBriefing).toHaveBeenCalledTimes(1);
+    });
+
+    // Advance time slightly to ensure no delayed auto-speech triggers
+    await new Promise((r) => setTimeout(r, 1500));
+    expect(speakMock).not.toHaveBeenCalled();
+  });
 });

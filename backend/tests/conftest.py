@@ -11,6 +11,7 @@ from pathlib import Path
 # Keep the default test app unauthenticated regardless of local shell or .env settings.
 os.environ["WATCHLIST_BACKEND"] = "sqlite"
 os.environ["AUTH_ENABLED"] = "false"
+os.environ["ENABLE_AI_CALLS"] = "true"
 
 # Use a temporary directory for test databases so tests don't pollute real data
 _test_data_dir = tempfile.mkdtemp(prefix="cinequeue_test_")

@@ -11,6 +11,7 @@ import httpx
 
 from app.config import (
     AGENT_DEBUG,
+    ENABLE_AI_CALLS,
     GEMINI_API_KEY,
     GEMINI_FALLBACK_MODEL,
     GEMINI_PRIMARY_MODEL,
@@ -472,102 +473,6 @@ class AiAgentService:
             return "night"
 
     @staticmethod
-    def _generate_dynamic_human_briefing(
-        settings: dict[str, Any],
-        location: str,
-        weather_json: dict[str, Any] | None,
-        briefing_items: list[dict[str, Any]],
-        time_of_day: str,
-    ) -> str:
-        greeting_prefix = "Welcome back!"
-        if briefing_items:
-            primary_item = briefing_items[0]
-            raw_title = primary_item.get("title") or primary_item.get("name") or "your watchlist"
-            norm_title = normalize_display_title(raw_title)
-
-            summary = primary_item.get("summary") or primary_item.get("verified_summary") or primary_item.get("message") or primary_item.get("fact")
-            if summary:
-                s_clean = summary.strip()
-                s_clean = re.sub(r'\[.*?\]', '', s_clean).strip()
-                s_clean = re.sub(r'[💡]*\s*MEMORY RECALL:?\s*', '', s_clean, flags=re.IGNORECASE).strip()
-
-                if raw_title:
-                    s_clean = s_clean.replace(f"'{raw_title}'", norm_title).replace(f'"{raw_title}"', norm_title)
-                    if raw_title in s_clean and raw_title != norm_title:
-                        s_clean = s_clean.replace(raw_title, norm_title)
-
-                if norm_title and norm_title.lower() not in s_clean.lower():
-                    if s_clean.lower().startswith("it is "):
-                        s_clean = f"{norm_title} is " + s_clean[6:]
-                    elif s_clean.lower().startswith("it was "):
-                        s_clean = f"{norm_title} was " + s_clean[7:]
-                    elif s_clean.lower().startswith("it "):
-                        s_clean = f"{norm_title} " + s_clean[3:]
-                    else:
-                        s_clean = f"{norm_title}: {s_clean}"
-
-                greeting = f"{greeting_prefix} {s_clean}"
-            else:
-                release_date = primary_item.get("release_date")
-                status = primary_item.get("status")
-                if release_date and status in {"released", "available"}:
-                    greeting = f"{greeting_prefix} {norm_title} was released on {release_date} and is now available."
-                elif release_date:
-                    greeting = f"{greeting_prefix} {norm_title} is scheduled for release on {release_date}."
-                elif norm_title:
-                    greeting = f"{greeting_prefix} I found an update for {norm_title}, but the full briefing is temporarily unavailable."
-                else:
-                    greeting = f"{greeting_prefix} Everything is up to date on your monitored queue today."
-        else:
-            greeting = f"{greeting_prefix} Everything is up to date on your monitored queue today."
-
-        greeting = greeting.strip()
-        greeting = re.sub(r'[,;:]+\s*\.', '.', greeting)
-        greeting = re.sub(r'\.{2,}', '.', greeting)
-        greeting = re.sub(r'\s+', ' ', greeting).strip()
-
-        if not greeting.endswith(('.', '!', '?')):
-            greeting += "."
-
-        if not validate_fallback_greeting(greeting):
-            return f"{greeting_prefix} Everything is up to date on your monitored queue today."
-        return greeting
-
-    @staticmethod
-    def _build_greeting_instruction(
-        briefing_items: list[dict[str, Any]],
-        time_of_day: str,
-        location: str,
-        weather_json: dict[str, Any] | None,
-        recent_openings: list[str] | None = None,
-        prompt_version: Any = None,
-    ) -> str:
-        items_payload = json.dumps(briefing_items, indent=2)
-        weather_str = ""
-        if weather_json and weather_json.get("significant_alert"):
-            weather_str = f"\nSignificant Weather Alert: {weather_json['significant_alert']}"
-
-        recent_str = ""
-        if recent_openings and len(recent_openings) > 0:
-            recent_str = f"\nRecent Openings (Do NOT repeat these phrasing patterns):\n" + "\n".join([f"- {o}" for o in recent_openings[-10:]])
-
-        wording_instruction = getattr(prompt_version, "wording_instruction", None) or (
-            "Create a brief, natural opening using only the supplied facts. Mention the most useful new or time-sensitive item first. "
-            "If there are no new facts, provide a warm welcome back greeting (e.g., 'Welcome back! Everything is up to date on your monitored queue today.'). "
-            "Do not output 'no message', 'nomessage', or robotic placeholders. Do not invent activity merely to fill space. "
-            "Do not repeat wording from recent greetings."
-        )
-
-        instruction = (
-            f"Selected Verified Facts:\n```json\n{items_payload}\n```\n\n"
-            f"Context Info:\n"
-            f"- Time of day: {time_of_day}\n"
-            f"- Location: {location or 'Not specified'}{weather_str}{recent_str}\n\n"
-            f"Wording Instruction:\n{wording_instruction}"
-        )
-        return instruction
-
-    @staticmethod
     def _get_time_of_day() -> str:
         import datetime
         hour = datetime.datetime.now().hour
@@ -588,102 +493,110 @@ class AiAgentService:
         briefing_items: list[dict[str, Any]],
         time_of_day: str,
     ) -> str:
-        import random
-        preset = settings.get("personality_preset", "cinephile")
-
-        if time_of_day == "morning":
-            openings = ["Good morning!", "Morning!", "Hey there, good morning!", "Happy morning!"]
-        elif time_of_day == "afternoon":
-            openings = ["Good afternoon!", "Hey there!", "Hope your day is going great!", "Afternoon!"]
-        elif time_of_day == "evening":
-            openings = ["Good evening!", "Hey there!", "Hope you had a great day!", "Evening!"]
-        else:
-            openings = ["Hey there!", "Hello!", "Welcome back!"]
-
-        opening = random.choice(openings)
-
-        weather_str = ""
-        if weather_json and weather_json.get("conditions"):
-            cond = str(weather_json["conditions"]).lower()
-            loc_str = location or "your area"
-            if "rain" in cond or "drizzle" in cond or "shower" in cond:
-                w_templates = [
-                    f"Hope you're staying warm and dry in {loc_str} with that {cond}. Perfect weather for a movie marathon! ",
-                    f"Looks like some {cond} in {loc_str} today—cozy streaming weather! ",
-                    f"Stay dry out there in {loc_str}! Perfect day to kick back with a show. ",
-                ]
-            elif "clear" in cond or "sun" in cond:
-                w_templates = [
-                    f"Looks like a nice sunny day in {loc_str}! ",
-                    f"Hope you're enjoying the clear skies in {loc_str} today. ",
-                ]
-            elif "cloud" in cond or "overcast" in cond:
-                w_templates = [
-                    f"Overcast and cloudy in {loc_str} today—prime movie-watching climate! ",
-                    f"Nice calm cloudy day in {loc_str}. ",
-                ]
-            else:
-                w_templates = [
-                    f"It's currently {cond} in {loc_str}. ",
-                    f"Hope all is well out in {loc_str}! ",
-                ]
-            weather_str = random.choice(w_templates)
-
+        """Generate a concise, direct release notice for watchlist items released today or since last login."""
         if not briefing_items:
-            if preset == "noir":
-                status_options = [
-                    "Quiet on the streets today—no new alerts in your files. Let me know if you want me to track a new lead.",
-                    "The desk is clear today, kid. No urgent changes on your queue. What are we investigating next?",
-                ]
-            elif preset == "scifi":
-                status_options = [
-                    "All signals are stable across your monitored archive. Ready when you want to run a title query or quiz.",
-                    "Queue telemetry is calm today with no new release alerts. What's on your viewing roster tonight?",
-                ]
-            elif preset == "sarcastic":
-                status_options = [
-                    "Your queue is peacefully quiet today—no drama, no price drops yet. Hit me up if you need a fresh movie pick!",
-                    "Nothing urgent popping up on your watchlist right now. Let me know if you want to quiz your movie knowledge!",
-                ]
-            else: # cinephile
-                status_options = [
-                    "Your queue is looking smooth and quiet today with no urgent release alerts! Let me know if you're in the mood for a movie pick or want to try a quiz.",
-                    "All caught up on your watchlist for now! Feel free to ask for a streaming recommendation whenever you're ready.",
-                    "No big updates on your queue today, which means it's a great time to browse or pick something from your library. What are you in the mood for?",
-                    "Everything is up to date on your watchlist! Ask me to quiz you on 5 movies or recommend something great to watch tonight.",
-                ]
-            status_str = random.choice(status_options)
-            return f"{opening} {weather_str}{status_str}"
-        else:
-            bullet_lines = []
-            for it in briefing_items:
-                raw_title = it.get("title") or it.get("name")
-                norm_title = normalize_display_title(raw_title) if raw_title else ""
-                msg = it.get("summary") or it.get("message") or it.get("headline") or it.get("title") or ""
-                if msg:
-                    msg = msg.strip()
-                    if raw_title and norm_title:
-                        msg = msg.replace(f"'{raw_title}'", norm_title).replace(f'"{raw_title}"', norm_title)
-                        if raw_title in msg and raw_title != norm_title:
-                            msg = msg.replace(raw_title, norm_title)
-                    if norm_title and norm_title.lower() not in msg.lower():
-                        if msg.lower().startswith("it is "):
-                            msg = f"{norm_title} is " + msg[6:]
-                        elif msg.lower().startswith("it was "):
-                            msg = f"{norm_title} was " + msg[7:]
-                        elif msg.lower().startswith("it "):
-                            msg = f"{norm_title} " + msg[3:]
-                        else:
-                            msg = f"{norm_title}: {msg}"
-                bullet_lines.append(f"• {msg}")
-            bullets_str = "\n".join(bullet_lines)
-            intro_options = [
-                "Here are the latest updates for your monitored shows:",
-                "Got a few exciting updates on your queue today:",
-                "Here's what's happening with your watchlist:",
-            ]
-            intro = random.choice(intro_options)
-            return f"{opening} {weather_str}{intro}\n{bullets_str}"
+            return "No new releases on your watchlist today or since your last visit."
+
+        if len(briefing_items) == 1:
+            primary_item = briefing_items[0]
+            raw_title = primary_item.get("title") or primary_item.get("name") or "your title"
+            norm_title = normalize_display_title(raw_title)
+            summary = primary_item.get("summary") or primary_item.get("verified_summary") or primary_item.get("message")
+            if summary:
+                s_clean = summary.strip()
+                s_clean = re.sub(r'\[.*?\]', '', s_clean).strip()
+                s_clean = re.sub(r'[💡]*\s*MEMORY RECALL:?\s*', '', s_clean, flags=re.IGNORECASE).strip()
+                if raw_title and norm_title:
+                    s_clean = s_clean.replace(f"'{raw_title}'", norm_title).replace(f'"{raw_title}"', norm_title)
+                    if raw_title in s_clean and raw_title != norm_title:
+                        s_clean = s_clean.replace(raw_title, norm_title)
+
+                if norm_title and norm_title.lower() not in s_clean.lower():
+                    if s_clean.lower().startswith("it is "):
+                        s_clean = f"{norm_title} is " + s_clean[6:]
+                    elif s_clean.lower().startswith("it was "):
+                        s_clean = f"{norm_title} was " + s_clean[7:]
+                    elif s_clean.lower().startswith("it "):
+                        s_clean = f"{norm_title} " + s_clean[3:]
+                    else:
+                        s_clean = f"{norm_title}: {s_clean}"
+                msg = s_clean
+            else:
+                release_date = primary_item.get("release_date")
+                status = primary_item.get("status")
+                if release_date and status in {"released", "available"}:
+                    msg = f"{norm_title} was released on {release_date} and is now available."
+                elif release_date:
+                    msg = f"{norm_title} was released on {release_date}."
+                else:
+                    msg = f"{norm_title} is now available on your watchlist."
+
+            msg = msg.strip()
+            msg = re.sub(r'[,;:]+\s*\.', '.', msg)
+            msg = re.sub(r'\.{2,}', '.', msg)
+            msg = re.sub(r'\s+', ' ', msg).strip()
+            if not msg.endswith(('.', '!', '?')):
+                msg += "."
+            return msg
+
+        bullet_lines = []
+        for it in briefing_items:
+            raw_title = it.get("title") or it.get("name")
+            norm_title = normalize_display_title(raw_title) if raw_title else ""
+            msg = it.get("summary") or it.get("message") or it.get("headline") or it.get("title") or ""
+            if msg:
+                msg = msg.strip()
+                if raw_title and norm_title:
+                    msg = msg.replace(f"'{raw_title}'", norm_title).replace(f'"{raw_title}"', norm_title)
+                    if raw_title in msg and raw_title != norm_title:
+                        msg = msg.replace(raw_title, norm_title)
+                if norm_title and norm_title.lower() not in msg.lower():
+                    if msg.lower().startswith("it is "):
+                        msg = f"{norm_title} is " + msg[6:]
+                    elif msg.lower().startswith("it was "):
+                        msg = f"{norm_title} was " + msg[7:]
+                    elif msg.lower().startswith("it "):
+                        msg = f"{norm_title} " + msg[3:]
+                    else:
+                        msg = f"{norm_title}: {msg}"
+            bullet_lines.append(f"• {msg}")
+        bullets_str = "\n".join(bullet_lines)
+        return f"Recent releases on your watchlist:\n{bullets_str}"
+
+    @staticmethod
+    def _build_greeting_instruction(
+        briefing_items: list[dict[str, Any]],
+        time_of_day: str,
+        location: str,
+        weather_json: dict[str, Any] | None,
+        recent_openings: list[str] | None = None,
+        prompt_version: Any = None,
+    ) -> str:
+        items_payload = json.dumps(briefing_items, indent=2)
+        weather_str = ""
+        if weather_json and weather_json.get("significant_alert"):
+            weather_str = f"\nSignificant Weather Alert: {weather_json['significant_alert']}"
+
+        recent_str = ""
+        if recent_openings and len(recent_openings) > 0:
+            recent_str = f"\nRecent Openings (Do NOT repeat these phrasing patterns):\n" + "\n".join([f"- {o}" for o in recent_openings[-10:]])
+
+        wording_instruction = getattr(prompt_version, "wording_instruction", None) or (
+            "Create a brief, natural opening using only the supplied facts. "
+            "Provide a concise, direct release notice for the user's watchlist titles released today or since their last login. "
+            "Do not include conversational greetings ('Good morning', 'Hello', 'Welcome back'), weather commentary, trivia, or filler small talk. "
+            "If there are no qualifying release facts in the list, return: 'No new releases on your watchlist today or since your last visit.' "
+            "Do not invent activity, titles, or dates."
+        )
+
+        instruction = (
+            f"Selected Verified Facts:\n```json\n{items_payload}\n```\n\n"
+            f"Context Info:\n"
+            f"- Time of day: {time_of_day}\n"
+            f"- Location: {location or 'Not specified'}{weather_str}{recent_str}\n\n"
+            f"Wording Instruction:\n{wording_instruction}"
+        )
+        return instruction
 
     @staticmethod
     async def _format_structured_llm_briefing(
@@ -1767,15 +1680,16 @@ class AiAgentService:
             system_instruction, recent_history, user_message, context_notes
         )
 
-        if not GEMINI_API_KEY:
+        if not ENABLE_AI_CALLS or not GEMINI_API_KEY:
+            reason = "ai_calls_disabled" if not ENABLE_AI_CALLS else "api_key_missing"
             est_p_tokens = max(1, total_prompt_chars // 4) if total_prompt_chars else 0
             est_cost = calculate_estimated_cost(GEMINI_PRIMARY_MODEL, est_p_tokens, 0)
             logger.info(
-                f"[AI CALL TELEMETRY] Caller: '{caller}' | GEMINI_API_KEY missing. Fallback triggered.",
+                f"[AI CALL TELEMETRY] Caller: '{caller}' | AI API calls disabled or GEMINI_API_KEY missing ({reason}). Fallback triggered.",
                 extra=sanitize_log_data({
                     "provider": "fallback",
                     "caller": caller,
-                    "fallback_reason": "api_key_missing",
+                    "fallback_reason": reason,
                     "prompt_char_count": total_prompt_chars,
                     "prompt_token_count": est_p_tokens,
                     "prompt_breakdown": prompt_breakdown,
@@ -1788,7 +1702,7 @@ class AiAgentService:
                 model_used=None,
                 gemini_called=False,
                 fallback_used=True,
-                fallback_reason="api_key_missing",
+                fallback_reason=reason,
                 http_status=None,
                 request_duration_ms=None,
                 actions_taken=[],
@@ -1799,7 +1713,7 @@ class AiAgentService:
                 response_token_count=0,
                 total_token_count=est_p_tokens,
                 estimated_cost_usd=est_cost,
-                finish_reason="API_KEY_MISSING",
+                finish_reason="AI_CALLS_DISABLED" if not ENABLE_AI_CALLS else "API_KEY_MISSING",
                 usage_metadata={},
                 prompt_breakdown=prompt_breakdown,
             )

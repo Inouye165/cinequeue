@@ -363,7 +363,33 @@ export const api = {
 
 
   // Watchlist & movies endpoints
-  search: (q: string) => request<MediaItem[]>(`/api/search?q=${encodeURIComponent(q)}`),
+  search: (params: string | import("./types").SearchFilterState) => {
+    if (typeof params === "string") {
+      return request<MediaItem[]>(`/api/search?q=${encodeURIComponent(params)}`);
+    }
+    const searchParams = new URLSearchParams();
+    if (params.query?.trim()) searchParams.set("q", params.query.trim());
+    if (params.director?.trim()) searchParams.set("director", params.director.trim());
+    if (params.actors && params.actors.length > 0) {
+      params.actors.forEach((actor) => {
+        if (actor.trim()) searchParams.append("actor", actor.trim());
+      });
+    }
+    if (params.yearType === "exact" && params.year) {
+      searchParams.set("year", String(params.year));
+    } else if (params.yearType === "before" && params.yearBefore) {
+      searchParams.set("year_before", String(params.yearBefore));
+    } else if (params.yearType === "after" && params.yearAfter) {
+      searchParams.set("year_after", String(params.yearAfter));
+    } else if (params.yearType === "range") {
+      if (params.yearFrom) searchParams.set("year_from", String(params.yearFrom));
+      if (params.yearTo) searchParams.set("year_to", String(params.yearTo));
+    }
+    if (params.mediaType && params.mediaType !== "all") {
+      searchParams.set("media_type", params.mediaType);
+    }
+    return request<MediaItem[]>(`/api/search?${searchParams.toString()}`);
+  },
   upcoming: () => request<MediaItem[]>("/api/upcoming"),
   nowPlaying: () => request<MediaItem[]>("/api/now-playing"),
   trending: () => request<MediaItem[]>("/api/trending"),

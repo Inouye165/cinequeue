@@ -82,18 +82,18 @@ async def test_agent_multi_update_briefing_and_categories(repo):
     from datetime import date, timedelta
     user_id = "test_user_multi_briefing"
     today = date.today()
-    in_1_day = (today + timedelta(days=1)).isoformat()
+    today_str = today.isoformat()
+    ago_1_day = (today - timedelta(days=1)).isoformat()
     ago_2_days = (today - timedelta(days=2)).isoformat()
-    in_10_days = (today + timedelta(days=10)).isoformat()
 
-    # 1. Imminent release (1 day away)
+    # 1. Released today
     repo.add_item(
         user_id=user_id,
         media_type="movie",
         tmdb_id=101,
         title="Imminent Blockbuster",
         poster_path=None,
-        release_date=in_1_day,
+        release_date=today_str,
         status="following",
     )
 
@@ -108,14 +108,14 @@ async def test_agent_multi_update_briefing_and_categories(repo):
         status="following",
     )
 
-    # 3. Upcoming within 2 weeks (10 days away)
+    # 3. Released yesterday
     repo.add_item(
         user_id=user_id,
         media_type="movie",
         tmdb_id=103,
         title="Future Sci-Fi Epic",
         poster_path=None,
-        release_date=in_10_days,
+        release_date=ago_1_day,
         status="following",
     )
 
@@ -241,7 +241,7 @@ async def test_persistent_query_memory_briefing_recall(repo):
     # User asked about "What Dreams May Come" 20 days ago
     repo.add_query_memory(user_id, "any update on What Dreams May Come", title="What Dreams May Come")
 
-    # Mock tmdb search to return release date in 2 days
+    # Mock tmdb search to return release date in 2 days (unreleased future title)
     class DummyTmdb:
         async def get_details(self, media_type, tmdb_id):
             return {"release_date": in_2_days}
@@ -250,8 +250,8 @@ async def test_persistent_query_memory_briefing_recall(repo):
 
     briefing = await AiAgentService.evaluate_monitored_updates(user_id, repo, DummyTmdb())
     assert briefing["enabled"] is True
-    messages = [u["message"] for u in briefing["updates"]]
-    assert any("MEMORY RECALL" in msg and "What Dreams May Come" in msg for msg in messages)
+    # Future unreleased titles are excluded from the login briefing
+    assert briefing["updates_count"] == 0
 
 
 def test_extract_rating_and_delete_actions():

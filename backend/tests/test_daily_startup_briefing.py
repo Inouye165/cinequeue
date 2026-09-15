@@ -150,9 +150,11 @@ async def test_3_different_session_same_day(repo):
 @pytest.mark.asyncio
 async def test_4_failed_gemini_generation_saves_and_reuses_local_fallback(repo):
     """Test 4: Failed Gemini generation generates local fallback, saves as completed, and reuses same day."""
+    from datetime import date
     user_id = "user_test_4"
     repo.save_agent_settings(user_id, {"notify_on_login": True, "timezone": "America/Los_Angeles"})
-    repo.add_item(user_id, "movie", 104, "the odyssey,", "/odyssey.jpg", release_date="2026-07-17", status="queue")
+    rel_date = date.today().isoformat()
+    repo.add_item(user_id, "movie", 104, "the odyssey,", "/odyssey.jpg", release_date=rel_date, status="queue")
 
     failed_res = AgentResult(
         text="",

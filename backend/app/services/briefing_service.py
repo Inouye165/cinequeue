@@ -125,7 +125,7 @@ class BriefingService:
                 status = cached_daily.get("status", "completed")
                 b_text = cached_daily.get("briefing") or cached_daily.get("briefing_text") or ""
 
-                if status == "completed" and validate_fallback_greeting(b_text):
+                if status == "completed" and (validate_fallback_greeting(b_text) or b_text == ""):
                     logger.info(f"[Briefing] Persistent daily cache HIT for user={user_id}, key={stable_cache_key}")
                     run_ctx.daily_cache_result = "hit"
                     run_ctx.add_timeline_event(
@@ -308,7 +308,9 @@ class BriefingService:
             weather_service = WeatherService()
             weather_data = await weather_service.get_weather_data(location) if location else None
 
-            # Step 6: Refresh release & streaming availability information
+            # Step 6: Refresh release information strictly for movies/shows released on the current date or since last login
+            prev_login_date = previous_login_at[:10] if previous_login_at else None
+
             for item in monitored:
                 media_type = item.get("media_type", "movie")
                 tmdb_id = item.get("tmdb_id")
@@ -335,17 +337,38 @@ class BriefingService:
                     from app.models import days_until
                     days_away = days_until(air_date)
 
-                if days_away is not None:
+                if air_date:
                     season_str = f" Season {next_season_num}" if next_season_num else ""
+                    key = generate_item_key("newly_available", title_id, air_date or "available")
 
-                    if -14 <= days_away <= 0:
-                        ago_days = abs(days_away)
-                        date_desc = "TODAY" if ago_days == 0 else f"{ago_days} day{'s' if ago_days != 1 else ''} ago"
-                        msg = f"'{title}'{season_str} became available ({date_desc} on {air_date})."
-                        key = generate_item_key("newly_available", title_id, air_date or "available")
-                        if key in presented_keys:
-                            already_presented_count += 1
-                        else:
+                    if key in presented_keys:
+                        already_presented_count += 1
+                    else:
+                        is_release_candidate = False
+                        date_desc = ""
+
+                        # Check 1: Released on current date (today)
+                        if air_date == local_date_str or days_away == 0:
+                            is_release_candidate = True
+                            date_desc = "today"
+                        # Check 2: Released since previous login (up to local_date_str)
+                        elif prev_login_date and prev_login_date <= air_date <= local_date_str:
+                            is_release_candidate = True
+                            date_desc = f"since your last visit on {prev_login_date}"
+                        # Check 3: Released recently (e.g. within past 14 days) and not yet presented
+                        elif days_away is not None and -14 <= days_away <= 0:
+                            is_release_candidate = True
+                            ago_days = abs(days_away)
+                            date_desc = "today" if ago_days == 0 else ("yesterday" if ago_days == 1 else f"{ago_days} days ago")
+
+                        if is_release_candidate:
+                            if date_desc == "today":
+                                msg = f"'{title}'{season_str} was released today ({air_date})."
+                            elif date_desc == "yesterday":
+                                msg = f"'{title}'{season_str} was released yesterday ({air_date})."
+                            else:
+                                msg = f"'{title}'{season_str} was released on {air_date} ({date_desc})."
+
                             candidate_items.append({
                                 "item_key": key,
                                 "story_cluster_id": key,
@@ -355,329 +378,36 @@ class BriefingService:
                                 "title": title,
                                 "title_id": title_id,
                                 "available_date": air_date,
-                                "message": msg,
-                                "summary": msg,
-                                "content_fingerprint": compute_content_fingerprint(msg),
-                                "published_at": air_date or now_iso,
-                            })
-                    elif 1 <= days_away <= 3:
-                        day_desc = "tomorrow" if days_away == 1 else f"in {days_away} days"
-                        msg = f"'{title}'{season_str} arrives {day_desc} ({air_date})."
-                        key = generate_item_key("imminent_release", title_id, air_date or "imminent")
-                        if key in presented_keys:
-                            already_presented_count += 1
-                        else:
-                            candidate_items.append({
-                                "item_key": key,
-                                "story_cluster_id": key,
-                                "type": "imminent_release",
-                                "category": "imminent_release",
-                                "urgency": 2,
-                                "title": title,
-                                "title_id": title_id,
                                 "release_date": air_date,
-                                "days_away": days_away,
                                 "message": msg,
                                 "summary": msg,
                                 "content_fingerprint": compute_content_fingerprint(msg),
                                 "published_at": air_date or now_iso,
                             })
-                    elif 4 <= days_away <= 14:
-                        msg = f"'{title}'{season_str} releases in {days_away} days ({air_date})."
-                        key = generate_item_key("upcoming_release", title_id, air_date or "upcoming")
-                        if key in presented_keys:
-                            already_presented_count += 1
-                        else:
-                            candidate_items.append({
-                                "item_key": key,
-                                "story_cluster_id": key,
-                                "type": "upcoming_release",
-                                "category": "upcoming_release",
-                                "urgency": 4,
-                                "title": title,
-                                "title_id": title_id,
-                                "release_date": air_date,
-                                "days_away": days_away,
-                                "message": msg,
-                                "summary": msg,
-                                "content_fingerprint": compute_content_fingerprint(msg),
-                                "published_at": air_date or now_iso,
-                            })
-
-                # Target Rental Price & Free Streaming Check
-                target_price = item.get("target_rental_price")
-                if tmdb and tmdb_id:
-                    try:
-                        providers = await tmdb.get_watch_providers(media_type, tmdb_id)
-                        rent_list = providers.get("categories", {}).get("rent", [])
-                        buy_list = providers.get("categories", {}).get("buy", [])
-                        prices = []
-                        for r in rent_list + buy_list:
-                            curr = r.get("current_price") or r.get("price")
-                            if curr:
-                                try:
-                                    prices.append(float(str(curr).replace("$", "")))
-                                except ValueError:
-                                    pass
-
-                        if target_price is not None and prices and min(prices) <= target_price:
-                            min_price = min(prices)
-                            msg = f"'{title}' is now available to rent for ${min_price:.2f} (target was ${target_price:.2f})."
-                            key = generate_item_key("price_drop", title_id, f"{min_price:.2f}")
-                            if key in presented_keys:
-                                already_presented_count += 1
-                            else:
-                                candidate_items.append({
-                                    "item_key": key,
-                                    "story_cluster_id": key,
-                                    "type": "price_drop",
-                                    "category": "price_drop",
-                                    "urgency": 2,
-                                    "title": title,
-                                    "title_id": title_id,
-                                    "price": min_price,
-                                    "message": msg,
-                                    "summary": msg,
-                                    "content_fingerprint": compute_content_fingerprint(msg),
-                                    "published_at": now_iso,
-                                })
-                        elif providers.get("is_free_streaming") and (item.get("watch_free_streaming") or target_price is not None):
-                            msg = f"'{title}' is now streaming for free on included platforms."
-                            key = generate_item_key("free_streaming", title_id, "free")
-                            if key in presented_keys:
-                                already_presented_count += 1
-                            else:
-                                candidate_items.append({
-                                    "item_key": key,
-                                    "story_cluster_id": key,
-                                    "type": "free_streaming",
-                                    "category": "free_streaming",
-                                    "urgency": 2,
-                                    "title": title,
-                                    "title_id": title_id,
-                                    "message": msg,
-                                    "summary": msg,
-                                    "content_fingerprint": compute_content_fingerprint(msg),
-                                    "published_at": now_iso,
-                                })
-                    except Exception as e:
-                        logger.warning(f"Error checking watch providers for {title}: {e}")
-
-            # Step 7 & 8: Fetch, normalize & validate entertainment news
-            raw_news_articles = []
-            if tmdb and monitored:
-                news_provider = TmdbEntertainmentNewsProvider(tmdb)
-                for item in monitored[:5]:
-                    t_title = item.get("title")
-                    media_type = item.get("media_type", "movie")
-                    tmdb_id = item.get("tmdb_id")
-                    title_id = f"{media_type}_{tmdb_id}"
-                    if t_title:
-                        arts = await news_provider.fetch_news_for_title(t_title, title_id)
-                        raw_news_articles.extend(arts)
-
-            # Step 9: Cluster duplicate news stories
-            clustered_news = cluster_news_stories(raw_news_articles)
-            for cluster in clustered_news:
-                candidate_items.append({
-                    "item_key": cluster["story_cluster_id"],
-                    "story_cluster_id": cluster["story_cluster_id"],
-                    "type": "entertainment_news",
-                    "category": cluster["category"],
-                    "urgency": 3,
-                    "title": cluster["related_title"],
-                    "title_id": cluster["title_id"],
-                    "headline": cluster["headline"],
-                    "source": cluster["source"],
-                    "url": cluster["url"],
-                    "verification": cluster["verification"],
-                    "message": f"[{cluster['verification'].upper()}] {cluster['source']}: {cluster['headline']}",
-                    "summary": cluster["summary"],
-                    "content_fingerprint": cluster["content_fingerprint"],
-                    "published_at": cluster["published_at"],
-                })
-
-            # Query memory recall
-            try:
-                memories = repo.list_query_memories(user_id, limit=30)
-                monitored_titles_set = {m.get("title", "").lower() for m in monitored}
-                for mem in memories:
-                    m_title = mem.get("title") or mem.get("query_text")
-                    if not m_title or m_title.lower() in monitored_titles_set:
-                        continue
-                    m_tmdb_id = mem.get("tmdb_id")
-                    m_media = mem.get("media_type") or "movie"
-                    m_rel_date = None
-                    if tmdb and m_tmdb_id:
-                        try:
-                            det = await tmdb.get_details(m_media, m_tmdb_id)
-                            m_rel_date = det.get("release_date")
-                        except Exception:
-                            pass
-                    elif tmdb and m_title:
-                        try:
-                            search_res = await tmdb.search(m_title)
-                            if search_res:
-                                m_rel_date = search_res[0].get("release_date")
-                        except Exception:
-                            pass
-
-                    if m_rel_date:
-                        from app.models import days_until
-                        m_days = days_until(m_rel_date)
-                        asked_at_str = mem.get("asked_at", "")[:10]
-                        if m_days is not None and -14 <= m_days <= 14:
-                            msg = f"💡 MEMORY RECALL: You asked about '{m_title}' on {asked_at_str}. It is releasing/available ({m_rel_date})."
-                            key = generate_item_key("memory_recall", f"mem_{m_media}_{m_title}", m_rel_date)
-                            candidate_items.append({
-                                "item_key": key,
-                                "story_cluster_id": key,
-                                "type": "memory_recall",
-                                "category": "memory_recall",
-                                "urgency": 2,
-                                "title": m_title,
-                                "title_id": f"mem_{m_title}",
-                                "message": msg,
-                                "summary": msg,
-                                "content_fingerprint": compute_content_fingerprint(msg),
-                                "published_at": now_iso,
-                            })
-            except Exception as e:
-                logger.warning(f"Error evaluating query memories for briefing: {e}")
 
             total_candidates = len(candidate_items)
 
-            # Build Decision Engine Candidates
+            # Build Decision Engine Candidates - strictly monitored releases
             from app.decision_models import Candidate, CandidateType, DecisionConfig, PromptVersion
-            from app.services.decision_engine import DecisionEngine, PersonalInterestScorer
+            from app.services.decision_engine import DecisionEngine
 
             engine_candidates: list[Candidate] = []
-
-            # 1. Weather Alert Candidate (Severe Weather Warning)
-            if weather_data and weather_data.significant_alert:
-                alert_text = weather_data.significant_alert
-                engine_candidates.append(Candidate(
-                    candidate_id=f"weather_alert:{hash(alert_text)}",
-                    type=CandidateType.WEATHER_ALERT.value,
-                    title="Severe Weather Warning",
-                    summary=alert_text,
-                    source="weather_service",
-                    required=True,
-                    importance_score=0.95,
-                    interest_score=0.90,
-                    confidence_score=0.99,
-                    interest_reasons=["Severe local weather warning requires immediate user notice"],
-                ))
-
-            # 2. Monitored Items Candidates
             for cand in candidate_items:
-                c_type = cand.get("type", "monitored_update")
                 c_title = cand.get("title", "Monitored Item")
                 c_summary = cand.get("summary") or cand.get("message", "")
                 c_key = cand.get("item_key", f"monitored_{hash(c_title)}")
-
-                if c_type in {"newly_available", "imminent_release", "releasing_today", "releasing_tomorrow", "released_recently", "upcoming_release", "price_drop", "free_streaming", "memory_recall"}:
-                    cand_type = (
-                        CandidateType.MONITORED_TITLE_RELEASE.value
-                        if any(k in c_type for k in ["release", "today", "tomorrow", "recently"])
-                        else (CandidateType.PRICE_DROP.value if c_type == "price_drop" else CandidateType.MONITORED_TITLE_URGENT_UPDATE.value)
-                    )
-                    engine_candidates.append(Candidate(
-                        candidate_id=c_key,
-                        type=cand_type,
-                        title=c_title,
-                        summary=c_summary,
-                        source="watchlist_data",
-                        required=True,
-                        importance_score=0.90,
-                        interest_score=0.95,
-                        confidence_score=0.98,
-                        interest_reasons=[f"Monitored item in user's queue ({c_type})"],
-                    ))
-                elif c_type == "entertainment_news":
-                    score_val, reasons = PersonalInterestScorer.calculate_interest(user_id, c_title, repo)
-                    engine_candidates.append(Candidate(
-                        candidate_id=c_key,
-                        type=CandidateType.MONITORED_TITLE_URGENT_UPDATE.value,
-                        title=c_title,
-                        summary=c_summary,
-                        source="news_and_watchlist",
-                        required=False,
-                        importance_score=0.70,
-                        interest_score=max(0.75, score_val),
-                        confidence_score=0.90,
-                        interest_reasons=reasons,
-                    ))
-
-            # 3. Ordinary Weather Viewing Connection Candidate (if rain/snow & streaming arrival exists)
-            if weather_data and weather_data.conditions and any(w in weather_data.conditions.lower() for w in ["rain", "storm", "snow", "shower"]):
-                streaming_cands = [c for c in engine_candidates if c.type in {CandidateType.STREAMING_ARRIVAL.value, CandidateType.MONITORED_TITLE_RELEASE.value}]
-                if streaming_cands:
-                    top_stream = streaming_cands[0]
-                    engine_candidates.append(Candidate(
-                        candidate_id=f"weather_conn:{top_stream.candidate_id}",
-                        type=CandidateType.WEATHER_VIEWING_CONNECTION.value,
-                        title=top_stream.title,
-                        summary=f"It is currently {weather_data.conditions.lower()} in {location or 'your area'}, and '{top_stream.title}' became available to watch.",
-                        source="weather_and_provider_data",
-                        required=False,
-                        importance_score=0.65,
-                        interest_score=0.85,
-                        confidence_score=0.95,
-                        interest_reasons=[f"Rain/snow outside pairs naturally with streaming release of '{top_stream.title}'"],
-                    ))
-
-            # 4. Verified Trivia Candidates
-            try:
-                rated_list = repo.list_rated_movies(user_id)
-                if rated_list:
-                    top_rated = rated_list[0]
-                    t_facts = repo.list_verified_trivia(title=top_rated["title"], tmdb_id=top_rated["tmdb_id"])
-                    if not t_facts:
-                        # Provide approved sample trivia
-                        t_facts = [{
-                            "fact_id": f"trivia_{top_rated['tmdb_id']}_1",
-                            "title": top_rated["title"],
-                            "tmdb_id": top_rated["tmdb_id"],
-                            "fact_text": f"Random movie fact: much of {top_rated['title']} was praised for iconic location filming.",
-                            "source": "verified_archive",
-                        }]
-                    for tf in t_facts:
-                        t_score, t_reasons = PersonalInterestScorer.calculate_interest(user_id, tf["title"], repo, tmdb_id=tf.get("tmdb_id"))
-                        engine_candidates.append(Candidate(
-                            candidate_id=tf["fact_id"],
-                            type=CandidateType.PERSONALIZED_TRIVIA.value,
-                            title=tf["title"],
-                            summary=tf["fact_text"],
-                            source=tf.get("source", "verified_archive"),
-                            required=False,
-                            importance_score=0.50,
-                            interest_score=max(0.75, t_score),
-                            confidence_score=0.95,
-                            interest_reasons=t_reasons,
-                        ))
-            except Exception as e:
-                logger.warning(f"Error gathering trivia candidates: {e}")
-
-            # 5. Major External Entertainment News Candidates
-            try:
-                major_news = repo.list_major_news()
-                for mn in major_news:
-                    n_score, n_reasons = PersonalInterestScorer.calculate_interest(user_id, mn["title"], repo)
-                    engine_candidates.append(Candidate(
-                        candidate_id=mn["story_id"],
-                        type=CandidateType.MAJOR_EXTERNAL_ENTERTAINMENT_NEWS.value,
-                        title=mn["title"],
-                        summary=mn["summary"],
-                        source=mn.get("source", "official_media"),
-                        required=False,
-                        importance_score=0.75,
-                        interest_score=max(0.75, n_score),
-                        confidence_score=0.90,
-                        interest_reasons=n_reasons,
-                    ))
-            except Exception as e:
-                logger.warning(f"Error gathering external news candidates: {e}")
+                engine_candidates.append(Candidate(
+                    candidate_id=c_key,
+                    type=CandidateType.MONITORED_TITLE_RELEASE.value,
+                    title=c_title,
+                    summary=c_summary,
+                    source="watchlist_data",
+                    required=True,
+                    importance_score=0.95,
+                    interest_score=0.95,
+                    confidence_score=0.98,
+                    interest_reasons=["Monitored item released today or since last login"],
+                ))
 
             # Run Decision Engine
             decision_config = DecisionConfig(**repo.get_active_decision_config())
