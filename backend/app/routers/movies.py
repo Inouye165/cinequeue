@@ -13,15 +13,67 @@ router = APIRouter(prefix="/api", tags=["movies"], dependencies=[Depends(get_cur
 
 
 @router.get("/search")
-async def search(request: Request, q: str = Query(min_length=1)) -> list[dict[str, Any]]:
-    logger.info(f"Search request for query: {q}")
+async def search(
+    request: Request,
+    q: str | None = Query(None, min_length=1),
+    actor: list[str] | None = Query(None),
+    actors: list[str] | None = Query(None),
+    director: str | None = Query(None),
+    year: int | None = Query(None),
+    year_before: int | None = Query(None),
+    year_after: int | None = Query(None),
+    year_from: int | None = Query(None),
+    year_to: int | None = Query(None),
+    media_type: str = Query("all"),
+) -> list[dict[str, Any]]:
     tmdb: TmdbClient = request.app.state.tmdb
+    all_actors: list[str] = []
+    if actor:
+        all_actors.extend(actor)
+    if actors:
+        all_actors.extend(actors)
+
+    has_filters = bool(
+        all_actors
+        or (director and director.strip())
+        or year is not None
+        or year_before is not None
+        or year_after is not None
+        or year_from is not None
+        or year_to is not None
+        or (media_type and media_type != "all")
+    )
+
+    clean_q = q.strip() if q else None
+
+    if not clean_q and not has_filters:
+        return []
+
+    logger.info(
+        f"Search request - query: '{clean_q}', actors: {all_actors}, director: '{director}', "
+        f"year: {year}, year_before: {year_before}, year_after: {year_after}, "
+        f"year_from: {year_from}, year_to: {year_to}, media_type: '{media_type}'"
+    )
+
     try:
-        result = await tmdb.search(q)
+        if has_filters:
+            result = await tmdb.discover(
+                query=clean_q,
+                actors=all_actors,
+                director=director,
+                year=year,
+                year_before=year_before,
+                year_after=year_after,
+                year_from=year_from,
+                year_to=year_to,
+                media_type=media_type,
+            )
+        else:
+            result = await tmdb.search(clean_q or "")
         logger.info(f"Search returned {len(result)} results")
         return result
     except Exception as e:
-        logger.error(f"Search failed for query '{q}': {e}")
+        logger.error(f"Search failed: {e}")
         raise
 
 

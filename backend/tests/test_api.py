@@ -62,6 +62,20 @@ def mock_tmdb():
         "theatrical_days_away": 100,
         "digital_days_away": 115,
     }
+    tmdb.search_person.return_value = {"id": 1234, "name": "Test Person", "popularity": 50.0}
+    tmdb.discover.return_value = [
+        {
+            "id": 1,
+            "media_type": "movie",
+            "title": "Discovered Movie",
+            "poster_url": "http://example.com/poster.jpg",
+            "release_date": "2024-01-01",
+            "days_away": 100,
+            "days_label": "100 days away",
+            "vote_average": 8.5,
+            "popularity": 120.0,
+        }
+    ]
     return tmdb
 
 
@@ -617,6 +631,201 @@ def test_watchlist_watch_alerts(client, app_with_mock):
     assert item["watch_on_sale_buy"] is False
     assert item["is_free_streaming_alert"] is False
     assert item["is_on_sale_alert"] is False
+    assert response.status_code == 404
+
+
+def test_watchlist_add_status(client, app_with_mock):
+    """Test adding an item with custom status."""
+    response = client.post(
+        "/api/watchlist",
+        json={
+            "media_type": "movie",
+            "tmdb_id": 901,
+            "title": "Following Movie",
+            "status": "following"
+        }
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "following"
+
+
+def test_watchlist_patch_status(client, app_with_mock):
+    """Test patching custom status of an item."""
+    client.post(
+        "/api/watchlist",
+        json={
+            "media_type": "movie",
+            "tmdb_id": 902,
+            "title": "Queue Movie",
+            "status": "queue"
+        }
+    )
+    
+    response = client.patch(
+        "/api/watchlist/movie/902",
+        json={
+            "status": "following"
+        }
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status_value"] == "following"
+
+
+def test_security_headers_csp(client):
+    """Test that Content-Security-Policy header contains required TMDB and YouTube origins."""
+    response = client.get("/api/health")
+    assert response.status_code == 200
+    assert "Content-Security-Policy" in response.headers
+    csp = response.headers["Content-Security-Policy"]
+    
+    # Assert standard origins are preserved
+    assert "default-src 'self'" in csp
+    assert "img-src 'self' data: https://image.tmdb.org https://*.tmdb.org" in csp
+    assert "connect-src 'self' https://image.tmdb.org https://*.tmdb.org" in csp
+    assert "https://*.googleusercontent.com" in csp
+    assert "https://cinequeue-inouye-2026.firebaseapp.com" in csp
+    assert "https://*.firebaseapp.com" in csp
+    
+    # Assert YouTube origins are present
+    assert "https://img.youtube.com" in csp
+    assert "https://i.ytimg.com" in csp
+    assert "https://www.youtube.com" in csp
+    assert "https://www.youtube-nocookie.com" in csp
+
+
+def test_watchlist_cache_background_refresh(client, app_with_mock):
+    """Test that stale watchlist items trigger background updates and return stale values instantly."""
+    from datetime import datetime, timezone, timedelta
+    
+    # 1. Add item
+    client.post(
+        "/api/watchlist",
+        json={"media_type": "movie", "tmdb_id": 999, "title": "Stale Movie"}
+    )
+    
+    # 2. Directly write stale cache to database
+    repo = app_with_mock.state.watchlist_repo
+    stale_details = {
+        "id": 999,
+        "media_type": "movie",
+        "title": "Stale Movie",
+        "overview": "Old overview",
+        "vote_average": 5.0,
+    }
+    
+    # SQLite / Firestore updates
+    repo.update_item_cache("local_test_user", "movie", 999, stale_details)
+    two_days_ago = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+    
+    if hasattr(repo, "_connection"):
+        with repo._connection() as conn:
+            conn.execute(
+                "UPDATE watchlist SET last_updated = ? WHERE user_id = ? AND media_type = ? AND tmdb_id = ?",
+                (two_days_ago, "local_test_user", "movie", 999)
+            )
+    else:
+        doc_ref = repo._user_watchlist_col("local_test_user").document("movie_999")
+        doc_ref.update({"last_updated": two_days_ago})
+
+    # 3. Mock tmdb.get_details to return fresh details
+    async def mock_fresh_details(media_type, tmdb_id):
+        return {
+            "id": tmdb_id,
+            "media_type": media_type,
+            "title": "Stale Movie",
+            "overview": "Brand new fresh overview",
+            "vote_average": 9.9,
+            "status": "Released",
+        }
+    app_with_mock.state.tmdb.get_details = mock_fresh_details
+    
+    # 4. Request watchlist. It should return the STALE details immediately.
+    response = client.get("/api/watchlist")
+    assert response.status_code == 200
+    data = response.json()
+    item = next(x for x in data if x["tmdb_id"] == 999)
+    assert item["overview"] == "Old overview"  # Serving old stale cache
+    assert item["vote_average"] == 5.0
+
+    # 5. Request again to verify background task has run and updated the cache.
+    response2 = client.get("/api/watchlist")
+    assert response2.status_code == 200
+    data2 = response2.json()
+    item2 = next(x for x in data2 if x["tmdb_id"] == 999)
+    assert item2["overview"] == "Brand new fresh overview"  # Fresh details updated in cache!
+    assert item2["vote_average"] == 9.9
+
+
+def test_watchlist_watch_alerts(client, app_with_mock):
+    """Test watchlist watch options and status tracking."""
+    # 1. Add item with watch alerts
+    body = {
+        "media_type": "movie",
+        "tmdb_id": 8888,
+        "title": "Alert Movie",
+        "poster_path": "/path.jpg",
+        "release_date": "2026-10-10",
+        "watch_free_streaming": True,
+        "watch_on_sale_buy": True,
+    }
+    
+    # Configure TMDB mock to simulate providers for this tmdb_id
+    async def mock_providers(media_type, tmdb_id):
+        return {
+            "link": "http://example.com/watch",
+            "categories": {
+                "streaming": [{"name": "Netflix", "logo_url": "http://example.com/netflix.png"}],
+                "free": [],
+                "rent": [],
+                "buy": [{"name": "Apple TV", "current_price": "$9.99", "original_price": "$14.99", "is_on_sale": True}],
+            },
+            "is_free_streaming": True,
+            "is_on_sale": True,
+            "buy_original_price": "$14.99",
+            "buy_current_price": "$9.99",
+        }
+    app_with_mock.state.tmdb.get_watch_providers = mock_providers
+
+    response = client.post("/api/watchlist", json=body)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["watch_free_streaming"] is True
+    assert data["watch_on_sale_buy"] is True
+
+    # 2. Get watchlist. It should calculate active alerts.
+    response = client.get("/api/watchlist")
+    assert response.status_code == 200
+    data = response.json()
+    item = next(x for x in data if x["tmdb_id"] == 8888)
+    assert item["watch_free_streaming"] is True
+    assert item["watch_on_sale_buy"] is True
+    assert item["is_free_streaming_alert"] is True
+    assert item["is_on_sale_alert"] is True
+    assert item["buy_original_price"] == "$14.99"
+    assert item["buy_current_price"] == "$9.99"
+
+    # 3. Patch watchlist item to toggle alerts off
+    patch_body = {
+        "watch_free_streaming": False,
+        "watch_on_sale_buy": False,
+    }
+    response = client.patch("/api/watchlist/movie/8888", json=patch_body)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["watch_free_streaming"] is False
+    assert data["watch_on_sale_buy"] is False
+
+    # 4. Get watchlist again. Alerts should now be False since toggled off.
+    response = client.get("/api/watchlist")
+    assert response.status_code == 200
+    data = response.json()
+    item = next(x for x in data if x["tmdb_id"] == 8888)
+    assert item["watch_free_streaming"] is False
+    assert item["watch_on_sale_buy"] is False
+    assert item["is_free_streaming_alert"] is False
+    assert item["is_on_sale_alert"] is False
 
     # Cleanup
     client.delete("/api/watchlist/movie/8888")
@@ -626,3 +835,69 @@ def test_sw_js_cache_control_headers(client):
     """Verify GET /sw.js returns Cache-Control: no-cache, max-age=0, must-revalidate."""
     response = client.get("/sw.js")
     assert response.headers.get("Cache-Control") == "no-cache, max-age=0, must-revalidate"
+
+
+def test_search_basic(client, app_with_mock, mock_tmdb):
+    """Verify basic search delegates to tmdb.search."""
+    response = client.get("/api/search?q=Inception")
+    assert response.status_code == 200
+    mock_tmdb.search.assert_called_with("Inception")
+    data = response.json()
+    assert len(data) == 1
+    assert data[0]["title"] == "Test Movie"
+
+
+def test_search_empty_returns_empty_list(client, app_with_mock, mock_tmdb):
+    """Verify empty search returns empty list without error."""
+    response = client.get("/api/search")
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+def test_search_with_actor(client, app_with_mock, mock_tmdb):
+    """Verify search with actor parameter calls discover."""
+    response = client.get("/api/search?actor=Tom+Hanks")
+    assert response.status_code == 200
+    mock_tmdb.discover.assert_called()
+    call_kwargs = mock_tmdb.discover.call_args.kwargs
+    assert call_kwargs["actors"] == ["Tom Hanks"]
+    data = response.json()
+    assert len(data) == 1
+    assert data[0]["title"] == "Discovered Movie"
+
+
+def test_search_with_multiple_actors(client, app_with_mock, mock_tmdb):
+    """Verify search with multiple actors calls discover."""
+    response = client.get("/api/search?actor=Tom+Hanks&actor=Meg+Ryan")
+    assert response.status_code == 200
+    mock_tmdb.discover.assert_called()
+    call_kwargs = mock_tmdb.discover.call_args.kwargs
+    assert "Tom Hanks" in call_kwargs["actors"]
+    assert "Meg Ryan" in call_kwargs["actors"]
+
+
+def test_search_with_director(client, app_with_mock, mock_tmdb):
+    """Verify search with director parameter calls discover."""
+    response = client.get("/api/search?director=Christopher+Nolan")
+    assert response.status_code == 200
+    mock_tmdb.discover.assert_called()
+    call_kwargs = mock_tmdb.discover.call_args.kwargs
+    assert call_kwargs["director"] == "Christopher Nolan"
+
+
+def test_search_with_year_and_date_ranges(client, app_with_mock, mock_tmdb):
+    """Verify search with year, year_before, year_after calls discover."""
+    response = client.get("/api/search?year=1999&media_type=movie")
+    assert response.status_code == 200
+    mock_tmdb.discover.assert_called()
+    call_kwargs = mock_tmdb.discover.call_args.kwargs
+    assert call_kwargs["year"] == 1999
+    assert call_kwargs["media_type"] == "movie"
+
+    response = client.get("/api/search?year_before=2000&year_after=1990")
+    assert response.status_code == 200
+    mock_tmdb.discover.assert_called()
+    call_kwargs = mock_tmdb.discover.call_args.kwargs
+    assert call_kwargs["year_before"] == 2000
+    assert call_kwargs["year_after"] == 1990
+

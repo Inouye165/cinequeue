@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildQueueAvailabilityStatus, formatFullDate, formatMonthDay, isSameLocalDate, parseLocalDate } from "../queueStatusUtils";
+import { buildQueueAvailabilityStatus, formatFullDate, formatMonthDay, isSameLocalDate, parseLocalDate, sortQueueItems } from "../queueStatusUtils";
 import type { MediaItem } from "../../types";
 
 describe("queueStatusUtils", () => {
@@ -224,6 +224,149 @@ describe("queueStatusUtils", () => {
       expect(status.state).toBe("complete");
       expect(status.primaryText).toBe("All 18 episodes available");
       expect(status.secondaryText).toBe("2 seasons");
+    });
+
+    it("handles TV series with a released new season (same color/available as other releases)", () => {
+      const show: MediaItem = {
+        id: 113962,
+        media_type: "tv",
+        title: "Lioness",
+        release_date: "2023-07-23",
+        next_season: {
+          name: "Season 3",
+          season_number: 3,
+          air_date: "2026-08-02",
+        },
+      };
+
+      // refDate is 2026-08-01, but test with refDate 2026-09-15 where 2026-08-02 is in the past
+      const todayRef = new Date("2026-09-15T12:00:00Z");
+      const status = buildQueueAvailabilityStatus(show, todayRef);
+      expect(status.state).toBe("available");
+      expect(status.primaryText).toBe("Released");
+      expect(status.secondaryText).toBe("Released Aug 2, 2026");
+      expect(status.date).toBe("2026-08-02");
+    });
+
+    it("handles TV series with an upcoming new season (same color/upcoming as other releases)", () => {
+      const show: MediaItem = {
+        id: 84773,
+        media_type: "tv",
+        title: "The Lord of the Rings: The Rings of Power",
+        release_date: "2022-09-01",
+        number_of_seasons: 3,
+        next_season: {
+          name: "Season 3",
+          season_number: 3,
+          air_date: "2026-11-10",
+        },
+      };
+
+      const todayRef = new Date("2026-09-15T12:00:00Z");
+      const status = buildQueueAvailabilityStatus(show, todayRef);
+      expect(status.state).toBe("upcoming");
+      expect(status.primaryText).toBe("Season 3 premieres Nov 10");
+      expect(status.date).toBe("2026-11-10");
+    });
+
+    it("handles TV series with past premiere date and no future seasons (same color as released movies)", () => {
+      const show: MediaItem = {
+        id: 224941,
+        media_type: "tv",
+        title: "The Boroughs",
+        release_date: "2026-05-21",
+      };
+
+      const todayRef = new Date("2026-09-15T12:00:00Z");
+      const status = buildQueueAvailabilityStatus(show, todayRef);
+      expect(status.state).toBe("available");
+      expect(status.primaryText).toBe("Released");
+      expect(status.secondaryText).toBe("Released May 21, 2026");
+      expect(status.date).toBe("2026-05-21");
+    });
+
+    it("sorts queue items chronologically by effective release date for both available and upcoming titles", () => {
+      const items: MediaItem[] = [
+        {
+          id: 1,
+          media_type: "movie",
+          title: "Eternal Sunshine of the Spotless Mind",
+          release_date: "2004-03-19",
+        },
+        {
+          id: 2,
+          media_type: "tv",
+          title: "Watership Down",
+          release_date: "2018-12-22",
+        },
+        {
+          id: 3,
+          media_type: "movie",
+          title: "Spider-Man: Brand New Day",
+          release_date: "2026-07-31",
+        },
+        {
+          id: 4,
+          media_type: "tv",
+          title: "Lioness",
+          release_date: "2023-07-23",
+          next_season: {
+            name: "Season 3",
+            season_number: 3,
+            air_date: "2026-08-02",
+          },
+        },
+        {
+          id: 5,
+          media_type: "movie",
+          title: "The Social Reckoning",
+          release_date: "2026-10-07",
+        },
+        {
+          id: 6,
+          media_type: "tv",
+          title: "Cupertino",
+          release_date: "2026-10-08",
+        },
+        {
+          id: 7,
+          media_type: "tv",
+          title: "The Lord of the Rings: The Rings of Power",
+          release_date: "2022-09-01",
+          next_season: {
+            name: "Season 3",
+            season_number: 3,
+            air_date: "2026-11-10",
+          },
+        },
+        {
+          id: 8,
+          media_type: "movie",
+          title: "Narnia: The Magician's Nephew",
+          release_date: "2027-02-11",
+        },
+      ];
+
+      const sorted = sortQueueItems(items);
+      const titles = sorted.map((i) => i.title);
+
+      // Available titles sort chronologically by release date:
+      // 2004-03-19 < 2018-12-22 < 2026-07-31 < 2026-08-02 (Lioness Season 3)
+      expect(titles.slice(0, 4)).toEqual([
+        "Eternal Sunshine of the Spotless Mind",
+        "Watership Down",
+        "Spider-Man: Brand New Day",
+        "Lioness",
+      ]);
+
+      // Upcoming titles sort chronologically by upcoming date:
+      // 2026-10-07 < 2026-10-08 < 2026-11-10 (Rings of Power Season 3) < 2027-02-11
+      expect(titles.slice(4)).toEqual([
+        "The Social Reckoning",
+        "Cupertino",
+        "The Lord of the Rings: The Rings of Power",
+        "Narnia: The Magician's Nephew",
+      ]);
     });
   });
 });

@@ -80,8 +80,8 @@ async def test_weather_retrieval_and_caching():
 async def test_weather_failure_does_not_block_briefing(repo):
     """Verify that a weather service failure silently omits weather and allows briefing to complete."""
     user_id = "user_weather_fail"
-    repo.save_agent_settings(user_id, {"location": "InvalidCityName9999", "notify_on_login": True})
-    repo.add_item(user_id, "movie", 101, "Test Movie", None, "2026-08-01", status="queue")
+    from datetime import date
+    repo.add_item(user_id, "movie", 101, "Test Movie", None, date.today().isoformat(), status="queue")
 
     failing_provider = MockWeatherProvider(should_fail=True)
     with patch("app.services.briefing_service.WeatherService", lambda: WeatherService(providers=[failing_provider])):
