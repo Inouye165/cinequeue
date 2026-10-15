@@ -43,7 +43,7 @@ describe("MediaCard", () => {
       next_season: {
         name: "Season 4",
         season_number: 4,
-        air_date: "2026-09-18",
+        air_date: "2099-09-18",
       },
     };
 
