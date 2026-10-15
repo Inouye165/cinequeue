@@ -171,7 +171,6 @@ export const movieService = {
         serverRevision: existing?.serverRevision,
         remoteConflict: existing?.remoteConflict,
       };
-
       await db.movies.put(updatedMovie);
 
       const op: SyncOperation = {

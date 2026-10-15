@@ -539,7 +539,6 @@ export function CinequeueDashboard({ onSignIn }: { onSignIn?: () => void }) {
     }
     if (searchFilters.mediaType === "movie") filterParts.push("Movies only");
     if (searchFilters.mediaType === "tv") filterParts.push("TV shows only");
-
     if (filterParts.length > 0) {
       return `Results for ${filterParts.join(" • ")}`;
     }
