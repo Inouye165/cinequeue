@@ -30,6 +30,12 @@ steps:
     args: ["run", "build"]
     dir: "frontend"
 
+  # Offline PWA browser regressions
+  - name: node:22
+    entrypoint: bash
+    args: ["-c", "npx playwright install --with-deps chromium && npm run test:e2e"]
+    dir: "frontend"
+
   # Validate Docker build (no push, no deploy)
   - name: gcr.io/cloud-builders/docker
     args: ["build", "-t", "cinequeue-ci-test", "."]

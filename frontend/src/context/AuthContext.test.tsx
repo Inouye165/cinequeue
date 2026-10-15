@@ -4,6 +4,10 @@ import { render, act, waitFor } from "@testing-library/react";
 import { AuthProvider, useAuth, __resetFirebaseAuthForTests } from "./AuthContext";
 import { api } from "../api";
 
+vi.mock("../services/syncService", () => ({
+  syncService: { setAuthenticatedOwner: vi.fn(), triggerSync: vi.fn().mockResolvedValue(false) },
+}));
+
 // Mock Firebase APIs
 const mockUnsubscribe = vi.fn();
 let authStateChangedCallback: ((user: any) => Promise<void>) | null = null;
@@ -64,6 +68,7 @@ function TestConsumer({ onState }: { onState: (state: any) => void }) {
 
 describe("AuthContext and AuthProvider", () => {
   beforeEach(() => {
+    localStorage.clear();
     __resetFirebaseAuthForTests();
     vi.clearAllMocks();
     authStateChangedCallback = null;
@@ -83,6 +88,101 @@ describe("AuthContext and AuthProvider", () => {
     expect(latestState.loading).toBe(true);
     expect(latestState.authInitialized).toBe(false);
     expect(api.adminMe).not.toHaveBeenCalled();
+  });
+
+  it("restores an older Firebase login through a valid cookie without creating a new session", async () => {
+    vi.mocked(api.me).mockResolvedValue({ uid: "restored", email: "restored@example.com" });
+    let latestState: ReturnType<typeof useAuth> | undefined;
+    render(<AuthProvider><TestConsumer onState={(s) => { latestState = s; }} /></AuthProvider>);
+    await waitFor(() => expect(authStateChangedCallback).not.toBeNull());
+    const claims = btoa(JSON.stringify({ auth_time: Math.floor(Date.now() / 1000) - 86400 }));
+    await act(async () => {
+      await authStateChangedCallback!({
+        uid: "restored", email: "restored@example.com", getIdToken: vi.fn().mockResolvedValue(`header.${claims}.signature`),
+      });
+    });
+    await waitFor(() => expect(latestState?.sessionReady).toBe(true));
+    expect(latestState?.localOwnerId).toBe("restored");
+    expect(api.createSession).not.toHaveBeenCalled();
+  });
+
+  it("retains the local owner when the cloud session cannot be created", async () => {
+    vi.mocked(api.createSession).mockRejectedValueOnce(new Error("Cloud unavailable"));
+    let latestState: ReturnType<typeof useAuth> | undefined;
+    render(<AuthProvider><TestConsumer onState={(s) => { latestState = s; }} /></AuthProvider>);
+    await waitFor(() => expect(authStateChangedCallback).not.toBeNull());
+    await act(async () => {
+      await authStateChangedCallback!({
+        uid: "offline-owner", email: "offline@example.com", getIdToken: vi.fn().mockResolvedValue("token"),
+      });
+    });
+    await waitFor(() => expect(latestState?.error).toBe("Cloud unavailable"));
+    expect(latestState?.sessionReady).toBe(false);
+    expect(latestState?.localOwnerId).toBe("offline-owner");
+    expect(localStorage.getItem("cinequeue_local_owner")).toBe("offline-owner");
+  });
+
+  it("does not recreate a cloud session when a manual refresh resolves after logout", async () => {
+    let latestState: ReturnType<typeof useAuth> | undefined;
+    render(<AuthProvider><TestConsumer onState={(s) => { latestState = s; }} /></AuthProvider>);
+    await waitFor(() => expect(authStateChangedCallback).not.toBeNull());
+    const firebaseUser = {
+      uid: "refresh-owner", email: "refresh@example.com",
+      getIdToken: vi.fn().mockResolvedValue("initial-token"),
+    };
+    await act(async () => { await authStateChangedCallback!(firebaseUser); });
+    await waitFor(() => expect(latestState?.sessionReady).toBe(true));
+    mockAuth.currentUser = firebaseUser;
+    let resolveToken!: (token: string) => void;
+    firebaseUser.getIdToken.mockImplementationOnce(() => new Promise<string>((resolve) => { resolveToken = resolve; }));
+    let refresh!: Promise<void>;
+    await act(async () => { refresh = latestState!.refreshAdminState(); });
+    await waitFor(() => expect(resolveToken).toBeDefined());
+    await act(async () => { await latestState!.logout(); });
+    vi.mocked(api.createSession).mockClear();
+    await act(async () => {
+      resolveToken("late-token");
+      await refresh;
+    });
+    expect(api.createSession).not.toHaveBeenCalled();
+    expect(latestState?.localOwnerId).toBe("guest_local");
+    expect(latestState?.sessionReady).toBe(false);
+    expect(latestState?.isAdmin).toBe(false);
+  });
+
+  it("does not reopen a cached Firebase account after choosing device-only mode", async () => {
+    localStorage.setItem("cinequeue_device_only", "true");
+    let latestState: ReturnType<typeof useAuth> | undefined;
+    render(<AuthProvider><TestConsumer onState={(s) => { latestState = s; }} /></AuthProvider>);
+    await waitFor(() => expect(authStateChangedCallback).not.toBeNull());
+    const getIdToken = vi.fn().mockResolvedValue("cached-token");
+    await act(async () => {
+      await authStateChangedCallback!({ uid: "cached-account", email: "cached@example.com", getIdToken });
+    });
+    expect(latestState?.localOwnerId).toBe("guest_local");
+    expect(latestState?.sessionReady).toBe(false);
+    expect(getIdToken).not.toHaveBeenCalled();
+    expect(api.createSession).not.toHaveBeenCalled();
+  });
+
+  it("ignores a previous account's delayed authorization after switching accounts", async () => {
+    let resolveAdmin!: (value: { username: string }) => void;
+    vi.mocked(api.adminMe).mockReturnValueOnce(new Promise((resolve) => { resolveAdmin = resolve; }));
+    vi.mocked(api.adminMe).mockRejectedValueOnce({ status: 403, message: "Not admin" });
+    let latestState: ReturnType<typeof useAuth> | undefined;
+    render(<AuthProvider><TestConsumer onState={(s) => { latestState = s; }} /></AuthProvider>);
+    await waitFor(() => expect(authStateChangedCallback).not.toBeNull());
+    await act(async () => {
+      await authStateChangedCallback!({ uid: "A", email: "a@example.com", getIdToken: vi.fn().mockResolvedValue("A-token") });
+    });
+    await waitFor(() => expect(api.adminMe).toHaveBeenCalledWith("A-token"));
+    await act(async () => {
+      await authStateChangedCallback!({ uid: "B", email: "b@example.com", getIdToken: vi.fn().mockResolvedValue("B-token") });
+    });
+    await waitFor(() => expect(latestState?.user?.uid).toBe("B"));
+    await act(async () => { resolveAdmin({ username: "A" }); });
+    expect(latestState?.localOwnerId).toBe("B");
+    expect(latestState?.isAdmin).toBe(false);
   });
 
   it("should not call /api/admin/me when observer returns null", async () => {

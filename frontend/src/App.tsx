@@ -7,26 +7,26 @@ import { UserLogin } from "./pages/UserLogin";
 import { CinequeueDashboard } from "./pages/CinequeueDashboard";
 import { AuthDiagnosticsPanel } from "./components/AuthDiagnosticsPanel";
 import { recordEvent } from "./utils/authPerformanceMonitor";
-import { authLog } from "./utils/authDebugLog";
 
 function CinequeueApp() {
   const {
     user,
     isAdmin: contextIsAdmin,
     authInitialized,
-    loading: authLoading,
     error: authError,
     loginWithGoogle,
     logout,
     authorizationReady,
     profile,
     sessionReady,
-    idToken
+    idToken,
+    localOwnerId
   } = useAuth();
 
   // Admin Portal state variables (for traditional cookie login fallback)
   const [adminUsername, setAdminUsername] = useState<string | null>(null);
   const [showAdminLogin, setShowAdminLogin] = useState(false);
+  const [showUserLogin, setShowUserLogin] = useState(false);
   const [adminError, setAdminError] = useState<string | null>(null);
   const [adminLoading, setAdminLoading] = useState(false);
 
@@ -143,43 +143,11 @@ function CinequeueApp() {
     }
   };
 
-  // Debug: log the spinner-controlling state on every render so we can see what's blocking
-  useEffect(() => {
-    const showingSpinner = !authInitialized || authLoading || (user !== null && !authorizationReady);
-    if (showingSpinner) {
-      authLog.warn("RENDERING SPINNER", {
-        authInitialized,
-        authLoading,
-        hasUser: !!user,
-        authorizationReady,
-        authError: authError || null,
-      });
-    } else {
-      authLog.info("App render: spinner check", {
-        showingSpinner: false,
-        authInitialized,
-        authLoading,
-        hasUser: !!user,
-        authorizationReady,
-        authError: authError || null,
-      });
-    }
-  }, [authInitialized, authLoading, user, authorizationReady, authError]);
-
-  if (!authInitialized || authLoading || (user && !authorizationReady)) {
-    return (
-      <div className="auth-loading">
-        <div className="spinner"></div>
-        <p>Verifying session…</p>
-      </div>
-    );
-  }
-
   // 1. Render Admin Dashboard if Admin is logged in
-  if (activeAdminName) {
+  if (adminUsername || (activeAdminName && sessionReady && authorizationReady && user?.uid === localOwnerId)) {
     return (
       <AdminDashboard
-        adminUsername={activeAdminName}
+        adminUsername={activeAdminName!}
         approvals={approvals}
         loginLogs={loginLogs}
         onLogout={handleAdminLogout}
@@ -190,8 +158,8 @@ function CinequeueApp() {
     );
   }
 
-  // 2. Render Login Cards if Regular User is not logged in
-  if (!user) {
+  // Cloud sign-in is optional; it never gates the local workspace.
+  if (showAdminLogin || (showUserLogin && !sessionReady)) {
     if (showAdminLogin) {
       return (
         <AdminLogin
@@ -207,19 +175,22 @@ function CinequeueApp() {
     }
 
     return (
-      <UserLogin
-        authError={authError}
-        onLoginWithGoogle={loginWithGoogle}
-        onAdminToggle={() => {
-          setShowAdminLogin(true);
-          setAdminError(null);
-        }}
-      />
+      <>
+        <UserLogin
+          authError={authError}
+          onLoginWithGoogle={loginWithGoogle}
+          onAdminToggle={() => {
+            setShowAdminLogin(true);
+            setAdminError(null);
+          }}
+        />
+        <button type="button" onClick={() => setShowUserLogin(false)}>Continue on this device</button>
+      </>
     );
   }
 
   // 3. Render Main Cinequeue Watchlist App
-  return <CinequeueDashboard />;
+  return <CinequeueDashboard key={localOwnerId} onSignIn={() => setShowUserLogin(true)} />;
 }
 
 export default function App() {

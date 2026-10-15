@@ -17,6 +17,16 @@ class WatchlistRepository(ABC):
     """Abstract base class for watchlist storage backends."""
 
     @abstractmethod
+    def sync_snapshot(self, user_id: str) -> list[dict[str, Any]]:
+        """Read a consistent protocol-v2 watchlist/rating union without writes."""
+        ...
+
+    @abstractmethod
+    def apply_sync_operation(self, user_id: str, operation: dict[str, Any]) -> dict[str, Any]:
+        """Atomically compare revisions, mutate both stores and persist a receipt."""
+        ...
+
+    @abstractmethod
     def list_items(self, user_id: str) -> list[dict[str, Any]]:
         """Return all watchlist items ordered by added_at descending."""
         ...

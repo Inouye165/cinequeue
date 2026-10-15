@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { syncService, type SyncStatusInfo } from "../services/syncService";
-import { movieService } from "../services/movieService";
+import { DeviceDataPanel } from "./DeviceDataPanel";
+import { syncStatusLabel } from "../utils/syncStatusLabel";
 
 interface AccountSheetProps {
   isOpen: boolean;
@@ -23,6 +24,8 @@ export function AccountSheet({
 }: AccountSheetProps) {
   const [syncStatus, setSyncStatus] = useState<SyncStatusInfo>(syncService.getStatus());
   const [showClearModal, setShowClearModal] = useState(false);
+  const [clearAccepted, setClearAccepted] = useState(false);
+  const [clearError, setClearError] = useState("");
 
   useEffect(() => {
     const unsubscribe = syncService.subscribe((newStatus) => {
@@ -48,14 +51,16 @@ export function AccountSheet({
   if (!isOpen) return null;
 
   const handleSyncClick = () => {
-    void syncService.triggerSync(ownerId);
+    void syncService.retryNow(ownerId);
   };
 
   const handleClearConfirm = async () => {
-    await movieService.clearLocalData(ownerId);
-    setShowClearModal(false);
-    onClose();
-    if (onDataCleared) onDataCleared();
+    try {
+      await syncService.clearWorkspace(ownerId);
+      setShowClearModal(false);
+      onClose();
+      if (onDataCleared) onDataCleared();
+    } catch (err) { setClearError(String(err)); }
   };
 
   const getSyncBadge = () => {
@@ -117,7 +122,7 @@ export function AccountSheet({
           <div className="section-row">
             <span className="section-label">Data Sync Status</span>
             <span className="sync-badge" style={{ color: badge.color, background: badge.bg }}>
-              ● {badge.text}
+              ● {syncStatusLabel(syncStatus.state)}
             </span>
           </div>
           {syncStatus.lastSyncTime && (
@@ -125,6 +130,9 @@ export function AccountSheet({
               Last synced: {new Date(syncStatus.lastSyncTime).toLocaleTimeString()}
             </p>
           )}
+          <p>{syncStatus.pendingCount} pending changes; {syncStatus.conflictCount ?? 0} conflicting titles.</p>
+          {syncStatus.error && <p role="alert">{syncStatus.error}</p>}
+          {!!syncStatus.failedCount && <button type="button" onClick={() => void syncService.retryFailed(ownerId)}>Retry rejected changes</button>}
           <button
             type="button"
             className="pill-button secondary full-width"
@@ -180,10 +188,11 @@ export function AccountSheet({
         {/* Storage & Account Actions */}
         <div className="account-section danger-section">
           <span className="section-heading">Data & Storage</span>
+          <DeviceDataPanel ownerId={ownerId} />
           <button
             type="button"
             className="account-menu-btn danger"
-            onClick={() => setShowClearModal(true)}
+            onClick={() => { setClearAccepted(false); setClearError(""); setShowClearModal(true); }}
           >
             <span className="menu-btn-icon">🗑️</span>
             <span className="menu-btn-text">Clear Local Data...</span>
@@ -219,13 +228,18 @@ export function AccountSheet({
               ⚠️ Clear Local Data?
             </h3>
             <p className="clear-modal-text">
-              This action will remove cached movie items from browser storage.
+              This removes this workspace's saved titles, ratings and pending edits.
+              Device-only data has no cloud copy. Export a backup first.
               {syncStatus.pendingCount > 0 && (
                 <strong className="clear-warning">
                   Warning: You have {syncStatus.pendingCount} un-synced local changes that will be lost!
                 </strong>
               )}
             </p>
+            <label><input type="checkbox" checked={clearAccepted} onChange={(event) => setClearAccepted(event.target.checked)} />
+              I have exported a backup or accept losing this workspace's local data.
+            </label>
+            {clearError && <p role="alert">{clearError}</p>}
             <div className="clear-modal-actions">
               <button
                 type="button"
@@ -237,6 +251,7 @@ export function AccountSheet({
               <button
                 type="button"
                 className="pill-button danger"
+                disabled={!clearAccepted}
                 onClick={handleClearConfirm}
               >
                 Clear Data

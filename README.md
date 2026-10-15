@@ -11,6 +11,66 @@ Personal movie and TV tracker with release countdowns, where-to-watch info, revi
 
 ## Authentication & Authorization
 
+### On-device-first collection
+
+The collection opens from IndexedDB without waiting for Firebase or a backend
+session. Queue, monitoring, library and rating edits are saved on the device first.
+Google sign-in enables background sync; discovery, fresh availability and AI
+features still require an online cloud session.
+
+- Each account has separate movie records, pending operations and sync cursors.
+  Switching accounts cancels in-flight sync. The server rejects sync requests
+  whose expected owner differs from the authenticated session.
+- An unavailable or expired cloud session does not remove the saved workspace.
+  **Sign in to sync** reconnects it; **Use device-only workspace** or explicit
+  sign-out switches to a separate guest collection without deleting account data.
+- Guest changes remain on the device and are not automatically uploaded or merged
+  into an account. Signing in opens that account's separate workspace.
+- Saved titles have basic offline details; full details are cached after a successful
+  online view. Images, trailers and other external content may be unavailable offline.
+- Local workspace selection is not authentication and does not grant cloud or admin
+  access. Anyone with access to the same browser profile can access its saved local
+  data; use separate OS/browser profiles on shared devices.
+- Existing local records migrate without clearing storage. Legacy queued operations
+  with no provable owner are retained as failed and excluded from automatic sync.
+  Data overwritten by older versions cannot be reconstructed by the migration.
+
+### Safe synchronization and recovery
+
+- Cloud sync uses atomic compare-and-write revisions. Concurrent edits are not
+  silently overwritten: open the account menu and choose **Keep device version**
+  or **Keep cloud version**. Both displaced versions are retained in recovery data
+  included in workspace backups.
+- Durable operation receipts make retries idempotent, including a lost response
+  after the server commits. Full authoritative snapshots propagate removals and
+  cleared ratings without overwriting pending local edits.
+- One worker runs per account across tabs (Web Locks, with an IndexedDB lease
+  fallback). It drains edits made during sync, persists attempts, and retries
+  transient failures with bounded exponential backoff. Rejected operations remain
+  visible with their reasons; **Retry rejected changes** retries them explicitly.
+- The status bar distinguishes pending work, conflicts, authentication failures
+  and sync errors. It says **Synced** only after a valid pull and an empty outbox
+  with no unresolved conflicts.
+- In the account menu, **Protect device storage** requests persistent browser
+  storage and shows usage/quota. A denied or unsupported request is shown honestly.
+  Persistence is not a backup and does not protect against clearing site data.
+- **Export workspace backup** downloads a private, versioned JSON file containing
+  only the selected workspace, its immutable pending operations and recovery
+  versions. Export and restore share a 25 MB limit; oversized exports report an
+  error rather than generating a file that cannot be restored.
+  **Restore workspace backup** validates ownership, structure and size
+  and restores atomically into an empty workspace. It never
+  overwrites another account or an existing collection. User data is restored;
+  online detail caches are refreshed separately. Restored cloud data is checked
+  against current revisions before upload.
+- Clearing a workspace requires an explicit data-loss acknowledgement and is
+  serialized against sync. Export first, especially for guest or unsynced data.
+
+Browser storage is not a backup: browser eviction or clearing site data can remove
+local collections and recovery versions. Keep exported backups outside the browser.
+Legacy clients remain API-compatible but do not have v2 conflict protection;
+update all devices before relying on cross-device conflict resolution.
+
 Cinequeue features production-grade per-user authentication and authorization using Firebase Authentication.
 
 ### Key Security Design Patterns
@@ -103,6 +163,18 @@ pytest tests/ -v
 cd frontend
 npm run test
 ```
+
+**Browser regressions (production PWA, offline reload, account isolation, backup/restore,
+conflict recovery and live updates across tabs):**
+```powershell
+cd frontend
+npx playwright install chromium
+npm run test:e2e
+```
+
+Both Cloud Build pipelines run unit/component tests and browser regressions before
+deployment. Browser tests use isolated profiles and an unavailable cloud API; they
+do not need Firebase credentials or touch live account data.
 
 ### 6. Local Docker build and run
 
@@ -210,4 +282,3 @@ The Python backend is structured so you can add recommendation or sentiment mode
 - Pull requests into main run cloudbuild-ci.yaml.
 - Merges into main run cloudbuild.yaml.
 - Successful main builds deploy Cinequeue to Google Cloud Run.
-
