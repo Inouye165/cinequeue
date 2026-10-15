@@ -10,6 +10,10 @@ from typing import Any, Optional
 
 from app.config import DATA_DIR, DB_PATH
 from app.repository import DuplicateItemError, WatchlistRepository
+from app.sync_protocol import (
+    check_receipt, operation_fingerprint, operation_result, sync_record, sync_records,
+    validate_operation, write_values,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +27,15 @@ class SqliteWatchlistRepository(WatchlistRepository):
 
     def _init_db(self) -> None:
         with self._connection() as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS sync_receipts (
+                    user_id TEXT NOT NULL,
+                    operation_id TEXT NOT NULL,
+                    fingerprint TEXT NOT NULL,
+                    result TEXT NOT NULL,
+                    PRIMARY KEY (user_id, operation_id)
+                )
+            """)
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS watchlist (
@@ -449,6 +462,81 @@ class SqliteWatchlistRepository(WatchlistRepository):
             conn.close()
 
     # -- Repository interface --------------------------------------------------
+
+    def sync_snapshot(self, user_id: str) -> list[dict[str, Any]]:
+        with self._connection() as conn:
+            # Both tables must share one read snapshot: absence is a client deletion.
+            conn.execute("BEGIN")
+            watch = conn.execute("SELECT * FROM watchlist WHERE user_id = ?", (user_id,)).fetchall()
+            rated = conn.execute("SELECT * FROM rated_movies WHERE user_id = ?", (user_id,)).fetchall()
+            return sync_records([dict(row) for row in watch], [dict(row) for row in rated])
+
+    def apply_sync_operation(self, user_id: str, operation: dict[str, Any]) -> dict[str, Any]:
+        validate_operation(operation, user_id)
+        fingerprint = operation_fingerprint(operation)
+        p = operation["payload"]
+        media, tmdb = p.get("mediaType", "movie"), p["tmdbId"]
+        key = (user_id, media, tmdb)
+        with self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            receipt = conn.execute(
+                "SELECT * FROM sync_receipts WHERE user_id = ? AND operation_id = ?",
+                (user_id, operation["operationId"]),
+            ).fetchone()
+            if receipt:
+                return check_receipt({
+                    "fingerprint": receipt["fingerprint"], "result": json.loads(receipt["result"]),
+                }, fingerprint)
+            watch_row = conn.execute(
+                "SELECT * FROM watchlist WHERE user_id = ? AND media_type = ? AND tmdb_id = ?", key,
+            ).fetchone()
+            rated_row = conn.execute(
+                "SELECT * FROM rated_movies WHERE user_id = ? AND media_type = ? AND tmdb_id = ?", key,
+            ).fetchone()
+            watch = dict(watch_row) if watch_row else None
+            rated = dict(rated_row) if rated_row else None
+            now = self.utc_now_iso()
+            result = operation_result(operation, sync_record(media, tmdb, watch, rated, now))
+            if not result:
+                if operation["operationType"] == "delete":
+                    for table in ("watchlist", "rated_movies"):
+                        conn.execute(
+                            f"DELETE FROM {table} WHERE user_id = ? AND media_type = ? AND tmdb_id = ?", key,
+                        )
+                    revision = "absent"
+                else:
+                    values = write_values(p, watch, now)
+                    columns = list(values)
+                    updates = ", ".join(f"{col} = excluded.{col}" for col in columns if col != "added_at")
+                    conn.execute(
+                        f"INSERT INTO watchlist (user_id, {', '.join(columns)}) "
+                        f"VALUES ({', '.join('?' for _ in range(len(columns) + 1))}) "
+                        f"ON CONFLICT(user_id, media_type, tmdb_id) DO UPDATE SET {updates}",
+                        (user_id, *values.values()),
+                    )
+                    new_rated = None
+                    if values["user_rating"]:
+                        new_rated = {"rating": values["user_rating"]}
+                        conn.execute("""
+                            INSERT INTO rated_movies
+                            (user_id, media_type, tmdb_id, title, poster_path, release_date, rating, rated_at, updated_at)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            ON CONFLICT(user_id, media_type, tmdb_id) DO UPDATE SET
+                            title=excluded.title, poster_path=excluded.poster_path,
+                            release_date=excluded.release_date, rating=excluded.rating, updated_at=excluded.updated_at
+                        """, (*key, values["title"], values["poster_path"], values["release_date"],
+                              values["user_rating"], now, now))
+                    else:
+                        conn.execute(
+                            "DELETE FROM rated_movies WHERE user_id = ? AND media_type = ? AND tmdb_id = ?", key,
+                        )
+                    revision = sync_record(media, tmdb, values, new_rated)["revision"]
+                result = {"applied": {"operationId": operation["operationId"], "revision": revision}}
+            conn.execute(
+                "INSERT INTO sync_receipts (user_id, operation_id, fingerprint, result) VALUES (?, ?, ?, ?)",
+                (user_id, operation["operationId"], fingerprint, json.dumps(result)),
+            )
+            return result
 
     def list_items(self, user_id: str) -> list[dict[str, Any]]:
         with self._connection() as conn:
@@ -1662,5 +1750,3 @@ class SqliteWatchlistRepository(WatchlistRepository):
             )
         news_dict["story_id"] = story_id
         return news_dict
-
-

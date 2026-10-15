@@ -1,4 +1,5 @@
 import Dexie, { type Table } from "dexie";
+import type { MediaDetails } from "../types";
 
 export interface LocalMovie {
   id: string; // e.g. "movie_1234" or local UUID
@@ -17,6 +18,7 @@ export interface LocalMovie {
   notes?: string | null;
   priority?: number | null;
   isOwned?: boolean;
+  ownedFormat?: "electronic" | "cloud" | "hard_copy" | null;
   watchFreeStreaming?: boolean;
   watchOnSaleBuy?: boolean;
   streamingProviders?: any | null;
@@ -31,6 +33,7 @@ export interface LocalMovie {
   lastEpisodeToAir?: any | null;
   showStatus?: string | null;
   releaseInfo?: any | null;
+  details?: MediaDetails;
   createdAt: string;
   updatedAt: string;
   deletedAt?: string | null;
@@ -38,10 +41,30 @@ export interface LocalMovie {
   syncStatus: "synced" | "pending_push" | "conflict";
   ownerId: string; // user uid / email or "guest_local"
   localOnly: boolean;
+  serverRevision?: string;
+  remoteConflict?: SyncRecord;
+}
+
+export interface SyncRecord {
+  id: string;
+  tmdbId: number;
+  mediaType: "movie" | "tv";
+  title: string;
+  posterPath: string | null;
+  releaseDate: string | null;
+  status: string;
+  isOwned: boolean;
+  ownedFormat: "electronic" | "cloud" | "hard_copy" | null;
+  watchFreeStreaming: boolean;
+  watchOnSaleBuy: boolean;
+  rating: number | null;
+  revision: string;
+  deletedAt: string | null;
 }
 
 export interface SyncOperation {
   operationId: string;
+  ownerId: string;
   entityType: "movie";
   entityId: string;
   operationType: "upsert" | "delete" | "patch";
@@ -50,28 +73,48 @@ export interface SyncOperation {
   attemptCount: number;
   lastAttemptAt?: string | null;
   lastError?: string | null;
-  status: "pending" | "syncing" | "synced" | "failed";
+  status: "pending" | "syncing" | "synced" | "failed" | "conflict";
+  baseRevision?: string;
+  nextAttemptAt?: string;
 }
 
 export interface LocalMetadataRecord {
   key: string;
-  value: any;
+  value: unknown;
   updatedAt: string;
 }
 
 export class CineQueueDatabase extends Dexie {
-  movies!: Table<LocalMovie, string>;
+  movies: Table<LocalMovie, [string, string]>;
   syncQueue!: Table<SyncOperation, string>;
   localMetadata!: Table<LocalMetadataRecord, string>;
 
-  constructor() {
-    super("CineQueueOfflineDB");
+  constructor(name = "CineQueueOfflineDB") {
+    super(name);
 
     this.version(1).stores({
       movies: "id, tmdbId, mediaType, status, watchStatus, rating, ownerId, syncStatus, deletedAt, [ownerId+deletedAt]",
       syncQueue: "operationId, entityType, entityId, status, createdAt, attemptCount",
       localMetadata: "key",
     });
+    // Dexie cannot change an existing table's primary key in place.
+    this.version(2).stores({
+      ownerMovies: "[ownerId+id], ownerId, tmdbId, syncStatus, deletedAt",
+      syncQueue: "operationId, ownerId, entityType, entityId, status, createdAt, attemptCount",
+    }).upgrade(async (tx) => {
+      const movies = await tx.table<LocalMovie>("movies").toArray();
+      await tx.table("ownerMovies").bulkPut(movies);
+      await tx.table<SyncOperation>("syncQueue").toCollection().modify((op) => {
+        // Never guess the owner from the current login or a colliding legacy movie ID.
+        op.ownerId = op.payload.ownerId || "";
+        if (!op.ownerId) {
+          op.status = "failed";
+          op.lastError = "Legacy operation has no owner; not eligible for automatic sync.";
+        }
+      });
+    });
+    this.version(3).stores({ movies: null });
+    this.movies = this.table("ownerMovies");
   }
 }
 

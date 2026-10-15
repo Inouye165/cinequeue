@@ -49,6 +49,8 @@ logs/
 # Test output
 coverage/
 .nyc_output/
+frontend/test-results/
+frontend/playwright-report/
 
 # TypeScript build info cache
 *.tsbuildinfo

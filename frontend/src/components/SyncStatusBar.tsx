@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { syncService, type SyncStatusInfo } from "../services/syncService";
-import { movieService } from "../services/movieService";
+import { syncStatusLabel } from "../utils/syncStatusLabel";
 
 interface SyncStatusBarProps {
   ownerId: string;
@@ -10,6 +10,8 @@ interface SyncStatusBarProps {
 export function SyncStatusBar({ ownerId, onDataCleared }: SyncStatusBarProps) {
   const [status, setStatus] = useState<SyncStatusInfo>(syncService.getStatus());
   const [showClearModal, setShowClearModal] = useState(false);
+  const [clearAccepted, setClearAccepted] = useState(false);
+  const [clearError, setClearError] = useState("");
 
   useEffect(() => {
     const unsubscribe = syncService.subscribe((newStatus) => {
@@ -19,13 +21,15 @@ export function SyncStatusBar({ ownerId, onDataCleared }: SyncStatusBarProps) {
   }, []);
 
   const handleSyncClick = () => {
-    void syncService.triggerSync(ownerId);
+    void syncService.retryNow(ownerId);
   };
 
   const handleClearConfirm = async () => {
-    await movieService.clearLocalData(ownerId);
-    setShowClearModal(false);
-    if (onDataCleared) onDataCleared();
+    try {
+      await syncService.clearWorkspace(ownerId);
+      setShowClearModal(false);
+      if (onDataCleared) onDataCleared();
+    } catch (err) { setClearError(String(err)); }
   };
 
   const getBadgeStyle = () => {
@@ -76,7 +80,7 @@ export function SyncStatusBar({ ownerId, onDataCleared }: SyncStatusBarProps) {
             fontWeight: 600,
           }}
         >
-          ● {badge.text}
+          ● {syncStatusLabel(status.state)}
         </span>
         {status.pendingCount > 0 && (
           <span style={{ color: "#f39c12", fontWeight: 500 }}>
@@ -89,6 +93,7 @@ export function SyncStatusBar({ ownerId, onDataCleared }: SyncStatusBarProps) {
           </span>
         )}
       </div>
+      {status.error && <p role="alert">{status.error}</p>}
 
       <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
         <button
@@ -111,7 +116,7 @@ export function SyncStatusBar({ ownerId, onDataCleared }: SyncStatusBarProps) {
 
         <button
           type="button"
-          onClick={() => setShowClearModal(true)}
+          onClick={() => { setClearAccepted(false); setClearError(""); setShowClearModal(true); }}
           className="admin-btn"
           style={{
             padding: "4px 10px",
@@ -161,6 +166,10 @@ export function SyncStatusBar({ ownerId, onDataCleared }: SyncStatusBarProps) {
                 </strong>
               )}
             </p>
+            <label><input type="checkbox" checked={clearAccepted} onChange={(event) => setClearAccepted(event.target.checked)} />
+              I have exported a backup or accept losing this workspace's local data.
+            </label>
+            {clearError && <p role="alert">{clearError}</p>}
             <div style={{ display: "flex", justifyContent: "flex-end", gap: "12px", marginTop: "20px" }}>
               <button
                 type="button"
@@ -172,6 +181,7 @@ export function SyncStatusBar({ ownerId, onDataCleared }: SyncStatusBarProps) {
               <button
                 type="button"
                 onClick={handleClearConfirm}
+                disabled={!clearAccepted}
                 style={{ padding: "8px 16px", borderRadius: "6px", background: "#e74c3c", color: "#fff", border: "none", cursor: "pointer", fontWeight: 600 }}
               >
                 Clear Data

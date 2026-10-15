@@ -39,6 +39,12 @@ steps:
     args: ["run", "build"]
     dir: "frontend"
 
+  # Offline PWA browser regressions
+  - name: node:22
+    entrypoint: bash
+    args: ["-c", "npx playwright install --with-deps chromium && npm run test:e2e"]
+    dir: "frontend"
+
   # D. Build the Docker image
   - name: gcr.io/cloud-builders/docker
     args:

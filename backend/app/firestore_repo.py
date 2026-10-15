@@ -9,6 +9,10 @@ from typing import Any, Optional
 from google.cloud import firestore  # type: ignore[import-untyped]
 
 from app.repository import DuplicateItemError, WatchlistRepository
+from app.sync_protocol import (
+    check_receipt, operation_fingerprint, operation_result, sync_record, sync_records,
+    validate_operation, write_values,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +39,68 @@ class FirestoreWatchlistRepository(WatchlistRepository):
         return self._db.collection("users").document(user_id).collection(COLLECTION)
 
     # -- Repository interface --------------------------------------------------
+
+    def sync_snapshot(self, user_id: str) -> list[dict[str, Any]]:
+        user = self._db.collection("users").document(user_id)
+
+        @firestore.transactional
+        def read(transaction):
+            # Passing the same transaction pins both queries to a single snapshot.
+            watch = [doc.to_dict() for doc in user.collection("watchlist").stream(transaction=transaction)]
+            rated = [doc.to_dict() for doc in user.collection("rated_movies").stream(transaction=transaction)]
+            return sync_records(watch, rated)
+
+        return read(self._db.transaction())
+
+    def apply_sync_operation(self, user_id: str, operation: dict[str, Any]) -> dict[str, Any]:
+        validate_operation(operation, user_id)
+        fingerprint = operation_fingerprint(operation)
+        p = operation["payload"]
+        media, tmdb = p.get("mediaType", "movie"), p["tmdbId"]
+        user = self._db.collection("users").document(user_id)
+        watch_ref = user.collection("watchlist").document(_doc_id(media, tmdb))
+        rated_ref = user.collection("rated_movies").document(_doc_id(media, tmdb))
+        receipt_ref = user.collection("sync_receipts").document(
+            hashlib.sha256(operation["operationId"].encode()).hexdigest()
+        )
+
+        @firestore.transactional
+        def apply(transaction):
+            receipt = receipt_ref.get(transaction=transaction)
+            if receipt.exists:
+                return check_receipt(receipt.to_dict(), fingerprint)
+            # Firestore requires all reads before any writes.
+            watch = watch_ref.get(transaction=transaction).to_dict()
+            rated = rated_ref.get(transaction=transaction).to_dict()
+            now = self.utc_now_iso()
+            result = operation_result(operation, sync_record(media, tmdb, watch, rated, now))
+            if not result:
+                if operation["operationType"] == "delete":
+                    transaction.delete(watch_ref)
+                    transaction.delete(rated_ref)
+                    revision = "absent"
+                else:
+                    values = write_values(p, watch, now)
+                    transaction.set(watch_ref, values, merge=True)
+                    new_rated = None
+                    if values["user_rating"]:
+                        new_rated = {
+                            "user_id": user_id, "media_type": media, "tmdb_id": tmdb,
+                            "title": values["title"], "poster_path": values["poster_path"],
+                            "release_date": values["release_date"], "rating": values["user_rating"],
+                            "rated_at": (rated or {}).get("rated_at") or now, "updated_at": now,
+                        }
+                        transaction.set(rated_ref, new_rated)
+                    else:
+                        transaction.delete(rated_ref)
+                    revision = sync_record(media, tmdb, values, new_rated)["revision"]
+                result = {"applied": {"operationId": operation["operationId"], "revision": revision}}
+            transaction.set(receipt_ref, {
+                "fingerprint": fingerprint, "result": result, "created_at": now,
+            })
+            return result
+
+        return apply(self._db.transaction())
 
     def list_items(self, user_id: str) -> list[dict[str, Any]]:
         col = self._user_watchlist_col(user_id)

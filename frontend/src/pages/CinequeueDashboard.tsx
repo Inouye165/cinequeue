@@ -1,4 +1,5 @@
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { liveQuery } from "dexie";
 import { api } from "../api";
 import { AgentLoginBriefing } from "../components/AgentLoginBriefing";
 import { AgentModal } from "../components/AgentModal";
@@ -6,6 +7,7 @@ import { DetailModal } from "../components/DetailModal";
 import { MediaCard } from "../components/MediaCard";
 import { MediaCardSkeleton } from "../components/MediaCardSkeleton";
 import { SearchHeader } from "../components/SearchHeader";
+import { SyncStatusBar } from "../components/SyncStatusBar";
 import { Tabs, TabType } from "../components/Tabs";
 import { MobileBottomNav } from "../components/MobileBottomNav";
 import { useAuth } from "../context/AuthContext";
@@ -36,9 +38,10 @@ const TABS: { id: TabType; label: string }[] = [
   { id: "trending", label: "Trending" },
 ];
 
-export function CinequeueDashboard() {
-  const { user, logout } = useAuth();
-  const ownerId = user?.uid || user?.email || "guest_local";
+export function CinequeueDashboard({ onSignIn }: { onSignIn?: () => void }) {
+  const { user: cloudUser, logout, localOwnerId, sessionReady, error: authError, useDeviceWorkspace } = useAuth();
+  const ownerId = localOwnerId;
+  const user = sessionReady && cloudUser?.uid === ownerId ? cloudUser : null;
 
   const [tab, setTab] = useState<TabType>("watchlist");
   const [query, setQuery] = useState("");
@@ -50,6 +53,7 @@ export function CinequeueDashboard() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isBatchRateModalOpen, setIsBatchRateModalOpen] = useState(false);
+  const enrichedShows = useRef(new Set<number>());
   const queueKeys = useMemo(
     () => new Set(watchlist.filter((item) => !item.is_owned && (item.status === "queue" || !item.status)).map((item) => `${item.media_type}:${item.tmdb_id ?? item.id}`)),
 
@@ -73,17 +77,20 @@ export function CinequeueDashboard() {
     setRatedMovies(localRatings);
   }, [ownerId]);
 
-  // Initial load: IndexedDB rendering FIRST (0ms delay)
   useEffect(() => {
-    void reloadFromDb();
-  }, [reloadFromDb]);
+    syncService.setWorkspaceOwner(ownerId);
+    const subscription = liveQuery(() => Promise.all([
+      movieService.getWatchlistForOwner(ownerId), movieService.getRatingsForOwner(ownerId),
+    ])).subscribe({
+      next: ([localWatch, localRatings]) => { setWatchlist(localWatch); setRatedMovies(localRatings); },
+      error: (err) => setError(`Device storage unavailable: ${String(err)}`),
+    });
+    return () => subscription.unsubscribe();
+  }, [ownerId]);
 
   const loadWatchlist = useCallback(async () => {
     try {
-      if (user && navigator.onLine) {
-        const data = await api.watchlist();
-        await movieService.migrateServerData(data, [], ownerId);
-      }
+      if (user && navigator.onLine) await syncService.triggerSync(ownerId);
       await reloadFromDb();
     } catch (err) {
       console.error("Failed to load watchlist from server:", err);
@@ -93,10 +100,7 @@ export function CinequeueDashboard() {
 
   const loadRatedMovies = useCallback(async () => {
     try {
-      if (user && navigator.onLine) {
-        const data = await api.getRatings();
-        await movieService.migrateServerData([], data, ownerId);
-      }
+      if (user && navigator.onLine) await syncService.triggerSync(ownerId);
       await reloadFromDb();
     } catch (err) {
       console.error("Failed to load ratings from server:", err);
@@ -104,14 +108,12 @@ export function CinequeueDashboard() {
     }
   }, [user, ownerId, reloadFromDb]);
 
-  // Background server fetch & sync
+  // The provider owns cloud startup; local mutations wake the shared worker.
   useEffect(() => {
     if (user && navigator.onLine) {
-      Promise.all([loadWatchlist(), loadRatedMovies()]).finally(() => {
-        void syncService.triggerSync(ownerId);
-      });
+      void syncService.triggerSync(ownerId);
     }
-  }, [user, ownerId, loadWatchlist, loadRatedMovies]);
+  }, [user, ownerId]);
 
   useEffect(() => {
     if (user && tab === "rated") {
@@ -124,7 +126,8 @@ export function CinequeueDashboard() {
   useEffect(() => {
     if (!user || !navigator.onLine || !watchlist.length) return;
     const tvShowsNeedingEnrichment = watchlist.filter(
-      (item) => item.media_type === "tv" && !item.next_season && (!item.seasons || item.seasons.length === 0)
+      (item) => item.media_type === "tv" && !enrichedShows.current.has(item.tmdb_id ?? item.id) &&
+        !item.next_season && (!item.seasons || item.seasons.length === 0)
     );
     if (!tvShowsNeedingEnrichment.length) return;
 
@@ -138,24 +141,8 @@ export function CinequeueDashboard() {
         try {
           const details = await api.details("tv", tmdbId);
           if (!active) break;
-          await movieService.saveMovie(
-            {
-              tmdbId,
-              mediaType: "tv",
-              title: item.title,
-              next_season: details.next_season,
-              seasons: details.seasons,
-              numberOfEpisodes: details.number_of_episodes,
-              numberOfSeasons: details.number_of_seasons,
-              nextEpisodeToAir: details.next_episode_to_air,
-              lastEpisodeToAir: details.last_episode_to_air,
-              showStatus: details.status,
-              releaseInfo: details.release_info,
-              theatricalAvailability: details.theatrical_release_date,
-            },
-            ownerId,
-            "patch"
-          );
+          await movieService.cacheDetails(ownerId, details);
+          enrichedShows.current.add(tmdbId);
           anyEnriched = true;
         } catch (err) {
           console.warn(`Could not enrich TV show ${item.title}:`, err);
@@ -192,9 +179,13 @@ export function CinequeueDashboard() {
 
   // Handle remote data fetching when tab is a remote tab
   useEffect(() => {
-    if (!user) return;
     const isRemoteTab = ["search", "upcoming", "theatres", "on-air", "trending"].includes(tab);
     if (!isRemoteTab) return;
+    if (!user || !navigator.onLine) {
+      setRemoteItems([]);
+      setError("Discovery requires an online cloud session. Your saved collection is available on this device.");
+      return;
+    }
 
     let active = true;
     const fetchRemoteData = async () => {
@@ -265,12 +256,19 @@ export function CinequeueDashboard() {
 
   const openDetails = async (item: MediaItem) => {
     setError(null);
+    const tmdbId = "tmdb_id" in item ? (item as WatchlistItem).tmdb_id : item.id;
     try {
-      const tmdbId = "tmdb_id" in item ? (item as WatchlistItem).tmdb_id : item.id;
+      const cached = await movieService.getCachedDetails(ownerId, item.media_type, tmdbId);
+      if (cached) setSelected(cached);
+      if (!user || !navigator.onLine) {
+        if (!cached) setError("Details have not been saved on this device.");
+        return;
+      }
       const details = await api.details(item.media_type, tmdbId);
+      await movieService.cacheDetails(ownerId, details);
       setSelected(details);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not load details");
+      setError(`Could not refresh details; saved details remain available. ${err instanceof Error ? err.message : ""}`);
     }
   };
 
@@ -284,6 +282,7 @@ export function CinequeueDashboard() {
           posterPath: item.poster_url?.replace("https://image.tmdb.org/t/p/w342", "") ?? undefined,
           releaseDate: item.release_date ?? undefined,
           status: "queue",
+          details: selected?.id === item.id ? selected : undefined,
         },
         ownerId
       );
@@ -292,17 +291,7 @@ export function CinequeueDashboard() {
       setTab("watchlist");
       setSelected(null);
 
-      if (user && navigator.onLine) {
-        void api.addToWatchlist({
-          media_type: item.media_type,
-          tmdb_id: item.id,
-          title: item.title,
-          poster_path: item.poster_url?.replace("https://image.tmdb.org/t/p/w342", "") ?? undefined,
-          release_date: item.release_date ?? undefined,
-        }).then(() => syncService.triggerSync(ownerId)).catch(console.error);
-      } else {
-        void syncService.triggerSync(ownerId);
-      }
+      void syncService.triggerSync(ownerId);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not add to queue");
     }
@@ -318,13 +307,7 @@ export function CinequeueDashboard() {
         setSelected(null);
       }
 
-      if (user && navigator.onLine) {
-        void api.removeFromWatchlist(item.media_type, tmdbId)
-          .then(() => syncService.triggerSync(ownerId))
-          .catch(console.error);
-      } else {
-        void syncService.triggerSync(ownerId);
-      }
+      void syncService.triggerSync(ownerId);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not remove from watchlist");
     }
@@ -344,13 +327,7 @@ export function CinequeueDashboard() {
       );
       await reloadFromDb();
 
-      if (user && navigator.onLine) {
-        void api.updateWatchlistItem(item.media_type, tmdbId, undefined, undefined, "following")
-          .then(() => syncService.triggerSync(ownerId))
-          .catch(console.error);
-      } else {
-        void syncService.triggerSync(ownerId);
-      }
+      void syncService.triggerSync(ownerId);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not move to following");
     }
@@ -370,13 +347,7 @@ export function CinequeueDashboard() {
       );
       await reloadFromDb();
 
-      if (user && navigator.onLine) {
-        void api.updateWatchlistItem(item.media_type, tmdbId, undefined, undefined, "queue")
-          .then(() => syncService.triggerSync(ownerId))
-          .catch(console.error);
-      } else {
-        void syncService.triggerSync(ownerId);
-      }
+      void syncService.triggerSync(ownerId);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not move to queue");
     }
@@ -396,6 +367,7 @@ export function CinequeueDashboard() {
             mediaType: item.media_type,
             title: item.title,
             isOwned: true,
+            ownedFormat: format,
             status: "library",
           },
           ownerId
@@ -409,23 +381,7 @@ export function CinequeueDashboard() {
       }
       await reloadFromDb();
 
-      if (user && navigator.onLine) {
-        if (isOwned) {
-          void api.addToWatchlist({
-            media_type: item.media_type,
-            tmdb_id: tmdbId,
-            title: item.title,
-            is_owned: true,
-            owned_format: format,
-          }).then(() => syncService.triggerSync(ownerId)).catch(console.error);
-        } else {
-          void api.removeFromWatchlist(item.media_type, tmdbId)
-            .then(() => syncService.triggerSync(ownerId))
-            .catch(console.error);
-        }
-      } else {
-        void syncService.triggerSync(ownerId);
-      }
+      void syncService.triggerSync(ownerId);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not update library status");
     }
@@ -450,19 +406,7 @@ export function CinequeueDashboard() {
       );
       await reloadFromDb();
 
-      if (user && navigator.onLine) {
-        void api.updateWatchlistItem(
-          selected.media_type,
-          tmdbId,
-          undefined,
-          undefined,
-          undefined,
-          watchFreeStreaming,
-          watchOnSaleBuy
-        ).then(() => syncService.triggerSync(ownerId)).catch(console.error);
-      } else {
-        void syncService.triggerSync(ownerId);
-      }
+      void syncService.triggerSync(ownerId);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not update watch options");
     }
@@ -484,20 +428,7 @@ export function CinequeueDashboard() {
       );
       await reloadFromDb();
 
-      if (user && navigator.onLine) {
-        if (rating === 0) {
-          void api.deleteRating(item.media_type, tmdbId).then(() => syncService.triggerSync(ownerId)).catch(console.error);
-        } else {
-          void api.rateMovie({
-            media_type: item.media_type,
-            tmdb_id: tmdbId,
-            title: item.title,
-            rating,
-          }).then(() => syncService.triggerSync(ownerId)).catch(console.error);
-        }
-      } else {
-        void syncService.triggerSync(ownerId);
-      }
+      void syncService.triggerSync(ownerId);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not save rating");
     }
@@ -518,20 +449,7 @@ export function CinequeueDashboard() {
       );
       await reloadFromDb();
 
-      if (user && navigator.onLine) {
-        if (rating === 0) {
-          void api.deleteRating(movie.media_type, movie.tmdb_id).then(() => syncService.triggerSync(ownerId)).catch(console.error);
-        } else {
-          void api.rateMovie({
-            media_type: movie.media_type,
-            tmdb_id: movie.tmdb_id,
-            title: movie.title,
-            rating,
-          }).then(() => syncService.triggerSync(ownerId)).catch(console.error);
-        }
-      } else {
-        void syncService.triggerSync(ownerId);
-      }
+      void syncService.triggerSync(ownerId);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not update rating");
     }
@@ -621,17 +539,23 @@ export function CinequeueDashboard() {
     }
     if (searchFilters.mediaType === "movie") filterParts.push("Movies only");
     if (searchFilters.mediaType === "tv") filterParts.push("TV shows only");
-
     if (filterParts.length > 0) {
       return `Results for ${filterParts.join(" • ")}`;
     }
     return "Search Results";
   }, [tab, query, searchFilters]);
 
-  if (!user) return null;
-
   return (
     <div className="app-shell">
+      {!user && (
+        <div role="status" className="error-banner">
+          {ownerId === "guest_local" ? "Device-only workspace" : "Saved account workspace"}: changes are saved on this device.
+          {" "}Sign in when online to sync. Discovery, fresh availability, and AI require a cloud session.
+          {authError && <p>Cloud connection: {authError}</p>}
+          <button type="button" onClick={onSignIn}>Sign in to sync</button>
+          {ownerId !== "guest_local" && <button type="button" onClick={useDeviceWorkspace}>Use device-only workspace</button>}
+        </div>
+      )}
       <SearchHeader
         query={query}
         setQuery={handleSetQuery}
@@ -639,14 +563,16 @@ export function CinequeueDashboard() {
         filters={searchFilters}
         onUpdateFilters={handleUpdateFilters}
         onResetFilters={handleResetFilters}
-        user={user}
-        onLogout={logout}
-        onOpenAgentModal={openAgentModal}
+        user={user ?? { display_name: ownerId === "guest_local" ? "This device" : "Saved account workspace" }}
+        onLogout={ownerId !== "guest_local" ? logout : undefined}
+        onOpenAgentModal={user ? openAgentModal : undefined}
         ownerId={ownerId}
         onDataCleared={reloadFromDb}
       />
 
-      <AgentLoginBriefing onOpenChat={() => openAgentModal("chat")} />
+      <SyncStatusBar ownerId={ownerId} onDataCleared={reloadFromDb} />
+
+      {user && <AgentLoginBriefing onOpenChat={() => openAgentModal("chat")} />}
 
       {error ? <div className="error-banner">{error}</div> : null}
 
@@ -654,7 +580,7 @@ export function CinequeueDashboard() {
         <Tabs tabsList={TABS} activeTab={tab} onChangeTab={setTab} />
       </div>
 
-      <AgentModal
+      {user && <AgentModal
         isOpen={agentModalOpen}
         initialTab={agentModalTab}
         onClose={() => setAgentModalOpen(false)}
@@ -662,14 +588,14 @@ export function CinequeueDashboard() {
           void loadWatchlist();
           void loadRatedMovies();
         }}
-      />
+      />}
 
 
-      <BatchRateModal
+      {user && <BatchRateModal
         isOpen={isBatchRateModalOpen}
         onClose={() => setIsBatchRateModalOpen(false)}
         onRatingsAdded={() => void loadRatedMovies()}
-      />
+      />}
 
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px", flexWrap: "wrap", gap: "12px" }}>
         <h2 className="section-title" style={{ margin: 0 }}>{sectionTitle}</h2>

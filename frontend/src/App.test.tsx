@@ -3,6 +3,14 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, act, waitFor } from "@testing-library/react";
 import App from "./App";
 import { api } from "./api";
+import { __resetFirebaseAuthForTests } from "./context/AuthContext";
+
+vi.mock("./pages/CinequeueDashboard", () => ({
+  CinequeueDashboard: () => <div>Local collection</div>,
+}));
+vi.mock("./services/syncService", () => ({
+  syncService: { setAuthenticatedOwner: vi.fn(), triggerSync: vi.fn().mockResolvedValue(false) },
+}));
 
 // Mock Firebase APIs
 const mockUnsubscribe = vi.fn();
@@ -57,6 +65,8 @@ vi.mock("./api", () => {
 
 describe("App Authentication Gating & Integration Tests", () => {
   beforeEach(() => {
+    __resetFirebaseAuthForTests();
+    localStorage.clear();
     vi.clearAllMocks();
     authStateChangedCallback = null;
     mockAuth.currentUser = null;

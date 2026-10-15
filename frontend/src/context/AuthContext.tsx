@@ -14,6 +14,7 @@ import {
   incrementCount,
 } from "../utils/authPerformanceMonitor";
 import { authLog } from "../utils/authDebugLog";
+import { syncService } from "../services/syncService";
 
 export interface UserInfo {
   uid: string;
@@ -23,6 +24,8 @@ export interface UserInfo {
 }
 
 interface AuthContextType {
+  localOwnerId: string;
+  useDeviceWorkspace: () => void;
   user: UserInfo | null;
   isAdmin: boolean;
   authInitialized: boolean;
@@ -107,6 +110,7 @@ async function getFirebaseAuth(): Promise<FirebaseAuth> {
 }
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
+  const [localOwnerId, setLocalOwnerId] = useState(() => localStorage.getItem("cinequeue_local_owner") || "guest_local");
   const [user, setUser] = useState<UserInfo | null>(null);
   const [isAdmin, setIsAdmin] = useState(false);
   const [authInitialized, setAuthInitialized] = useState(false);
@@ -128,6 +132,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const unsubscribeRef = useRef<(() => void) | null>(null);
   
   const generationRef = useRef(0);
+  const authSequenceRef = useRef(0);
   const adminMePromiseRef = useRef<Promise<any> | null>(null);
 
   const fetchAdminMe = async (token: string): Promise<{ username: string }> => {
@@ -140,7 +145,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     try {
       return await promise;
     } finally {
-      adminMePromiseRef.current = null;
+      if (adminMePromiseRef.current === promise) adminMePromiseRef.current = null;
     }
   };
 
@@ -176,6 +181,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           authLog.info("initializeAuth: registering onIdTokenChanged listener");
           
           const unsubscribe = auth.onIdTokenChanged(async (firebaseUser) => {
+            if (!active || generation !== generationRef.current) return;
+            if (firebaseUser && localStorage.getItem("cinequeue_device_only") === "true") {
+              setAuthReady(true);
+              setAuthInitialized(true);
+              setAuthorizationReady(true);
+              setLoading(false);
+              return;
+            }
+            const sequence = ++authSequenceRef.current;
+            const isCurrent = () => active && generation === generationRef.current && sequence === authSequenceRef.current;
+            syncService.setAuthenticatedOwner(null);
+            adminMePromiseRef.current = null;
+            setSessionReady(false);
+            setUser(null);
+            setIsAdmin(false);
             recordEvent("auth_state_callback_started", "start");
             incrementCount("callbacks");
             authLog.info("onIdTokenChanged fired", { hasUser: !!firebaseUser });
@@ -187,6 +207,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             }
 
             if (firebaseUser) {
+              localStorage.setItem("cinequeue_local_owner", firebaseUser.uid);
+              setLocalOwnerId(firebaseUser.uid);
               authLog.info("onIdTokenChanged: user present", { uid: firebaseUser.uid, email: firebaseUser.email });
               recordEvent("auth_state_user_available", "success", { uid: firebaseUser.uid, email: firebaseUser.email });
               
@@ -225,53 +247,45 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
                 const performAuthSequence = async () => {
                   try {
-                    // Pre-check: decode JWT auth_time client-side to avoid slow backend rejection
-                    // If the cached Firebase session is stale (> 5 min), sign out immediately.
+                    // Reuse a valid backend session; recent auth_time is required only for a new cookie.
+                    let existingSession: { uid: string } | null = null;
+                    let restoringSession = false;
                     try {
-                      const payloadPart = token.split(".")[1];
-                      const decoded = JSON.parse(atob(payloadPart));
-                      const authTime = decoded.auth_time;
-                      if (authTime) {
-                        const ageSeconds = Math.floor(Date.now() / 1000) - authTime;
-                        authLog.info("auth_time pre-check", { authTime, ageSeconds, maxAge: 300 });
-                        if (ageSeconds > 5 * 60) {
-                          authLog.warn(
-                            `auth_time is ${ageSeconds}s old (${(ageSeconds / 86400).toFixed(1)} days) — ` +
-                            "stale cached session, signing out immediately"
-                          );
-                          // Sign out without showing error — user just needs to click login again
-                          setAuthorizationReady(true);
-                          setLoading(false);
-                          setUser(null);
-                          setFirebaseUser(null);
-                          setIdToken(null);
-                          setSessionReady(false);
-                          setRoleLoading(false);
-                          setProfileLoading(false);
-                          setAuthInitialized(true);
-                          try { await firebaseSignOut(auth); } catch (_) { /* ignore */ }
-                          return;
-                        }
+                      const encoded = token.split(".")[1];
+                      if (encoded) {
+                        const claims = JSON.parse(atob(encoded.replace(/-/g, "+").replace(/_/g, "/")));
+                        restoringSession = typeof claims.auth_time === "number" &&
+                          Date.now() / 1000 - claims.auth_time > 300;
                       }
-                    } catch (preErr) {
-                      authLog.debug("auth_time pre-check failed (non-fatal)", { error: (preErr as Error).message });
+                    } catch (err) {
+                      authLog.debug("Session restoration hint unavailable", { error: (err as Error).message });
+                    }
+                    if (restoringSession) {
+                      try {
+                        existingSession = await api.me();
+                      } catch (err) {
+                        authLog.info("Existing session unavailable", { error: (err as Error).message });
+                      }
+                    }
+                    if (!isCurrent()) return;
+                    if (existingSession?.uid !== uInfo.uid) {
+                      authLog.info("performAuthSequence: requesting CSRF token…");
+                      recordEvent("csrf_request_started", "start");
+                      const csrfData = await api.csrf();
+                      authLog.info("performAuthSequence: CSRF token received");
+                      recordEvent("csrf_request_completed", "success");
+                      if (!isCurrent()) { authLog.warn("stale after CSRF"); return; }
+
+                      authLog.info("performAuthSequence: calling createSession…");
+                      recordEvent("session_creation_started", "start");
+                      await api.createSession(token, csrfData.csrf_token);
+                      authLog.info("performAuthSequence: createSession succeeded");
+                      recordEvent("session_creation_completed", "success");
+                      if (!isCurrent()) { authLog.warn("stale after createSession"); return; }
                     }
 
-                    authLog.info("performAuthSequence: requesting CSRF token…");
-                    recordEvent("csrf_request_started", "start");
-                    const csrfData = await api.csrf();
-                    authLog.info("performAuthSequence: CSRF token received");
-                    recordEvent("csrf_request_completed", "success");
-                    if (!isCurrent()) { authLog.warn("stale after CSRF"); return; }
-
-                    authLog.info("performAuthSequence: calling createSession…");
-                    recordEvent("session_creation_started", "start");
-                    await api.createSession(token, csrfData.csrf_token);
-                    authLog.info("performAuthSequence: createSession succeeded");
-                    recordEvent("session_creation_completed", "success");
-                    if (!isCurrent()) { authLog.warn("stale after createSession"); return; }
-
                     authLog.info("performAuthSequence: setting sessionReady=true, loading=false");
+                    syncService.setAuthenticatedOwner(uInfo.uid);
                     setSessionReady(true);
                     setUser(uInfo);
                     setLoading(false);
@@ -376,15 +390,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                     recordEvent("authorization_ready", "failure");
                     setAuthorizationReady(true);
                     
-                    try {
-                      authLog.info("signing out of Firebase after auth sequence failure");
-                      await firebaseSignOut(auth);
-                    } catch (soErr) {
-                      authLog.error("Firebase signout on failure also failed", { error: (soErr as Error).message });
-                      console.error("Firebase signout on session creation failure failed:", soErr);
-                    }
-
-                    // Preserve error message after signout triggers state callback
+                    // A cloud failure must not sign out the device workspace.
                     setError(errMsg);
 
                     recordEvent("auth_context_state_update_completed", "success");
@@ -407,11 +413,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                 setAuthInitialized(true);
                 setLoading(false);
                 setAuthorizationReady(true);
-                try {
-                  await firebaseSignOut(auth);
-                } catch (soErr) {
-                  // ignore
-                }
                 setError(errMsg);
                 recordEvent("auth_trace_completed", "success");
               }
@@ -478,7 +479,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   useEffect(() => {
+    const ownerId = sessionReady && user?.uid === localOwnerId ? user.uid : null;
+    syncService.setAuthenticatedOwner(ownerId);
+    if (ownerId) void syncService.triggerSync(ownerId);
+    return () => syncService.setAuthenticatedOwner(null);
+  }, [user, sessionReady, localOwnerId]);
+
+  useEffect(() => {
     const handleUnauthorized = () => {
+      syncService.setAuthenticatedOwner(null);
+      setSessionReady(false);
       setUser(null);
       setIsAdmin(false);
       setAuthorizationReady(true);
@@ -491,6 +501,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const loginWithGoogle = async () => {
+    localStorage.removeItem("cinequeue_device_only");
     authLog.info("loginWithGoogle: starting");
     startTrace();
     recordEvent("auth_context_state_update_started", "start");
@@ -538,6 +549,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   const logout = async () => {
+    authSequenceRef.current++;
+    syncService.setAuthenticatedOwner(null);
+    localStorage.removeItem("cinequeue_local_owner");
+    localStorage.setItem("cinequeue_device_only", "true");
+    setLocalOwnerId("guest_local");
+    setUser(null);
+    setSessionReady(false);
+    setIsAdmin(false);
     startTrace();
     recordEvent("auth_context_state_update_started", "start");
     setError(null);
@@ -572,18 +591,29 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   const refreshAdminState = async () => {
+    const generation = generationRef.current;
+    const sequence = authSequenceRef.current;
+    const isCurrent = () => generation === generationRef.current &&
+      sequence === authSequenceRef.current &&
+      localStorage.getItem("cinequeue_device_only") !== "true";
     const auth = await getFirebaseAuth();
+    if (!isCurrent()) return;
     const currentUser = auth.currentUser;
-    if (currentUser) {
+    if (currentUser && currentUser.uid === localOwnerId) {
       setLoading(true);
       try {
         const token = await currentUser.getIdToken(true);
+        if (!isCurrent()) return;
         const csrfData = await api.csrf();
+        if (!isCurrent()) return;
         await api.createSession(token, csrfData.csrf_token);
+        if (!isCurrent()) return;
         setSessionReady(true);
         await fetchAdminMe(token);
+        if (!isCurrent()) return;
         setIsAdmin(true);
       } catch (err: any) {
+        if (!isCurrent()) return;
         setSessionReady(false);
         setIsAdmin(false);
         const isForbidden = err.message?.includes("403") || err.status === 403;
@@ -591,15 +621,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           setError(err.message || "Failed to refresh admin verification");
         }
       } finally {
-        setLoading(false);
+        if (isCurrent()) setLoading(false);
       }
     }
   };
 
   const clearError = () => setError(null);
+  const useDeviceWorkspace = () => {
+    void logout();
+  };
 
   return (
     <AuthContext.Provider value={{
+      localOwnerId,
+      useDeviceWorkspace,
       user,
       isAdmin,
       authInitialized,
