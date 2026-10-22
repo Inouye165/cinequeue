@@ -1,5 +1,6 @@
 import React, { useState } from "react";
 import { AccountSheet } from "./AccountSheet";
+import { InstallAppModal, usePwaInstall } from "./InstallAppBanner";
 import { SearchFiltersPanel } from "./SearchFiltersPanel";
 import type { SearchFilterState } from "../types";
 
@@ -32,6 +33,7 @@ export function SearchHeader({
 }: SearchHeaderProps) {
   const [showAccountSheet, setShowAccountSheet] = useState(false);
   const [showFiltersPanel, setShowFiltersPanel] = useState(false);
+  const { isStandalone, showGuide, setShowGuide, triggerInstall } = usePwaInstall();
 
   const activeFiltersCount = filters
     ? (filters.actors.length > 0 ? filters.actors.length : 0) +
@@ -82,30 +84,54 @@ export function SearchHeader({
       {/* Row 1: Brand Wordmark + Compact User Avatar */}
       <div className="app-bar-top-row">
         <div className="brand-wordmark">
-          <span className="brand-icon" aria-hidden="true">🍿</span>
+          <img
+            src="/icon-192.png"
+            alt=""
+            aria-hidden="true"
+            className="brand-app-icon"
+          />
           <h1 className="brand-name">CineQueue</h1>
         </div>
 
-        {user && (
-          <button
-            type="button"
-            className="avatar-icon-btn"
-            onClick={() => setShowAccountSheet(true)}
-            aria-label={`Open Account menu for ${user.display_name || user.email || "User"}`}
-          >
-            {user.photo_url ? (
-              <img
-                src={user.photo_url}
-                alt={user.display_name || user.email || "User avatar"}
-                className="avatar-img"
-              />
-            ) : (
-              <span className="avatar-fallback">
-                {((user.display_name || user.email || "U")[0]).toUpperCase()}
-              </span>
-            )}
-          </button>
-        )}
+        <div className="app-bar-actions">
+          {!isStandalone && (
+            <button
+              type="button"
+              className="install-app-pill-btn"
+              onClick={() => void triggerInstall()}
+              aria-label="Install CineQueue App to Home Screen"
+              title="Add CineQueue to your Home Screen"
+            >
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M12 3v12" />
+                <path d="m7 10 5 5 5-5" />
+                <path d="M5 21h14" />
+              </svg>
+              <span>Get App</span>
+            </button>
+          )}
+
+          {user && (
+            <button
+              type="button"
+              className="avatar-icon-btn"
+              onClick={() => setShowAccountSheet(true)}
+              aria-label={`Open Account menu for ${user.display_name || user.email || "User"}`}
+            >
+              {user.photo_url ? (
+                <img
+                  src={user.photo_url}
+                  alt={user.display_name || user.email || "User avatar"}
+                  className="avatar-img"
+                />
+              ) : (
+                <span className="avatar-fallback">
+                  {((user.display_name || user.email || "U")[0]).toUpperCase()}
+                </span>
+              )}
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Row 2: Streamlined Integrated Search Field + Filters Button */}
@@ -309,7 +335,13 @@ export function SearchHeader({
         onOpenAgentModal={onOpenAgentModal}
         ownerId={ownerId}
         onDataCleared={onDataCleared}
+        onRequestInstall={() => {
+          setShowAccountSheet(false);
+          void triggerInstall();
+        }}
       />
+
+      <InstallAppModal isOpen={showGuide} onClose={() => setShowGuide(false)} />
     </header>
   );
 }

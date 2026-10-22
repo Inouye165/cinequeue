@@ -122,6 +122,22 @@ class FirestoreWatchlistRepository(WatchlistRepository):
             res.append(d)
         return res
 
+    def get_item(self, user_id: str, media_type: str, tmdb_id: int) -> dict[str, Any] | None:
+        doc_id = _doc_id(media_type, tmdb_id)
+        doc_ref = self._user_watchlist_col(user_id).document(doc_id)
+        snapshot = doc_ref.get()
+        if not snapshot.exists:
+            return None
+        d = snapshot.to_dict() or {}
+        d.setdefault("is_owned", False)
+        d.setdefault("owned_format", None)
+        d.setdefault("status", "queue")
+        d.setdefault("watch_free_streaming", False)
+        d.setdefault("watch_on_sale_buy", False)
+        d.setdefault("target_rental_price", None)
+        d.setdefault("user_rating", 0)
+        return d
+
     def add_item(
         self,
         user_id: str,
@@ -253,7 +269,9 @@ class FirestoreWatchlistRepository(WatchlistRepository):
     # -- Admin & Auth Methods -------------------------------------------------
 
     def get_admin_user(self, username: str) -> dict[str, Any] | None:
-        username_normalized = username.strip().lower()
+        username_normalized = (username or "").strip().lower()
+        if not username_normalized:
+            return None
         doc_ref = self._db.collection("admin_users").document(username_normalized)
         snapshot = doc_ref.get()
         if snapshot.exists:
@@ -264,7 +282,9 @@ class FirestoreWatchlistRepository(WatchlistRepository):
         return None
 
     def create_admin_user(self, username: str, password_hash: str, salt: str) -> None:
-        username_normalized = username.strip().lower()
+        username_normalized = (username or "").strip().lower()
+        if not username_normalized or not password_hash:
+            raise ValueError("Admin username and password_hash must not be empty")
         doc_ref = self._db.collection("admin_users").document(username_normalized)
         doc_ref.set({
             "password_hash": password_hash,
@@ -735,64 +755,6 @@ class FirestoreWatchlistRepository(WatchlistRepository):
         }, merge=True)
         return briefing_data
 
-    def claim_daily_greeting_generation(
-        self, user_id: str, date_str: str, lease_seconds: int = 30, force_refresh: bool = False
-    ) -> tuple[bool, dict[str, Any] | None]:
-        from datetime import datetime, timezone, timedelta
-        doc_ref = self._db.collection("users").document(user_id).collection("daily_greetings").document(date_str)
-
-        try:
-            @firestore.transactional
-            def _in_transaction(transaction, ref):
-                snapshot = ref.get(transaction=transaction)
-                now_dt = datetime.now(timezone.utc)
-                now_iso = now_dt.isoformat()
-                lease_exp = (now_dt + timedelta(seconds=lease_seconds)).isoformat()
-
-                if snapshot.exists and not force_refresh:
-                    d = snapshot.to_dict() or {}
-                    b_data = d.get("briefing_data", d)
-                    status = b_data.get("status", d.get("status", "completed"))
-                    exp_str = b_data.get("lease_expires_at", d.get("lease_expires_at"))
-
-                    if status == "completed":
-                        return False, b_data
-
-                    if status == "generating" and exp_str:
-                        try:
-                            exp_dt = datetime.fromisoformat(exp_str)
-                            if exp_dt > now_dt:
-                                return False, b_data
-                        except Exception:
-                            pass
-
-                claiming_record = {
-                    "user_id": user_id,
-                    "date_str": date_str,
-                    "status": "generating",
-                    "lease_expires_at": lease_exp,
-                    "created_at": now_iso,
-                }
-                transaction.set(ref, {"user_id": user_id, "date_str": date_str, "briefing_data": claiming_record, "created_at": now_iso}, merge=True)
-                return True, None
-
-            transaction = self._db.transaction()
-            return _in_transaction(transaction, doc_ref)
-        except Exception as e:
-            logger.warning(f"Firestore claim_daily_greeting_generation error: {e}")
-            return True, None
-
-    def save_daily_greeting(self, user_id: str, date_str: str, briefing_data: dict[str, Any]) -> dict[str, Any]:
-        now = self.utc_now_iso()
-        briefing_data.setdefault("status", "completed")
-        doc_ref = self._db.collection("users").document(user_id).collection("daily_greetings").document(date_str)
-        doc_ref.set({
-            "user_id": user_id,
-            "date_str": date_str,
-            "briefing_data": briefing_data,
-            "created_at": now,
-        }, merge=True)
-        return briefing_data
     def list_rated_movies(self, user_id: str) -> list[dict[str, Any]]:
         try:
             col = self._db.collection("users").document(user_id).collection("rated_movies")
@@ -859,58 +821,63 @@ class FirestoreWatchlistRepository(WatchlistRepository):
         release_date: str | None,
         rating: int,
     ) -> dict[str, Any]:
-        try:
-            doc_id = f"{media_type}_{tmdb_id}"
-            doc_ref = self._db.collection("users").document(user_id).collection("rated_movies").document(doc_id)
-            now = self.utc_now_iso()
-            rating = max(1, min(5, int(rating)))
-            data = {
-                "user_id": user_id,
-                "media_type": media_type,
-                "tmdb_id": tmdb_id,
-                "title": title,
-                "poster_path": poster_path,
-                "release_date": release_date,
-                "rating": rating,
-                "updated_at": now,
-            }
-            existing = doc_ref.get()
-            if not existing.exists:
-                data["rated_at"] = now
-            doc_ref.set(data, merge=True)
+        doc_id = f"{media_type}_{tmdb_id}"
+        user_ref = self._db.collection("users").document(user_id)
+        doc_ref = user_ref.collection("rated_movies").document(doc_id)
+        watch_ref = user_ref.collection("watchlist").document(doc_id)
+        now = self.utc_now_iso()
+        rating = max(1, min(5, int(rating)))
+        existing = doc_ref.get()
+        prev = existing.to_dict() if existing.exists else {}
+        data = {
+            "user_id": user_id,
+            "media_type": media_type,
+            "tmdb_id": tmdb_id,
+            "title": title,
+            "poster_path": poster_path if poster_path is not None else (prev or {}).get("poster_path"),
+            "release_date": release_date if release_date is not None else (prev or {}).get("release_date"),
+            "rating": rating,
+            "updated_at": now,
+        }
+        if not existing.exists:
+            data["rated_at"] = now
+        doc_ref.set(data, merge=True)
 
-            from app.models import poster_url
-            data["id"] = doc_id
-            data["rated_ago"] = "just now"
-            if poster_path:
-                data["poster_url"] = poster_url(poster_path)
-            return data
-        except Exception as e:
-            logger.error("Error rating movie in Firestore: %s", e, exc_info=True)
-            from app.models import poster_url
-            return {
-                "id": f"{media_type}_{tmdb_id}",
-                "user_id": user_id,
-                "media_type": media_type,
-                "tmdb_id": tmdb_id,
-                "title": title,
-                "poster_path": poster_path,
-                "poster_url": poster_url(poster_path) if poster_path else None,
-                "release_date": release_date,
-                "rating": max(1, min(5, int(rating))),
-                "updated_at": self.utc_now_iso(),
-                "rated_ago": "just now",
-            }
+        # Synchronize user_rating in watchlist if present
+        watch_snap = watch_ref.get()
+        if watch_snap.exists:
+            watch_ref.update({"user_rating": rating})
+
+        from app.models import poster_url
+        data["id"] = doc_id
+        data["rated_ago"] = "just now"
+        if data.get("poster_path"):
+            data["poster_url"] = poster_url(data["poster_path"])
+        return data
 
     def delete_rated_movie(self, user_id: str, media_type: str, tmdb_id: int) -> bool:
         try:
             doc_id = f"{media_type}_{tmdb_id}"
-            doc_ref = self._db.collection("users").document(user_id).collection("rated_movies").document(doc_id)
+            user_ref = self._db.collection("users").document(user_id)
+            doc_ref = user_ref.collection("rated_movies").document(doc_id)
+            watch_ref = user_ref.collection("watchlist").document(doc_id)
             doc = doc_ref.get()
+            deleted_rated = False
             if doc.exists:
                 doc_ref.delete()
-                return True
-            return False
+                deleted_rated = True
+
+            watch_snap = watch_ref.get()
+            modified_watch = False
+            if watch_snap.exists:
+                w_data = watch_snap.to_dict() or {}
+                if not bool(w_data.get("is_owned")) and (w_data.get("status") == "watched" or not w_data.get("status")):
+                    watch_ref.delete()
+                else:
+                    watch_ref.update({"user_rating": 0})
+                modified_watch = True
+
+            return deleted_rated or modified_watch
         except Exception as e:
             logger.error("Error deleting rated movie in Firestore: %s", e, exc_info=True)
             return False
@@ -956,22 +923,39 @@ class FirestoreWatchlistRepository(WatchlistRepository):
         end_date: str | None = None,
     ) -> dict[str, Any]:
         col = self._db.collection("agent_decision_logs")
-        query = col.order_by("timestamp", direction=firestore.Query.DESCENDING)
-        if user_id:
-            query = query.where("user_id", "==", user_id)
-        if fallback_only:
-            query = query.where("fallback_used", "==", True)
+        try:
+            query: Any = col.order_by("timestamp", direction=firestore.Query.DESCENDING)
+            if user_id:
+                query = query.where("user_id", "==", user_id)
+            if fallback_only:
+                query = query.where("fallback_used", "==", True)
+            docs = list(query.stream())
+        except Exception as query_err:
+            logger.warning("Firestore composite query on agent_decision_logs failed (%s), falling back to client-side filter", query_err)
+            docs = list(col.order_by("timestamp", direction=firestore.Query.DESCENDING).limit(500).stream())
 
-        docs = list(query.stream())
         filtered = []
         for d in docs:
-            data = self._format_decision_log_doc(d.to_dict())
+            raw = d.to_dict() or {}
+            if user_id and raw.get("user_id") != user_id:
+                continue
+            if fallback_only and not raw.get("fallback_used"):
+                continue
+            data = self._format_decision_log_doc(raw)
             if start_date and data.get("timestamp", "") < start_date:
                 continue
             if end_date and data.get("timestamp", "") > end_date:
                 continue
             if model and data.get("model_requested") != model and data.get("model_used") != model:
                 continue
+            if candidate_type:
+                cands = (
+                    (data.get("selected_candidates") or [])
+                    + (data.get("optional_candidates") or [])
+                    + (data.get("required_candidates") or [])
+                )
+                if not any(candidate_type in str(c) for c in cands):
+                    continue
             filtered.append(data)
 
         total = len(filtered)
@@ -983,3 +967,208 @@ class FirestoreWatchlistRepository(WatchlistRepository):
         if doc.exists:
             return self._format_decision_log_doc(doc.to_dict())
         return None
+
+    def get_active_decision_config(self) -> dict[str, Any]:
+        try:
+            docs = list(
+                self._db.collection("agent_decision_configs")
+                .order_by("version", direction=firestore.Query.DESCENDING)
+                .limit(1)
+                .stream()
+            )
+            if docs:
+                d = docs[0].to_dict()
+                if d:
+                    return d
+        except Exception as e:
+            logger.warning("Failed to fetch active decision config from Firestore: %s", e)
+        from app.decision_models import DEFAULT_DECISION_CONFIG
+        return DEFAULT_DECISION_CONFIG.to_dict()
+
+    def save_decision_config(self, config_dict: dict[str, Any], updated_by: str, change_note: str) -> dict[str, Any]:
+        col = self._db.collection("agent_decision_configs")
+        try:
+            docs = list(col.order_by("version", direction=firestore.Query.DESCENDING).limit(1).stream())
+            max_ver = (docs[0].to_dict() or {}).get("version", 0) if docs else 0
+        except Exception:
+            max_ver = 0
+        new_ver = int(max_ver or 0) + 1
+        saved = dict(config_dict)
+        saved["version"] = new_ver
+        saved["updated_at"] = self.utc_now_iso()
+        saved["updated_by"] = updated_by
+        saved["change_note"] = change_note
+        col.document(f"v_{new_ver}").set(saved)
+        return saved
+
+    def get_active_prompt_version(self) -> dict[str, Any]:
+        try:
+            docs = list(
+                self._db.collection("agent_prompt_versions")
+                .order_by("version", direction=firestore.Query.DESCENDING)
+                .limit(1)
+                .stream()
+            )
+            if docs:
+                d = docs[0].to_dict()
+                if d:
+                    return d
+        except Exception as e:
+            logger.warning("Failed to fetch active prompt version from Firestore: %s", e)
+        from app.decision_models import DEFAULT_PROMPT_VERSION
+        return DEFAULT_PROMPT_VERSION.to_dict()
+
+    def list_prompt_versions(self) -> list[dict[str, Any]]:
+        results = []
+        try:
+            docs = (
+                self._db.collection("agent_prompt_versions")
+                .order_by("version", direction=firestore.Query.DESCENDING)
+                .stream()
+            )
+            for doc in docs:
+                d = doc.to_dict()
+                if d:
+                    results.append(d)
+        except Exception as e:
+            logger.warning("Failed to list prompt versions from Firestore: %s", e)
+        if not results:
+            from app.decision_models import DEFAULT_PROMPT_VERSION
+            results = [DEFAULT_PROMPT_VERSION.to_dict()]
+        return results
+
+    def save_prompt_version(self, prompt_dict: dict[str, Any], updated_by: str, change_note: str) -> dict[str, Any]:
+        col = self._db.collection("agent_prompt_versions")
+        try:
+            docs = list(col.order_by("version", direction=firestore.Query.DESCENDING).limit(1).stream())
+            max_ver = (docs[0].to_dict() or {}).get("version", 0) if docs else 0
+        except Exception:
+            max_ver = 0
+        new_ver = int(max_ver or 0) + 1
+        saved = dict(prompt_dict)
+        saved["version"] = new_ver
+        saved["updated_at"] = self.utc_now_iso()
+        saved["updated_by"] = updated_by
+        saved["change_note"] = change_note
+        col.document(f"v_{new_ver}").set(saved)
+        return saved
+
+    def is_trivia_presented(self, user_id: str, fact_id: str) -> bool:
+        safe_id = hashlib.sha256(fact_id.encode("utf-8")).hexdigest()
+        doc = (
+            self._db.collection("users")
+            .document(user_id)
+            .collection("trivia_presentation_history")
+            .document(safe_id)
+            .get()
+        )
+        return doc.exists
+
+    def record_trivia_presentation(self, user_id: str, fact_id: str) -> None:
+        safe_id = hashlib.sha256(fact_id.encode("utf-8")).hexdigest()
+        now = self.utc_now_iso()
+        (
+            self._db.collection("users")
+            .document(user_id)
+            .collection("trivia_presentation_history")
+            .document(safe_id)
+            .set({"user_id": user_id, "fact_id": fact_id, "presented_at": now}, merge=True)
+        )
+
+    def get_news_presentation(self, user_id: str, story_cluster_id: str) -> dict[str, Any] | None:
+        safe_id = hashlib.sha256(story_cluster_id.encode("utf-8")).hexdigest()
+        doc = (
+            self._db.collection("users")
+            .document(user_id)
+            .collection("news_presentation_history")
+            .document(safe_id)
+            .get()
+        )
+        if doc.exists:
+            return doc.to_dict()
+        return None
+
+    def record_news_presentation(self, user_id: str, story_cluster_id: str, content_fingerprint: str) -> None:
+        safe_id = hashlib.sha256(story_cluster_id.encode("utf-8")).hexdigest()
+        now = self.utc_now_iso()
+        (
+            self._db.collection("users")
+            .document(user_id)
+            .collection("news_presentation_history")
+            .document(safe_id)
+            .set(
+                {
+                    "user_id": user_id,
+                    "story_cluster_id": story_cluster_id,
+                    "content_fingerprint": content_fingerprint,
+                    "presented_at": now,
+                },
+                merge=True,
+            )
+        )
+
+    def list_verified_trivia(self, title: str | None = None, tmdb_id: int | None = None) -> list[dict[str, Any]]:
+        col = self._db.collection("trivia_facts")
+        try:
+            if tmdb_id:
+                docs = col.where("tmdb_id", "==", tmdb_id).stream()
+                return [d.to_dict() for d in docs if d.to_dict()]
+            docs = col.limit(50).stream()
+            items = [d.to_dict() for d in docs if d.to_dict()]
+            if title:
+                t_low = title.lower()
+                items = [i for i in items if t_low in str(i.get("title", "")).lower()]
+            return items
+        except Exception as e:
+            logger.warning("Failed to list verified trivia from Firestore: %s", e)
+            return []
+
+    def add_verified_trivia(self, fact_dict: dict[str, Any]) -> dict[str, Any]:
+        now = self.utc_now_iso()
+        fact_id = fact_dict.get("fact_id") or f"trivia:{fact_dict.get('tmdb_id', 'gen')}:{hash(fact_dict.get('fact_text'))}"
+        safe_id = hashlib.sha256(fact_id.encode("utf-8")).hexdigest()
+        data = {
+            "fact_id": fact_id,
+            "title": fact_dict["title"],
+            "tmdb_id": fact_dict.get("tmdb_id"),
+            "media_type": fact_dict.get("media_type", "movie"),
+            "fact_text": fact_dict["fact_text"],
+            "source": fact_dict.get("source", "verified_archive"),
+            "created_at": now,
+        }
+        self._db.collection("trivia_facts").document(safe_id).set(data, merge=True)
+        res = dict(fact_dict)
+        res["fact_id"] = fact_id
+        return res
+
+    def list_major_news(self) -> list[dict[str, Any]]:
+        col = self._db.collection("entertainment_news")
+        try:
+            docs = col.where("is_major", "==", True).limit(20).stream()
+            items = [d.to_dict() for d in docs if d.to_dict()]
+            items.sort(key=lambda x: str(x.get("published_at", "")), reverse=True)
+            return items[:20]
+        except Exception as e:
+            logger.warning("Failed to list major news from Firestore: %s", e)
+            return []
+
+    def add_major_news(self, news_dict: dict[str, Any]) -> dict[str, Any]:
+        now = self.utc_now_iso()
+        story_id = news_dict.get("story_id") or f"news:{news_dict.get('story_cluster_id', 'c')}:{hash(news_dict.get('title'))}"
+        safe_id = hashlib.sha256(story_id.encode("utf-8")).hexdigest()
+        data = {
+            "story_id": story_id,
+            "story_cluster_id": news_dict["story_cluster_id"],
+            "title": news_dict["title"],
+            "summary": news_dict["summary"],
+            "source": news_dict.get("source", "verified_media"),
+            "news_category": news_dict.get("news_category", "official_announcement"),
+            "is_major": bool(news_dict.get("is_major", True)),
+            "is_rumor": bool(news_dict.get("is_rumor", False)),
+            "published_at": news_dict.get("published_at", now),
+            "content_fingerprint": news_dict.get("content_fingerprint", news_dict["title"]),
+        }
+        self._db.collection("entertainment_news").document(safe_id).set(data, merge=True)
+        res = dict(news_dict)
+        res["story_id"] = story_id
+        return res

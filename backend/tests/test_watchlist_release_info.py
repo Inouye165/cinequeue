@@ -61,7 +61,9 @@ def test_watchlist_enrichment_includes_release_info(client):
         assert item["release_info"]["digital"] == "2000-03-01"
         assert item["theatrical_release_date"] == "1999-10-15"
         assert item["digital_release_date"] == "2000-03-01"
+        assert item["status"] == "queue"
         assert "watch_providers" in item
     finally:
         app.dependency_overrides.clear()
+
 

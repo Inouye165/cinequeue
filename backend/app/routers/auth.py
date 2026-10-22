@@ -248,7 +248,7 @@ async def create_session(
                 token_time_val = int(match.group(2))
                 drift_seconds = token_time_val - local_time_val
                 drift_val = str(drift_seconds)
-                sleep_time = float(drift_seconds) + 1.0
+                sleep_time = min(max(float(drift_seconds) + 1.0, 0.0), 10.0)
             
             logger.warning(
                 "Session Creation Stage 4: Token used too early due to clock skew (%s seconds drift). Retrying in %s seconds...",

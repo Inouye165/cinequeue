@@ -222,10 +222,10 @@ async def invite_user(
         )
     logger.info("Admin %s invited/pre-approved user %s", current_admin, email_normalized)
 
-    # Determine origin/app URL from request headers
-    origin = request.headers.get("origin") or ""
-    if not origin and request.headers.get("referer"):
-        origin = request.headers.get("referer").rstrip("/")
+    # Determine origin/app URL from request headers, validated against AUTH_ALLOWED_ORIGINS
+    origin = (request.headers.get("origin") or "").rstrip("/")
+    if origin and origin not in config.AUTH_ALLOWED_ORIGINS:
+        origin = ""
 
     email_sent, email_detail = await send_invite_email(
         to_email=email_normalized,
@@ -295,6 +295,18 @@ class PreviewDecisionRequest(BaseModel):
     random_seed: Optional[int] = 42
 
 
+def _validate_cookie_csrf(request: Request) -> None:
+    """Validate X-CSRF-Token header when state-changing admin routes use cookie authentication."""
+    headers = getattr(request, "headers", None) or {}
+    cookies = getattr(request, "cookies", None) or {}
+    auth_header = headers.get("Authorization") or headers.get("authorization") or ""
+    if auth_header.startswith("Bearer "):
+        return
+    if cookies.get(ADMIN_SESSION_COOKIE_NAME):
+        csrf_header = headers.get("X-CSRF-Token") or headers.get("x-csrf-token") or ""
+        validate_csrf(request, csrf_header)
+
+
 @router.get("/agent/decision-logs")
 async def get_agent_decision_logs(
     request: Request,
@@ -349,6 +361,7 @@ async def save_agent_decision_config(
     request: Request,
     current_admin: str = Depends(get_current_admin),
 ) -> dict[str, Any]:
+    _validate_cookie_csrf(request)
     from app.decision_models import DecisionConfig
     repo = request.app.state.watchlist_repo
 
@@ -371,6 +384,7 @@ async def reset_agent_decision_config(
     request: Request,
     current_admin: str = Depends(get_current_admin),
 ) -> dict[str, Any]:
+    _validate_cookie_csrf(request)
     from app.decision_models import DEFAULT_DECISION_CONFIG
     repo = request.app.state.watchlist_repo
     saved = repo.save_decision_config(
@@ -398,6 +412,7 @@ async def save_agent_prompt_version(
     request: Request,
     current_admin: str = Depends(get_current_admin),
 ) -> dict[str, Any]:
+    _validate_cookie_csrf(request)
     from app.decision_models import PromptVersion
     repo = request.app.state.watchlist_repo
 
@@ -420,6 +435,7 @@ async def restore_agent_prompt_version(
     request: Request,
     current_admin: str = Depends(get_current_admin),
 ) -> dict[str, Any]:
+    _validate_cookie_csrf(request)
     repo = request.app.state.watchlist_repo
     versions = repo.list_prompt_versions()
     target = next((v for v in versions if v.get("version") == version), None)
@@ -441,6 +457,7 @@ async def preview_agent_decision(
     request: Request,
     current_admin: str = Depends(get_current_admin),
 ) -> dict[str, Any]:
+    _validate_cookie_csrf(request)
     from app.decision_models import Candidate, CandidateType, DecisionConfig, PromptVersion
     from app.services.decision_engine import DecisionEngine
     from app.services.agent_service import AiAgentService

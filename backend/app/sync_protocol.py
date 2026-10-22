@@ -15,7 +15,7 @@ class MoviePayload(BaseModel):
     title: StrictStr = "Untitled"
     posterPath: StrictStr | None = None
     releaseDate: StrictStr | None = None
-    status: Literal["queue", "following", "watched"] = "queue"
+    status: Literal["queue", "following", "watched", "library"] = "queue"
     isOwned: StrictBool = False
     ownedFormat: Literal["electronic", "cloud", "hard_copy"] | None = None
     watchFreeStreaming: StrictBool = False

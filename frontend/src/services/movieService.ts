@@ -141,7 +141,12 @@ export const movieService = {
         firstAirDate: movieData.firstAirDate ?? existing?.firstAirDate,
         status: movieData.status ?? existing?.status ?? "queue",
         watchStatus: movieData.watchStatus ?? existing?.watchStatus ?? "unwatched",
-        rating: movieData.rating ?? existing?.rating ?? null,
+        rating:
+          movieData.rating !== undefined
+            ? movieData.rating && movieData.rating > 0
+              ? movieData.rating
+              : null
+            : existing?.rating ?? null,
         notes: movieData.notes ?? existing?.notes ?? null,
         priority: movieData.priority ?? existing?.priority ?? null,
         isOwned: movieData.isOwned ?? existing?.isOwned ?? false,
@@ -339,6 +344,20 @@ export const movieService = {
       news: [],
       release_info: movie.releaseInfo ?? {},
     };
+  },
+
+  async cacheDiscoveryFeed(feedKey: string, items: unknown[]): Promise<void> {
+    await db.localMetadata.put({
+      key: `discovery_feed:${feedKey}`,
+      value: items,
+      updatedAt: new Date().toISOString(),
+    });
+  },
+
+  async getCachedDiscoveryFeed<T = unknown>(feedKey: string): Promise<{ items: T[]; updatedAt: string } | null> {
+    const record = await db.localMetadata.get(`discovery_feed:${feedKey}`);
+    if (!record || !Array.isArray(record.value)) return null;
+    return { items: record.value as T[], updatedAt: record.updatedAt };
   },
 
   async clearLocalData(ownerId?: string): Promise<void> {

@@ -31,16 +31,10 @@ function getStateIcon(state: string): string {
   switch (state) {
     case "available":
       return "✓";
-    case "partially_available":
-      return "📊";
     case "releasing_today":
-      return "🎉";
-    case "upcoming":
-      return "📅";
-    case "confirmed_tbd":
-      return "⏳";
+      return "●";
     default:
-      return "ℹ️";
+      return "•";
   }
 }
 

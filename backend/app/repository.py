@@ -32,6 +32,11 @@ class WatchlistRepository(ABC):
         ...
 
     @abstractmethod
+    def get_item(self, user_id: str, media_type: str, tmdb_id: int) -> dict[str, Any] | None:
+        """Return a single watchlist item if present, or None."""
+        ...
+
+    @abstractmethod
     def add_item(
         self,
         user_id: str,
@@ -357,4 +362,69 @@ class WatchlistRepository(ABC):
     @abstractmethod
     def get_decision_log(self, log_id: str) -> dict[str, Any] | None:
         """Get a specific decision or telemetry log record by ID."""
+        ...
+
+    @abstractmethod
+    def get_active_decision_config(self) -> dict[str, Any]:
+        """Return the active AI decision configuration."""
+        ...
+
+    @abstractmethod
+    def save_decision_config(self, config_dict: dict[str, Any], updated_by: str, change_note: str) -> dict[str, Any]:
+        """Save a new version of the AI decision configuration."""
+        ...
+
+    @abstractmethod
+    def get_active_prompt_version(self) -> dict[str, Any]:
+        """Return the active AI prompt version."""
+        ...
+
+    @abstractmethod
+    def list_prompt_versions(self) -> list[dict[str, Any]]:
+        """List all AI prompt versions."""
+        ...
+
+    @abstractmethod
+    def save_prompt_version(self, prompt_dict: dict[str, Any], updated_by: str, change_note: str) -> dict[str, Any]:
+        """Save a new AI prompt version."""
+        ...
+
+    @abstractmethod
+    def is_trivia_presented(self, user_id: str, fact_id: str) -> bool:
+        """Return True if the trivia fact was already presented to the user."""
+        ...
+
+    @abstractmethod
+    def record_trivia_presentation(self, user_id: str, fact_id: str) -> None:
+        """Record that a trivia fact was presented to the user."""
+        ...
+
+    @abstractmethod
+    def get_news_presentation(self, user_id: str, story_cluster_id: str) -> dict[str, Any] | None:
+        """Get news presentation record for a user and story cluster."""
+        ...
+
+    @abstractmethod
+    def record_news_presentation(self, user_id: str, story_cluster_id: str, content_fingerprint: str) -> None:
+        """Record that a news story cluster was presented to the user."""
+        ...
+
+    @abstractmethod
+    def list_verified_trivia(self, title: str | None = None, tmdb_id: int | None = None) -> list[dict[str, Any]]:
+        """List verified trivia facts."""
+        ...
+
+    @abstractmethod
+    def add_verified_trivia(self, fact_dict: dict[str, Any]) -> dict[str, Any]:
+        """Add or update a verified trivia fact."""
+        ...
+
+    @abstractmethod
+    def list_major_news(self) -> list[dict[str, Any]]:
+        """List major entertainment news stories."""
+        ...
+
+    @abstractmethod
+    def add_major_news(self, news_dict: dict[str, Any]) -> dict[str, Any]:
+        """Add or update a major entertainment news story."""
         ...

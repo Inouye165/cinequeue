@@ -1,4 +1,5 @@
 import asyncio
+import html
 import logging
 import smtplib
 from email.mime.multipart import MIMEMultipart
@@ -37,6 +38,10 @@ def _send_invite_email_sync(to_email: str, app_url: str, sender_admin: str) -> t
         f"Welcome to CineQueue!"
     )
 
+    safe_sender = html.escape(sender_admin)
+    safe_email = html.escape(to_email)
+    safe_url = html.escape(app_url, quote=True)
+
     html_body = f"""
     <!DOCTYPE html>
     <html>
@@ -56,11 +61,11 @@ def _send_invite_email_sync(to_email: str, app_url: str, sender_admin: str) -> t
         <div class="header">🎬 You're Invited to CineQueue!</div>
         <div class="text">
           <p>Hello,</p>
-          <p><strong>{sender_admin}</strong> has pre-approved your email address (<code>{to_email}</code>) for CineQueue access.</p>
+          <p><strong>{safe_sender}</strong> has pre-approved your email address (<code>{safe_email}</code>) for CineQueue access.</p>
           <p>You can now sign in and start building your watchlist:</p>
         </div>
         <p style="text-align: center; margin: 30px 0;">
-          <a href="{app_url}" class="btn">Sign In to CineQueue</a>
+          <a href="{safe_url}" class="btn">Sign In to CineQueue</a>
         </p>
         <div class="footer">
           If you didn't expect this invitation, you can safely ignore this email.
