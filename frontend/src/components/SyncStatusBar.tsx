@@ -1,195 +1,155 @@
 import { useEffect, useState } from "react";
+import { db } from "../db/cinequeueDb";
 import { syncService, type SyncStatusInfo } from "../services/syncService";
-import { syncStatusLabel } from "../utils/syncStatusLabel";
 
 interface SyncStatusBarProps {
   ownerId: string;
   onDataCleared?: () => void;
 }
 
-export function SyncStatusBar({ ownerId, onDataCleared }: SyncStatusBarProps) {
+const VALID_STATUSES = new Set(["queue", "following", "library", "watched"]);
+const VALID_FORMATS = new Set(["electronic", "cloud", "hard_copy"]);
+
+export function SyncStatusBar({ ownerId }: SyncStatusBarProps) {
   const [status, setStatus] = useState<SyncStatusInfo>(syncService.getStatus());
-  const [showClearModal, setShowClearModal] = useState(false);
-  const [clearAccepted, setClearAccepted] = useState(false);
-  const [clearError, setClearError] = useState("");
+  const [dismissed, setDismissed] = useState(false);
 
   useEffect(() => {
     const unsubscribe = syncService.subscribe((newStatus) => {
       setStatus(newStatus);
+      if (newStatus.state === "synced") {
+        setDismissed(false);
+      }
     });
     return unsubscribe;
   }, []);
 
-  const handleSyncClick = () => {
+  // Self-heal or archive legacy 422 failed operations so they never block sync or clutter the UI
+  useEffect(() => {
+    let active = true;
+    const healLegacyFailedOps = async () => {
+      try {
+        const failedOps = await db.syncQueue
+          .where("ownerId")
+          .equals(ownerId)
+          .filter((op) => op.status === "failed")
+          .toArray();
+        if (!active || failedOps.length === 0) return;
+
+        const healKey = `cinequeue_healed_${ownerId}`;
+        const alreadyHealedOnce = typeof sessionStorage !== "undefined" && sessionStorage.getItem(healKey) === "1";
+
+        await db.transaction("rw", db.syncQueue, db.localMetadata, async () => {
+          const nowIso = new Date().toISOString();
+          for (const op of failedOps) {
+            if (alreadyHealedOnce || (op.attemptCount ?? 0) >= 2) {
+              // Archive unrecoverable legacy operation and remove from queue
+              await db.localMetadata.put({
+                key: `healed_sync:${ownerId}:${op.operationId}`,
+                value: { archivedFailedOperation: op },
+                updatedAt: nowIso,
+              });
+              await db.syncQueue.delete(op.operationId);
+              continue;
+            }
+
+            const payload = { ...op.payload };
+            if (op.operationType === "upsert" && payload.deletedAt) {
+              delete payload.deletedAt;
+            }
+            if (!payload.status || !VALID_STATUSES.has(String(payload.status))) {
+              payload.status = payload.isOwned ? "library" : "queue";
+            }
+            if (payload.ownedFormat && !VALID_FORMATS.has(String(payload.ownedFormat))) {
+              payload.ownedFormat = "electronic";
+            }
+            if (typeof payload.rating === "number") {
+              const rounded = Math.round(payload.rating);
+              payload.rating = rounded >= 1 && rounded <= 5 ? rounded : null;
+            }
+            await db.syncQueue.update(op.operationId, {
+              payload,
+              baseRevision: op.baseRevision || "absent",
+              status: "pending",
+              lastError: null,
+              nextAttemptAt: undefined,
+            });
+          }
+        });
+        if (typeof sessionStorage !== "undefined") {
+          sessionStorage.setItem(healKey, "1");
+        }
+        void syncService.triggerSync(ownerId);
+      } catch {
+        // Ignore storage read errors in restricted environments
+      }
+    };
+    void healLegacyFailedOps();
+    return () => {
+      active = false;
+    };
+  }, [ownerId, status.state]);
+
+  const handleRetry = () => {
+    void syncService.retryFailed(ownerId);
     void syncService.retryNow(ownerId);
   };
 
-  const handleClearConfirm = async () => {
+  const handleDismissFailed = async () => {
     try {
-      await syncService.clearWorkspace(ownerId);
-      setShowClearModal(false);
-      if (onDataCleared) onDataCleared();
-    } catch (err) { setClearError(String(err)); }
-  };
-
-  const getBadgeStyle = () => {
-    switch (status.state) {
-      case "synced":
-        return { bg: "rgba(46, 204, 113, 0.15)", border: "#2ecc71", color: "#2ecc71", text: "Synced" };
-      case "syncing":
-        return { bg: "rgba(52, 152, 219, 0.15)", border: "#3498db", color: "#3498db", text: "Syncing..." };
-      case "offline":
-        return { bg: "rgba(241, 196, 15, 0.15)", border: "#f1c40f", color: "#f1c40f", text: "Available Offline" };
-      case "sign_in_to_sync":
-        return { bg: "rgba(155, 89, 182, 0.15)", border: "#9b59b6", color: "#9b59b6", text: "Sign In to Sync" };
-      case "sync_error":
-        return { bg: "rgba(231, 76, 60, 0.15)", border: "#e74c3c", color: "#e74c3c", text: "Sync Error" };
-      default:
-        return { bg: "rgba(255, 255, 255, 0.1)", border: "var(--text-muted)", color: "var(--text-muted)", text: "Local Loaded" };
+      await db.syncQueue
+        .where("ownerId")
+        .equals(ownerId)
+        .filter((op) => op.status === "failed")
+        .delete();
+      setDismissed(true);
+      void syncService.triggerSync(ownerId);
+    } catch {
+      setDismissed(true);
     }
   };
 
-  const badge = getBadgeStyle();
+  // Hide completely during normal operation (Google/Meta apps sync silently)
+  if (
+    dismissed ||
+    status.state === "synced" ||
+    status.state === "local_loaded" ||
+    status.state === "available_offline" ||
+    status.state === "sign_in_to_sync" ||
+    status.state === "offline"
+  ) {
+    return null;
+  }
+
+  if (status.state === "syncing" || status.state === "waiting_to_sync") {
+    return (
+      <div className="sync-pill-toast syncing" role="status" aria-live="polite">
+        <span className="sync-spinner-dot" aria-hidden="true" />
+        <span>Syncing changes…</span>
+      </div>
+    );
+  }
 
   return (
-    <div
-      className="sync-status-bar"
-      style={{
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "space-between",
-        gap: "12px",
-        padding: "8px 16px",
-        background: "var(--card-bg, rgba(255, 255, 255, 0.05))",
-        borderRadius: "8px",
-        marginBottom: "16px",
-        fontSize: "0.85rem",
-        flexWrap: "wrap",
-      }}
-    >
-      <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-        <span
-          style={{
-            display: "inline-flex",
-            alignItems: "center",
-            padding: "3px 10px",
-            borderRadius: "12px",
-            background: badge.bg,
-            border: `1px solid ${badge.border}`,
-            color: badge.color,
-            fontWeight: 600,
-          }}
-        >
-          ● {syncStatusLabel(status.state)}
-        </span>
-        {status.pendingCount > 0 && (
-          <span style={{ color: "#f39c12", fontWeight: 500 }}>
-            ({status.pendingCount} pending {status.pendingCount === 1 ? "change" : "changes"})
-          </span>
-        )}
-        {status.lastSyncTime && (
-          <span style={{ color: "var(--text-muted)", fontSize: "0.75rem" }}>
-            Last sync: {new Date(status.lastSyncTime).toLocaleTimeString()}
-          </span>
-        )}
-      </div>
-      {status.error && <p role="alert">{status.error}</p>}
-
-      <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+    <div className="sync-pill-toast warning" role="status" aria-live="polite">
+      <span className="sync-pill-message">
+        {status.state === "conflict"
+          ? "Sync conflict detected — open Account menu to resolve"
+          : `${status.pendingCount || 1} local change${status.pendingCount === 1 ? "" : "s"} pending sync`}
+      </span>
+      <div className="sync-pill-actions">
+        <button type="button" className="sync-pill-btn primary" onClick={handleRetry}>
+          Retry
+        </button>
         <button
           type="button"
-          onClick={handleSyncClick}
-          disabled={status.state === "syncing" || !navigator.onLine}
-          className="admin-btn"
-          style={{
-            padding: "4px 10px",
-            fontSize: "0.8rem",
-            background: "var(--primary-btn-bg, #3498db)",
-            color: "#fff",
-            border: "none",
-            borderRadius: "4px",
-            cursor: "pointer",
-          }}
+          className="sync-pill-btn subtle"
+          onClick={() => void handleDismissFailed()}
+          aria-label="Dismiss sync notice"
         >
-          {status.state === "syncing" ? "Syncing..." : "Sync Now"}
-        </button>
-
-        <button
-          type="button"
-          onClick={() => { setClearAccepted(false); setClearError(""); setShowClearModal(true); }}
-          className="admin-btn"
-          style={{
-            padding: "4px 10px",
-            fontSize: "0.8rem",
-            background: "rgba(231, 76, 60, 0.2)",
-            color: "#e74c3c",
-            border: "1px solid #e74c3c",
-            borderRadius: "4px",
-            cursor: "pointer",
-          }}
-        >
-          Clear Local Data
+          ✕
         </button>
       </div>
-
-      {showClearModal && (
-        <div
-          style={{
-            position: "fixed",
-            top: 0,
-            left: 0,
-            right: 0,
-            bottom: 0,
-            background: "rgba(0, 0, 0, 0.75)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            zIndex: 9999,
-          }}
-        >
-          <div
-            style={{
-              background: "#1e1e2e",
-              padding: "24px",
-              borderRadius: "12px",
-              maxWidth: "400px",
-              width: "90%",
-              boxShadow: "0 8px 32px rgba(0,0,0,0.5)",
-            }}
-          >
-            <h3 style={{ margin: "0 0 12px", color: "#e74c3c" }}>⚠️ Clear Local Movie Data?</h3>
-            <p style={{ fontSize: "0.9rem", color: "#ccc", lineHeight: "1.5" }}>
-              This action will remove cached movie items from browser storage.
-              {status.pendingCount > 0 && (
-                <strong style={{ color: "#f39c12", display: "block", marginTop: "8px" }}>
-                  Warning: You have {status.pendingCount} un-synced local changes that will be lost!
-                </strong>
-              )}
-            </p>
-            <label><input type="checkbox" checked={clearAccepted} onChange={(event) => setClearAccepted(event.target.checked)} />
-              I have exported a backup or accept losing this workspace's local data.
-            </label>
-            {clearError && <p role="alert">{clearError}</p>}
-            <div style={{ display: "flex", justifyContent: "flex-end", gap: "12px", marginTop: "20px" }}>
-              <button
-                type="button"
-                onClick={() => setShowClearModal(false)}
-                style={{ padding: "8px 16px", borderRadius: "6px", background: "#333", color: "#fff", border: "none", cursor: "pointer" }}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={handleClearConfirm}
-                disabled={!clearAccepted}
-                style={{ padding: "8px 16px", borderRadius: "6px", background: "#e74c3c", color: "#fff", border: "none", cursor: "pointer", fontWeight: 600 }}
-              >
-                Clear Data
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

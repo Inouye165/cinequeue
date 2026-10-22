@@ -8,26 +8,46 @@ export default defineConfig({
     react(),
     VitePWA({
       registerType: "autoUpdate",
-      includeAssets: ["favicon.ico", "apple-touch-icon.png", "masked-icon.svg"],
+      includeAssets: ["favicon.ico", "apple-touch-icon.png", "masked-icon.svg", "icon-192.png", "icon-512.png"],
       manifest: {
         name: "CineQueue",
         short_name: "CineQueue",
-        description: "Personalized AI Movie Watchlist & Tracking App",
-        theme_color: "#1a1a2e",
-        background_color: "#1a1a2e",
+        description: "Local-First Personalized AI Movie & TV Watchlist App",
+        theme_color: "#0b0d12",
+        background_color: "#0b0d12",
         display: "standalone",
+        orientation: "portrait",
+        start_url: "/",
+        scope: "/",
         icons: [
           {
-            src: "icon-192.png",
+            src: "/icon-192.png",
             sizes: "192x192",
             type: "image/png",
+            purpose: "any",
           },
           {
-            src: "icon-512.png",
+            src: "/icon-192.png",
+            sizes: "192x192",
+            type: "image/png",
+            purpose: "maskable",
+          },
+          {
+            src: "/icon-512.png",
             sizes: "512x512",
             type: "image/png",
+            purpose: "any",
+          },
+          {
+            src: "/icon-512.png",
+            sizes: "512x512",
+            type: "image/png",
+            purpose: "maskable",
           },
         ],
+      },
+      devOptions: {
+        enabled: true,
       },
       workbox: {
         cleanupOutdatedCaches: true,

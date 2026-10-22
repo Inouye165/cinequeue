@@ -11,6 +11,7 @@ interface AccountSheetProps {
   onOpenAgentModal?: (tab: "chat" | "settings" | "logs") => void;
   ownerId: string;
   onDataCleared?: () => void;
+  onRequestInstall?: () => void;
 }
 
 export function AccountSheet({
@@ -21,6 +22,7 @@ export function AccountSheet({
   onOpenAgentModal,
   ownerId,
   onDataCleared,
+  onRequestInstall,
 }: AccountSheetProps) {
   const [syncStatus, setSyncStatus] = useState<SyncStatusInfo>(syncService.getStatus());
   const [showClearModal, setShowClearModal] = useState(false);
@@ -189,6 +191,16 @@ export function AccountSheet({
         <div className="account-section danger-section">
           <span className="section-heading">Data & Storage</span>
           <DeviceDataPanel ownerId={ownerId} />
+          {onRequestInstall && (
+            <button
+              type="button"
+              className="account-menu-btn"
+              onClick={onRequestInstall}
+            >
+              <span className="menu-btn-icon">📲</span>
+              <span className="menu-btn-text">Add CineQueue to Home Screen</span>
+            </button>
+          )}
           <button
             type="button"
             className="account-menu-btn danger"

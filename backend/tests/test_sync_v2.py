@@ -187,3 +187,23 @@ def test_malformed_operation_envelope_is_explicit_and_atomic(sync_client, invali
     assert response.status_code == 422
     assert response.json()["detail"]
     assert pull(sync_client)["records"] == []
+
+
+def test_library_status_sync_roundtrip(sync_client):
+    res = push(
+        sync_client,
+        operation(
+            "library-create",
+            status="library",
+            isOwned=True,
+            ownedFormat="electronic",
+        ),
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["processed_operations"] == ["library-create"]
+    record = pull(sync_client)["records"][0]
+    assert record["status"] == "library"
+    assert record["isOwned"] is True
+    assert record["ownedFormat"] == "electronic"
+

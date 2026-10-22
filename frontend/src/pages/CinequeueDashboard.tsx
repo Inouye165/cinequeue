@@ -177,18 +177,34 @@ export function CinequeueDashboard({ onSignIn }: { onSignIn?: () => void }) {
     setQuery("");
   };
 
-  // Handle remote data fetching when tab is a remote tab
+  // Handle remote data fetching when tab is a remote tab (with local-first IndexedDB caching for discovery feeds)
   useEffect(() => {
-    const isRemoteTab = ["search", "upcoming", "theatres", "on-air", "trending"].includes(tab);
+    const isDiscoveryTab = ["upcoming", "theatres", "on-air", "trending"].includes(tab);
+    const isRemoteTab = isDiscoveryTab || tab === "search";
     if (!isRemoteTab) return;
-    if (!user || !navigator.onLine) {
-      setRemoteItems([]);
-      setError("Discovery requires an online cloud session. Your saved collection is available on this device.");
-      return;
-    }
 
     let active = true;
     const fetchRemoteData = async () => {
+      if (isDiscoveryTab) {
+        const cached = await movieService.getCachedDiscoveryFeed<MediaItem>(tab);
+        if (active && cached?.items?.length) {
+          setRemoteItems(cached.items);
+        }
+        if (!user || !navigator.onLine) {
+          if (active && !cached?.items?.length) {
+            setRemoteItems([]);
+            setError("Discovery requires an online cloud session. Your saved collection is available on this device.");
+          } else if (active) {
+            setError(null);
+          }
+          return;
+        }
+      } else if (!user || !navigator.onLine) {
+        setRemoteItems([]);
+        setError("Discovery requires an online cloud session. Your saved collection is available on this device.");
+        return;
+      }
+
       setLoading(true);
       setError(null);
       try {
@@ -220,11 +236,13 @@ export function CinequeueDashboard({ onSignIn }: { onSignIn?: () => void }) {
         }
         if (active) {
           setRemoteItems(data);
+          if (isDiscoveryTab && data.length > 0) {
+            void movieService.cacheDiscoveryFeed(tab, data);
+          }
         }
       } catch (err) {
         if (active) {
           setError(err instanceof Error ? err.message : "Something went wrong");
-          setRemoteItems([]);
         }
       } finally {
         if (active) {
@@ -414,18 +432,45 @@ export function CinequeueDashboard({ onSignIn }: { onSignIn?: () => void }) {
 
   const handleUpdateRating = async (item: MediaItem, rating: number) => {
     const tmdbId = "tmdb_id" in item ? (item as WatchlistItem).tmdb_id : item.id;
+    const itemId = `${item.media_type}_${tmdbId}`;
+    const key = `${item.media_type}:${tmdbId}`;
+    const isTracked = queueKeys.has(key) || followingKeys.has(key) || libraryKeys.has(key);
+    const existingWatch = watchlist.find((i) => `${i.media_type}:${i.tmdb_id ?? i.id}` === key);
+    const preservedStatus = existingWatch?.is_owned
+      ? "library"
+      : existingWatch?.status === "following"
+      ? "following"
+      : "queue";
     try {
-      await movieService.saveMovie(
-        {
-          tmdbId,
-          mediaType: item.media_type,
-          title: item.title,
-          rating,
-          status: rating > 0 ? "watched" : "queue",
-          watchStatus: rating > 0 ? "watched" : "unwatched",
-        },
-        ownerId
-      );
+      if (rating <= 0) {
+        if (isTracked) {
+          await movieService.saveMovie(
+            {
+              tmdbId,
+              mediaType: item.media_type,
+              title: item.title,
+              rating: null,
+              status: preservedStatus,
+              watchStatus: "unwatched",
+            },
+            ownerId
+          );
+        } else {
+          await movieService.deleteMovie(itemId, tmdbId, item.media_type, ownerId);
+        }
+      } else {
+        await movieService.saveMovie(
+          {
+            tmdbId,
+            mediaType: item.media_type,
+            title: item.title,
+            rating,
+            status: isTracked ? preservedStatus : "watched",
+            watchStatus: "watched",
+          },
+          ownerId
+        );
+      }
       await reloadFromDb();
 
       void syncService.triggerSync(ownerId);
@@ -435,18 +480,45 @@ export function CinequeueDashboard({ onSignIn }: { onSignIn?: () => void }) {
   };
 
   const handleEditRatedMovie = async (movie: RatedMovie, rating: number) => {
+    const itemId = `${movie.media_type}_${movie.tmdb_id}`;
+    const key = `${movie.media_type}:${movie.tmdb_id}`;
+    const isTracked = queueKeys.has(key) || followingKeys.has(key) || libraryKeys.has(key);
+    const existingWatch = watchlist.find((i) => `${i.media_type}:${i.tmdb_id ?? i.id}` === key);
+    const preservedStatus = existingWatch?.is_owned
+      ? "library"
+      : existingWatch?.status === "following"
+      ? "following"
+      : "queue";
     try {
-      await movieService.saveMovie(
-        {
-          tmdbId: movie.tmdb_id,
-          mediaType: movie.media_type,
-          title: movie.title,
-          rating,
-          status: rating > 0 ? "watched" : "queue",
-          watchStatus: rating > 0 ? "watched" : "unwatched",
-        },
-        ownerId
-      );
+      if (rating <= 0) {
+        if (isTracked) {
+          await movieService.saveMovie(
+            {
+              tmdbId: movie.tmdb_id,
+              mediaType: movie.media_type,
+              title: movie.title,
+              rating: null,
+              status: preservedStatus,
+              watchStatus: "unwatched",
+            },
+            ownerId
+          );
+        } else {
+          await movieService.deleteMovie(itemId, movie.tmdb_id, movie.media_type, ownerId);
+        }
+      } else {
+        await movieService.saveMovie(
+          {
+            tmdbId: movie.tmdb_id,
+            mediaType: movie.media_type,
+            title: movie.title,
+            rating,
+            status: isTracked ? preservedStatus : "watched",
+            watchStatus: "watched",
+          },
+          ownerId
+        );
+      }
       await reloadFromDb();
 
       void syncService.triggerSync(ownerId);
@@ -548,12 +620,25 @@ export function CinequeueDashboard({ onSignIn }: { onSignIn?: () => void }) {
   return (
     <div className="app-shell">
       {!user && (
-        <div role="status" className="error-banner">
-          {ownerId === "guest_local" ? "Device-only workspace" : "Saved account workspace"}: changes are saved on this device.
-          {" "}Sign in when online to sync. Discovery, fresh availability, and AI require a cloud session.
-          {authError && <p>Cloud connection: {authError}</p>}
-          <button type="button" onClick={onSignIn}>Sign in to sync</button>
-          {ownerId !== "guest_local" && <button type="button" onClick={useDeviceWorkspace}>Use device-only workspace</button>}
+        <div role="status" className="local-workspace-bar">
+          <div className="local-workspace-bar-text">
+            <span className="local-workspace-dot" aria-hidden="true">●</span>
+            <span>
+              <strong>{ownerId === "guest_local" ? "Device-only workspace" : "Saved account workspace"}:</strong>{" "}
+              changes are saved on this device. Sign in when online to sync.
+            </span>
+            {authError && <p className="local-workspace-error">Cloud connection: {authError}</p>}
+          </div>
+          <div className="local-workspace-bar-actions">
+            <button type="button" className="local-workspace-btn primary" onClick={onSignIn}>
+              Sign in to sync
+            </button>
+            {ownerId !== "guest_local" && (
+              <button type="button" className="local-workspace-btn secondary" onClick={useDeviceWorkspace}>
+                Use device-only workspace
+              </button>
+            )}
+          </div>
         </div>
       )}
       <SearchHeader
@@ -619,6 +704,27 @@ export function CinequeueDashboard({ onSignIn }: { onSignIn?: () => void }) {
                 aria-selected={queueFilter === chip.id}
               >
                 {chip.label}
+              </button>
+            ))}
+          </div>
+        )}
+        {["trending", "upcoming", "theatres", "on-air"].includes(tab) && (
+          <div className="queue-filter-chips mobile-only-discovery-chips" role="group" aria-label="Discovery feeds">
+            {(
+              [
+                { id: "trending", label: "Trending" },
+                { id: "upcoming", label: "Upcoming" },
+                { id: "theatres", label: "In Theatres" },
+                { id: "on-air", label: "TV On Air" },
+              ] as const
+            ).map((feed) => (
+              <button
+                key={feed.id}
+                type="button"
+                className={`filter-chip ${tab === feed.id ? "active" : ""}`}
+                onClick={() => setTab(feed.id)}
+              >
+                {feed.label}
               </button>
             ))}
           </div>

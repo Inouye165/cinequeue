@@ -150,6 +150,7 @@ function CinequeueApp() {
         adminUsername={activeAdminName!}
         approvals={approvals}
         loginLogs={loginLogs}
+        authToken={idToken || undefined}
         onLogout={handleAdminLogout}
         onApprove={handleApprove}
         onDeny={handleDeny}

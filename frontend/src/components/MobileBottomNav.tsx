@@ -6,12 +6,77 @@ interface MobileBottomNavProps {
   onChangeTab: (tab: TabType) => void;
 }
 
-const NAV_ITEMS: { id: TabType; label: string; icon: string }[] = [
-  { id: "watchlist", label: "Queue", icon: "🍿" },
-  { id: "following", label: "Monitoring", icon: "🔔" },
-  { id: "library", label: "Library", icon: "📚" },
-  { id: "rated", label: "Ratings", icon: "⭐" },
-  { id: "search", label: "Search", icon: "🔎" },
+const DISCOVERY_TABS: TabType[] = ["trending", "upcoming", "theatres", "on-air"];
+
+interface NavItemConfig {
+  id: TabType;
+  label: string;
+  matchTabs?: TabType[];
+  renderIcon: (active: boolean) => React.ReactNode;
+}
+
+const NAV_ITEMS: NavItemConfig[] = [
+  {
+    id: "watchlist",
+    label: "Queue",
+    renderIcon: (active) => (
+      <svg viewBox="0 0 24 24" width="22" height="22" fill={active ? "currentColor" : "none"} stroke="currentColor" strokeWidth={active ? "2.2" : "1.8"} strokeLinecap="round" strokeLinejoin="round">
+        <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z" />
+      </svg>
+    ),
+  },
+  {
+    id: "following",
+    label: "Monitoring",
+    renderIcon: (active) => (
+      <svg viewBox="0 0 24 24" width="22" height="22" fill={active ? "currentColor" : "none"} stroke="currentColor" strokeWidth={active ? "2.2" : "1.8"} strokeLinecap="round" strokeLinejoin="round">
+        <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
+        <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+      </svg>
+    ),
+  },
+  {
+    id: "library",
+    label: "Library",
+    renderIcon: (active) => (
+      <svg viewBox="0 0 24 24" width="22" height="22" fill={active ? "currentColor" : "none"} stroke="currentColor" strokeWidth={active ? "2.2" : "1.8"} strokeLinecap="round" strokeLinejoin="round">
+        <rect x="3" y="3" width="7" height="7" rx="1.5" />
+        <rect x="14" y="3" width="7" height="7" rx="1.5" />
+        <rect x="14" y="14" width="7" height="7" rx="1.5" />
+        <rect x="3" y="14" width="7" height="7" rx="1.5" />
+      </svg>
+    ),
+  },
+  {
+    id: "rated",
+    label: "Ratings",
+    renderIcon: (active) => (
+      <svg viewBox="0 0 24 24" width="22" height="22" fill={active ? "currentColor" : "none"} stroke="currentColor" strokeWidth={active ? "2.2" : "1.8"} strokeLinecap="round" strokeLinejoin="round">
+        <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
+      </svg>
+    ),
+  },
+  {
+    id: "trending",
+    label: "Discover",
+    matchTabs: DISCOVERY_TABS,
+    renderIcon: (active) => (
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" strokeWidth={active ? "2.2" : "1.8"} strokeLinecap="round" strokeLinejoin="round">
+        <circle cx="12" cy="12" r="10" />
+        <polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76" fill={active ? "currentColor" : "none"} />
+      </svg>
+    ),
+  },
+  {
+    id: "search",
+    label: "Search",
+    renderIcon: (active) => (
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" strokeWidth={active ? "2.5" : "1.9"} strokeLinecap="round" strokeLinejoin="round">
+        <circle cx="11" cy="11" r="8" />
+        <line x1="21" y1="21" x2="16.65" y2="16.65" />
+      </svg>
+    ),
+  },
 ];
 
 export function MobileBottomNav({ activeTab, onChangeTab }: MobileBottomNavProps) {
@@ -31,7 +96,7 @@ export function MobileBottomNav({ activeTab, onChangeTab }: MobileBottomNavProps
     <nav className="mobile-bottom-nav" aria-label="Mobile Navigation" role="navigation">
       <div className="mobile-bottom-nav-inner" role="tablist">
         {NAV_ITEMS.map((item, idx) => {
-          const isActive = activeTab === item.id;
+          const isActive = item.matchTabs ? item.matchTabs.includes(activeTab) : activeTab === item.id;
           return (
             <button
               key={item.id}
@@ -46,8 +111,8 @@ export function MobileBottomNav({ activeTab, onChangeTab }: MobileBottomNavProps
               onClick={() => onChangeTab(item.id)}
               onKeyDown={(e) => handleKeyDown(e, idx)}
             >
-              <span className="mobile-nav-icon" aria-hidden="true">
-                {item.icon}
+              <span className="mobile-nav-icon-pill" aria-hidden="true">
+                {item.renderIcon(isActive)}
               </span>
               <span className="mobile-nav-label">{item.label}</span>
             </button>

@@ -154,6 +154,7 @@ async def list_watchlist(
 
             theatrical_date = release_info.get("theatrical") if isinstance(release_info, dict) else None
             digital_date = release_info.get("digital") if isinstance(release_info, dict) else None
+            show_status = details.get("status") or (release_info.get("status") if isinstance(release_info, dict) else None)
 
             enriched.update(
                 {
@@ -174,7 +175,7 @@ async def list_watchlist(
                     "digital_release_date": digital_date,
                     "number_of_episodes": details.get("number_of_episodes") or (release_info.get("number_of_episodes") if isinstance(release_info, dict) else None),
                     "number_of_seasons": details.get("number_of_seasons") or (release_info.get("number_of_seasons") if isinstance(release_info, dict) else None),
-                    "status": details.get("status") or (release_info.get("status") if isinstance(release_info, dict) else None),
+                    "status": enriched.get("status") or "queue",
                     "next_episode_to_air": details.get("next_episode_to_air") or (release_info.get("next_episode") if isinstance(release_info, dict) else None),
                     "last_episode_to_air": details.get("last_episode_to_air") or (release_info.get("last_episode") if isinstance(release_info, dict) else None),
                     "seasons": details.get("seasons"),
@@ -184,8 +185,9 @@ async def list_watchlist(
                 enriched["overview"] = details["overview"]
             if "vote_average" in details:
                 enriched["vote_average"] = details["vote_average"]
-            if "status" in details:
-                enriched["media_status"] = details["status"]
+            if show_status:
+                enriched["show_status"] = show_status
+                enriched["media_status"] = show_status
             return enriched
 
         tasks = [enrich_item(item) for item in rows]
@@ -227,57 +229,29 @@ async def add_to_watchlist(request: Request, body: dict[str, Any], current_user:
     if is_owned and owned_format not in {"electronic", "cloud", "hard_copy"}:
         raise HTTPException(status_code=400, detail="Invalid owned_format. Must be 'electronic', 'cloud', or 'hard_copy'")
 
-    if status not in {"queue", "following"}:
-        raise HTTPException(status_code=400, detail="Invalid status. Must be 'queue' or 'following'")
+    if status not in {"queue", "following", "library"}:
+        raise HTTPException(status_code=400, detail="Invalid status. Must be 'queue', 'following', or 'library'")
 
     try:
         repo = request.app.state.watchlist_repo
-        added = repo.add_item(
-            current_user.uid,
-            media_type,
-            tmdb_id,
-            title,
-            poster_path,
-            release_date,
-            is_owned=is_owned,
-            owned_format=owned_format,
-            status=status,
-            watch_free_streaming=watch_free_streaming,
-            watch_on_sale_buy=watch_on_sale_buy,
-            user_rating=user_rating,
-        )
+        try:
+            added = repo.add_item(
+                current_user.uid,
+                media_type,
+                tmdb_id,
+                title,
+                poster_path,
+                release_date,
+                is_owned=is_owned,
+                owned_format=owned_format,
+                status=status,
+                watch_free_streaming=watch_free_streaming,
+                watch_on_sale_buy=watch_on_sale_buy,
+                user_rating=user_rating,
+            )
 
-        days = days_until(release_date)
-        logger.info(f"Successfully added to watchlist: {media_type}/{tmdb_id}")
-        return {
-            "media_type": media_type,
-            "tmdb_id": tmdb_id,
-            "title": title,
-            "release_date": release_date,
-            "days_away": days,
-            "days_label": days_label(days),
-            "poster_url": poster_url(poster_path),
-            "is_owned": added.get("is_owned", False),
-            "owned_format": added.get("owned_format"),
-            "status": added.get("status", "queue"),
-            "watch_free_streaming": added.get("watch_free_streaming", False),
-            "watch_on_sale_buy": added.get("watch_on_sale_buy", False),
-            "user_rating": added.get("user_rating"),
-        }
-        logger.info(f"Item already on watchlist, updating status to {status}: {media_type}/{tmdb_id}")
-        updated = repo.update_item(
-            current_user.uid,
-            media_type,
-            tmdb_id,
-            status=status,
-            is_owned=is_owned,
-            owned_format=owned_format,
-            watch_free_streaming=watch_free_streaming,
-            watch_on_sale_buy=watch_on_sale_buy,
-            user_rating=user_rating,
-        )
-        if updated:
             days = days_until(release_date)
+            logger.info(f"Successfully added to watchlist: {media_type}/{tmdb_id}")
             return {
                 "media_type": media_type,
                 "tmdb_id": tmdb_id,
@@ -286,14 +260,44 @@ async def add_to_watchlist(request: Request, body: dict[str, Any], current_user:
                 "days_away": days,
                 "days_label": days_label(days),
                 "poster_url": poster_url(poster_path),
-                "is_owned": updated.get("is_owned", False),
-                "owned_format": updated.get("owned_format"),
-                "status": updated.get("status", "queue"),
-                "watch_free_streaming": updated.get("watch_free_streaming", False),
-                "watch_on_sale_buy": updated.get("watch_on_sale_buy", False),
-                "user_rating": updated.get("user_rating"),
+                "is_owned": added.get("is_owned", False),
+                "owned_format": added.get("owned_format"),
+                "status": added.get("status", "queue"),
+                "watch_free_streaming": added.get("watch_free_streaming", False),
+                "watch_on_sale_buy": added.get("watch_on_sale_buy", False),
+                "user_rating": added.get("user_rating"),
             }
-        raise HTTPException(status_code=409, detail="Already on watchlist")
+        except DuplicateItemError:
+            logger.info(f"Item already on watchlist, updating status to {status}: {media_type}/{tmdb_id}")
+            updated = repo.update_item(
+                current_user.uid,
+                media_type,
+                tmdb_id,
+                status=status,
+                is_owned=is_owned,
+                owned_format=owned_format,
+                watch_free_streaming=watch_free_streaming,
+                watch_on_sale_buy=watch_on_sale_buy,
+                user_rating=user_rating,
+            )
+            if updated:
+                days = days_until(release_date)
+                return {
+                    "media_type": media_type,
+                    "tmdb_id": tmdb_id,
+                    "title": title,
+                    "release_date": release_date,
+                    "days_away": days,
+                    "days_label": days_label(days),
+                    "poster_url": poster_url(poster_path),
+                    "is_owned": updated.get("is_owned", False),
+                    "owned_format": updated.get("owned_format"),
+                    "status": updated.get("status", "queue"),
+                    "watch_free_streaming": updated.get("watch_free_streaming", False),
+                    "watch_on_sale_buy": updated.get("watch_on_sale_buy", False),
+                    "user_rating": updated.get("user_rating"),
+                }
+            raise HTTPException(status_code=409, detail="Already on watchlist")
     except HTTPException:
         raise
     except Exception as e:
@@ -335,8 +339,8 @@ async def update_watchlist_item(
     if is_owned is not None and is_owned and owned_format not in {"electronic", "cloud", "hard_copy"}:
         raise HTTPException(status_code=400, detail="Invalid owned_format. Must be 'electronic', 'cloud', or 'hard_copy'")
 
-    if status is not None and status not in {"queue", "following"}:
-        raise HTTPException(status_code=400, detail="Invalid status. Must be 'queue' or 'following'")
+    if status is not None and status not in {"queue", "following", "library"}:
+        raise HTTPException(status_code=400, detail="Invalid status. Must be 'queue', 'following', or 'library'")
 
     try:
         repo = request.app.state.watchlist_repo

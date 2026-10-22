@@ -4789,3 +4789,512 @@ button:active, .pill-button:active, .icon-button:active, .tab:active, .card-hit:
   }
 }
 
+/* Native App / Mobile PWA & Local-First Polish — Google TV / Meta Design System */
+html,
+body {
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior-y: none;
+  background: #090a0f;
+  color: #f8fafc;
+  font-family: "Inter", "DM Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+@media (display-mode: standalone) {
+  .app-shell {
+    padding-top: max(12px, env(safe-area-inset-top, 12px));
+    padding-bottom: calc(80px + env(safe-area-inset-bottom, 16px));
+  }
+}
+
+/* 1. Sleek Sticky App Header (Google TV / Meta Threads feel) */
+.mobile-app-bar {
+  position: sticky;
+  top: 0;
+  z-index: 95;
+  background: rgba(9, 10, 15, 0.86);
+  backdrop-filter: blur(24px) saturate(180%);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  margin: -16px -14px 14px -14px;
+  padding: 10px 14px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+@media (min-width: 768px) {
+  .mobile-app-bar {
+    margin: -28px -24px 20px -24px;
+    padding: 14px 24px 16px;
+  }
+}
+
+.app-bar-top-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 40px;
+}
+
+.brand-wordmark {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.brand-app-icon {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  object-fit: cover;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
+}
+
+.brand-name {
+  margin: 0;
+  font-family: "Inter", "DM Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
+  font-size: 1.3rem !important;
+  font-weight: 800 !important;
+  letter-spacing: -0.03em !important;
+  color: #f8fafc !important;
+}
+
+.app-bar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.install-app-pill-btn {
+  all: unset;
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 34px;
+  padding: 0 12px;
+  border-radius: 9999px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: #f8fafc;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.install-app-pill-btn:hover {
+  background: rgba(255, 255, 255, 0.14);
+  border-color: rgba(255, 255, 255, 0.24);
+}
+
+.avatar-icon-btn {
+  width: 36px !important;
+  height: 36px !important;
+  border: 1.5px solid rgba(255, 255, 255, 0.16) !important;
+  background: #181b24 !important;
+}
+
+/* 2. Pill Search Box (YouTube / Google TV Search Bar) */
+.integrated-search-box {
+  min-height: 42px !important;
+  background: rgba(255, 255, 255, 0.07) !important;
+  border: 1px solid rgba(255, 255, 255, 0.07) !important;
+  border-radius: 9999px !important;
+  padding: 0 10px !important;
+  transition: background 0.15s ease, border-color 0.15s ease !important;
+}
+
+.integrated-search-box:focus-within {
+  background: rgba(255, 255, 255, 0.1) !important;
+  border-color: rgba(255, 255, 255, 0.22) !important;
+}
+
+.integrated-search-input {
+  font-size: 0.92rem !important;
+  color: #f8fafc !important;
+}
+
+.integrated-search-input::placeholder {
+  color: #64748b !important;
+}
+
+/* 3. Subtle Sync Toast Pill (Replaces giant debug box) */
+.sync-pill-toast {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 12px;
+  margin-bottom: 12px;
+  border-radius: 12px;
+  background: rgba(24, 27, 36, 0.9);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  font-size: 0.78rem;
+  color: #cbd5e1;
+}
+
+.sync-pill-toast.syncing {
+  justify-content: flex-start;
+  color: #94a3b8;
+}
+
+.sync-spinner-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #38bdf8;
+  animation: pulse-fade 1s infinite alternate;
+}
+
+.sync-pill-message {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sync-pill-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sync-pill-btn {
+  all: unset;
+  box-sizing: border-box;
+  padding: 4px 10px;
+  border-radius: 9999px;
+  font-size: 0.74rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.sync-pill-btn.primary {
+  background: rgba(255, 255, 255, 0.12);
+  color: #f8fafc;
+}
+
+.sync-pill-btn.subtle {
+  color: #64748b;
+  padding: 4px 6px;
+}
+
+/* 4. Section Title & Material 3 / YouTube Filter Chips */
+.section-title {
+  font-family: "Inter", "DM Sans", -apple-system, BlinkMacSystemFont, sans-serif !important;
+  font-size: 1.15rem !important;
+  font-weight: 700 !important;
+  letter-spacing: -0.02em !important;
+  color: #f8fafc !important;
+}
+
+.queue-filter-chips {
+  display: flex !important;
+  flex-wrap: nowrap !important;
+  overflow-x: auto !important;
+  scrollbar-width: none !important;
+  -webkit-overflow-scrolling: touch;
+  gap: 8px !important;
+  max-width: 100%;
+  padding-bottom: 2px;
+}
+
+.queue-filter-chips::-webkit-scrollbar {
+  display: none;
+}
+
+.filter-chip {
+  flex-shrink: 0 !important;
+  padding: 6px 14px !important;
+  border-radius: 8px !important;
+  background: rgba(255, 255, 255, 0.07) !important;
+  border: 1px solid transparent !important;
+  color: #cbd5e1 !important;
+  font-size: 0.8rem !important;
+  font-weight: 500 !important;
+  transition: all 0.15s ease !important;
+}
+
+.filter-chip:hover {
+  background: rgba(255, 255, 255, 0.12) !important;
+  color: #f8fafc !important;
+}
+
+.filter-chip.active {
+  background: #f8fafc !important;
+  color: #090a0f !important;
+  border-color: #f8fafc !important;
+  font-weight: 600 !important;
+}
+
+/* 5. Clean, Uniform Media Cards (Google TV / Apple TV Poster Grid) */
+.media-card {
+  background: #11131a !important;
+  border: 1px solid rgba(255, 255, 255, 0.07) !important;
+  border-radius: 14px !important;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.35) !important;
+  overflow: hidden;
+}
+
+.poster-wrap {
+  aspect-ratio: 2 / 3;
+  background: #161922;
+}
+
+.badge {
+  top: 8px !important;
+  left: 8px !important;
+  background: rgba(9, 10, 15, 0.75) !important;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid rgba(255, 255, 255, 0.12) !important;
+  color: #e2e8f0 !important;
+  font-size: 0.68rem !important;
+  font-weight: 600 !important;
+  padding: 3px 8px !important;
+  border-radius: 6px !important;
+}
+
+.card-body {
+  padding: 10px 10px 12px !important;
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 5px !important;
+  flex: 1 !important;
+}
+
+/* Compact 1-Line Availability Pill (No more uneven multi-line purple blocks) */
+.availability-block {
+  padding: 3px 8px !important;
+  border-radius: 6px !important;
+  display: flex !important;
+  flex-direction: row !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  gap: 6px !important;
+  font-size: 0.72rem !important;
+  min-height: 24px !important;
+  max-height: 24px !important;
+  overflow: hidden !important;
+  white-space: nowrap !important;
+}
+
+.availability-primary {
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 5px !important;
+  font-weight: 600 !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+}
+
+.status-state-icon {
+  font-size: 0.7rem !important;
+}
+
+.availability-secondary {
+  display: none !important;
+}
+
+.card-title {
+  margin: 2px 0 0 !important;
+  font-size: 0.9rem !important;
+  font-weight: 600 !important;
+  line-height: 1.3 !important;
+  color: #f8fafc !important;
+  display: -webkit-box !important;
+  -webkit-line-clamp: 1 !important;
+  -webkit-box-orient: vertical !important;
+  overflow: hidden !important;
+  min-height: 1.3em !important;
+}
+
+.card-meta-row {
+  font-size: 0.75rem !important;
+  color: #64748b !important;
+}
+
+.overview-snippet {
+  display: none !important;
+}
+
+.card-actions-row {
+  margin-top: auto !important;
+  padding-top: 6px !important;
+  gap: 6px !important;
+}
+
+.action-btn-primary {
+  min-height: 32px !important;
+  padding: 4px 10px !important;
+  font-size: 0.78rem !important;
+  font-weight: 600 !important;
+  border-radius: 8px !important;
+  background: rgba(255, 255, 255, 0.07) !important;
+  border: 1px solid rgba(255, 255, 255, 0.09) !important;
+  color: #e2e8f0 !important;
+}
+
+.action-btn-primary:hover {
+  background: rgba(255, 255, 255, 0.14) !important;
+}
+
+.overflow-menu-btn {
+  width: 32px !important;
+  height: 32px !important;
+  min-height: 32px !important;
+  border-radius: 8px !important;
+  background: rgba(255, 255, 255, 0.05) !important;
+  border: 1px solid rgba(255, 255, 255, 0.08) !important;
+  color: #94a3b8 !important;
+}
+
+/* 6. Material 3 / Meta Frosted Bottom Navigation Bar */
+.mobile-bottom-nav {
+  background: rgba(9, 10, 15, 0.92) !important;
+  backdrop-filter: blur(24px) saturate(180%) !important;
+  -webkit-backdrop-filter: blur(24px) saturate(180%) !important;
+  border-top: 1px solid rgba(255, 255, 255, 0.07) !important;
+}
+
+.mobile-bottom-nav-inner {
+  height: 62px !important;
+  padding: 0 4px;
+}
+
+.mobile-nav-item {
+  color: #64748b !important;
+  gap: 4px !important;
+}
+
+.mobile-nav-item:hover {
+  color: #cbd5e1 !important;
+}
+
+.mobile-nav-item.active {
+  color: #f8fafc !important;
+}
+
+.mobile-nav-icon-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 28px;
+  border-radius: 9999px;
+  transition: background 0.2s ease, color 0.2s ease;
+}
+
+.mobile-nav-item.active .mobile-nav-icon-pill {
+  background: rgba(255, 255, 255, 0.12);
+  color: #f8fafc;
+}
+
+.mobile-nav-label {
+  font-size: 0.68rem !important;
+  font-weight: 500 !important;
+  letter-spacing: -0.01em;
+}
+
+.mobile-nav-item.active .mobile-nav-label {
+  font-weight: 600 !important;
+  color: #f8fafc !important;
+}
+
+.install-step-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border);
+  font-size: 0.88rem;
+  line-height: 1.4;
+}
+
+.install-step-num {
+  width: 24px;
+  height: 24px;
+  border-radius: 9999px;
+  background: #f8fafc;
+  color: #090a0f;
+  font-weight: 800;
+  font-size: 0.78rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.local-workspace-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 10px 14px;
+  margin-bottom: 12px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #e2e8f0;
+  font-size: 0.8rem;
+}
+
+.local-workspace-bar-text {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.local-workspace-dot {
+  color: #34d399;
+  font-size: 0.75rem;
+}
+
+.local-workspace-error {
+  margin: 0;
+  width: 100%;
+  font-size: 0.76rem;
+  color: #94a3b8;
+}
+
+.local-workspace-bar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.local-workspace-btn {
+  all: unset;
+  box-sizing: border-box;
+  padding: 6px 12px;
+  border-radius: 9999px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.local-workspace-btn.primary {
+  background: #f8fafc;
+  color: #090a0f;
+}
+
+.local-workspace-btn.secondary {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: #f8fafc;
+}
+
+@media (min-width: 768px) {
+  .mobile-only-discovery-chips {
+    display: none !important;
+  }
+}
+
+

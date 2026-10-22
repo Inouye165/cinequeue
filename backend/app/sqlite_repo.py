@@ -557,6 +557,23 @@ class SqliteWatchlistRepository(WatchlistRepository):
             items.append(d)
         return items
 
+    def get_item(self, user_id: str, media_type: str, tmdb_id: int) -> dict[str, Any] | None:
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM watchlist WHERE user_id = ? AND media_type = ? AND tmdb_id = ?",
+                (user_id, media_type, tmdb_id),
+            ).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["is_owned"] = bool(d.get("is_owned"))
+        d["status"] = d.get("status") or "queue"
+        d["watch_free_streaming"] = bool(d.get("watch_free_streaming"))
+        d["watch_on_sale_buy"] = bool(d.get("watch_on_sale_buy"))
+        d["target_rental_price"] = d.get("target_rental_price")
+        d["user_rating"] = int(d.get("user_rating") or 0)
+        return d
+
     def add_item(
         self,
         user_id: str,
@@ -698,7 +715,9 @@ class SqliteWatchlistRepository(WatchlistRepository):
     # -- Admin & Auth Methods -------------------------------------------------
 
     def get_admin_user(self, username: str) -> dict[str, Any] | None:
-        username_normalized = username.strip().lower()
+        username_normalized = (username or "").strip().lower()
+        if not username_normalized:
+            return None
         with self._connection() as conn:
             row = conn.execute(
                 "SELECT * FROM admin_users WHERE LOWER(username) = ?", (username_normalized,)
@@ -706,7 +725,9 @@ class SqliteWatchlistRepository(WatchlistRepository):
         return dict(row) if row else None
 
     def create_admin_user(self, username: str, password_hash: str, salt: str) -> None:
-        username_normalized = username.strip().lower()
+        username_normalized = (username or "").strip().lower()
+        if not username_normalized or not password_hash:
+            raise ValueError("Admin username and password_hash must not be empty")
         with self._connection() as conn:
             conn.execute(
                 """

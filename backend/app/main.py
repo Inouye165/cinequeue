@@ -80,14 +80,15 @@ async def lifespan(app: FastAPI):
     repo = app.state.watchlist_repo
     from app.config import ADMIN_USERNAME, ADMIN_PASSWORD
     from app.services.admin_auth import hash_password, generate_salt
-    try:
-        if not repo.get_admin_user(ADMIN_USERNAME):
-            salt = generate_salt()
-            pwd_hash = hash_password(ADMIN_PASSWORD, salt)
-            repo.create_admin_user(ADMIN_USERNAME, pwd_hash, salt)
-            logger.info("Initialized default admin user '%s' in database", ADMIN_USERNAME)
-    except Exception as e:
-        logger.error("Failed to initialize default admin user: %s", e)
+    if ADMIN_USERNAME and ADMIN_PASSWORD:
+        try:
+            if not repo.get_admin_user(ADMIN_USERNAME):
+                salt = generate_salt()
+                pwd_hash = hash_password(ADMIN_PASSWORD, salt)
+                repo.create_admin_user(ADMIN_USERNAME, pwd_hash, salt)
+                logger.info("Initialized default admin user '%s' in database", ADMIN_USERNAME)
+        except Exception as e:
+            logger.error("Failed to initialize default admin user: %s", e)
 
     # -- Firebase Auth Pre-warming ---------------------------------------------
     from app.auth import warmup_firebase_auth
@@ -315,11 +316,14 @@ if FRONTEND_DIST.exists():
 
     @app.get("/{full_path:path}")
     async def serve_spa(full_path: str):
-        if full_path.startswith("api"):
-            return {"detail": "Not found"}
-        file_path = FRONTEND_DIST / full_path
-        if file_path.is_file():
+        if full_path == "api" or full_path.startswith("api/"):
+            from fastapi.responses import JSONResponse
+            return JSONResponse(status_code=404, content={"detail": "Not found"})
+        file_path = (FRONTEND_DIST / full_path).resolve()
+        dist_root = FRONTEND_DIST.resolve()
+        if file_path.is_relative_to(dist_root) and file_path.is_file():
             headers = {}
             if full_path == "sw.js":
                 headers["Cache-Control"] = "no-cache, max-age=0, must-revalidate"
+            return FileResponse(file_path, headers=headers)
         return FileResponse(FRONTEND_DIST / "index.html")
