@@ -947,6 +947,11 @@ a {
   display: flex;
   align-items: center;
   gap: 12px;
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: var(--bg-elevated);
+  padding: 4px 0;
 }
 
 .account-user-avatar-lg {
@@ -4811,9 +4816,7 @@ body {
   position: sticky;
   top: 0;
   z-index: 95;
-  background: rgba(9, 10, 15, 0.86);
-  backdrop-filter: blur(24px) saturate(180%);
-  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  background: rgba(9, 10, 15, 0.96);
   margin: -16px -14px 14px -14px;
   padding: 10px 14px 12px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
