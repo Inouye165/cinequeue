@@ -3,6 +3,7 @@ import { db, type SyncOperation } from "../db/cinequeueDb";
 import { movieService } from "./movieService";
 import { parsePush, parseSnapshot } from "./syncProtocol";
 import { withSyncLock } from "./syncLock";
+import { getAuthToken } from "../utils/authTokenStore";
 
 export type SyncState = "available_offline" | "local_loaded" | "offline" |
   "waiting_to_sync" | "syncing" | "synced" | "sign_in_to_sync" | "sync_error" | "conflict";
@@ -164,7 +165,7 @@ export class SyncService {
     const send = async (url: string, body?: unknown) => {
       const result = await fetch(url, {
         method: body ? "POST" : "GET", credentials: "include", signal: controller.signal,
-        headers: { "Content-Type": "application/json", "X-Sync-Owner": ownerId },
+        headers: { "Content-Type": "application/json", "X-Sync-Owner": ownerId, ...(getAuthToken() ? { Authorization: `Bearer ${getAuthToken()}` } : {}) },
         ...(body ? { body: JSON.stringify(body) } : {}),
       });
       if (!current()) throw new Error("Workspace changed during sync");

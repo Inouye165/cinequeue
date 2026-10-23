@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 
 export type TabType =
-  | "watchlist"
+  | "watchlist" | "sports"
   | "upcoming"
   | "theatres"
   | "trending"

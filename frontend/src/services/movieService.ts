@@ -78,10 +78,73 @@ export function localMovieToWatchlistItem(movie: LocalMovie): WatchlistItem {
   } as WatchlistItem;
 }
 
+const SNAPSHOT_PREFIX = "cinequeue_instant_snapshot:";
+
+function writeInstantSnapshot(ownerId: string, movies: LocalMovie[]): void {
+  try {
+    if (typeof localStorage === "undefined") return;
+    const slim = movies
+      .filter((m) => !m.deletedAt)
+      .map((m) => ({
+        ...m,
+        details: undefined, // keep localStorage lightweight; full details live in IndexedDB
+      }));
+    localStorage.setItem(`${SNAPSHOT_PREFIX}${ownerId}`, JSON.stringify(slim));
+  } catch {
+    // Ignore storage quota or private-mode errors
+  }
+}
+
+function readInstantSnapshot(ownerId: string): LocalMovie[] {
+  try {
+    if (typeof localStorage === "undefined") return [];
+    const raw = localStorage.getItem(`${SNAPSHOT_PREFIX}${ownerId}`);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as LocalMovie[]).filter((m) => !m.deletedAt) : [];
+  } catch {
+    return [];
+  }
+}
+
+async function refreshOwnerSnapshot(ownerId: string): Promise<void> {
+  try {
+    const allMovies = await db.movies.where("ownerId").equals(ownerId).toArray();
+    writeInstantSnapshot(ownerId, allMovies.filter((m) => !m.deletedAt));
+  } catch {
+    // Ignore if DB is closing
+  }
+}
+
 export const movieService = {
+  getInstantWatchlist(ownerId: string): WatchlistItem[] {
+    return readInstantSnapshot(ownerId).map(localMovieToWatchlistItem);
+  },
+
+  getInstantRatings(ownerId: string): RatedMovie[] {
+    return readInstantSnapshot(ownerId)
+      .filter((m) => typeof m.rating === "number" && m.rating > 0)
+      .map((m) => {
+        const formattedUrl = formatPosterUrl(m.posterPath);
+        return {
+          id: m.id,
+          media_type: (m.mediaType as any) || "movie",
+          tmdb_id: m.tmdbId ?? 0,
+          title: m.title,
+          poster_path: m.posterPath,
+          poster_url: formattedUrl || m.posterPath || undefined,
+          release_date: m.releaseDate,
+          rating: m.rating!,
+          updated_at: m.updatedAt,
+        };
+      });
+  },
+
   async getMoviesForOwner(ownerId: string): Promise<LocalMovie[]> {
     const allMovies = await db.movies.where("ownerId").equals(ownerId).toArray();
-    return allMovies.filter((m) => !m.deletedAt);
+    const active = allMovies.filter((m) => !m.deletedAt);
+    writeInstantSnapshot(ownerId, active);
+    return active;
   },
 
   async getWatchlistForOwner(ownerId: string): Promise<WatchlistItem[]> {
@@ -194,6 +257,7 @@ export const movieService = {
       if (!updatedMovie.localOnly) await db.syncQueue.put(op);
       return updatedMovie;
     });
+    await refreshOwnerSnapshot(ownerId);
     window.dispatchEvent(new CustomEvent("cinequeue-local-write", { detail: { ownerId } }));
     return movie;
   },
@@ -255,6 +319,7 @@ export const movieService = {
       }
       if (!isCurrent()) throw new Error("Workspace changed during import");
     });
+    await refreshOwnerSnapshot(ownerId);
   },
 
   async cacheDetails(ownerId: string, details: MediaDetails): Promise<void> {
@@ -265,6 +330,7 @@ export const movieService = {
       showStatus: details.status, releaseInfo: details.release_info,
       theatricalAvailability: details.theatrical_release_date, metadataUpdatedAt: new Date().toISOString(),
     });
+    await refreshOwnerSnapshot(ownerId);
   },
 
   async applySnapshot(
@@ -300,6 +366,7 @@ export const movieService = {
       await db.localMetadata.put({ key: `sync_cursor:${ownerId}`, value: cursor, updatedAt: now });
       if (!isCurrent()) throw new Error("Workspace changed during snapshot import");
     });
+    await refreshOwnerSnapshot(ownerId);
   },
 
   async resolveConflict(ownerId: string, id: string, choice: "device" | "cloud"): Promise<void> {
@@ -330,6 +397,7 @@ export const movieService = {
         });
       }
     });
+    await refreshOwnerSnapshot(ownerId);
     window.dispatchEvent(new CustomEvent("cinequeue-data-changed", { detail: { ownerId } }));
     window.dispatchEvent(new CustomEvent("cinequeue-local-write", { detail: { ownerId } }));
   },
@@ -361,6 +429,22 @@ export const movieService = {
   },
 
   async clearLocalData(ownerId?: string): Promise<void> {
+    try {
+      if (typeof localStorage !== "undefined") {
+        if (ownerId) {
+          localStorage.removeItem(`${SNAPSHOT_PREFIX}${ownerId}`);
+        } else {
+          for (let i = localStorage.length - 1; i >= 0; i--) {
+            const k = localStorage.key(i);
+            if (k && k.startsWith(SNAPSHOT_PREFIX)) {
+              localStorage.removeItem(k);
+            }
+          }
+        }
+      }
+    } catch {
+      // Ignore localStorage access errors
+    }
     await db.transaction("rw", db.movies, db.syncQueue, db.localMetadata, async () => {
       if (ownerId) {
         const userMovies = await db.movies.where("ownerId").equals(ownerId).toArray();

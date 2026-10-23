@@ -135,7 +135,9 @@ async def admin_logout(
 @router.get("/me")
 async def admin_me(
     current_admin: str = Depends(get_current_admin)
-) -> dict[str, str]:
+) -> dict[str, Any]:
+    if not current_admin:
+        return {"username": "", "is_admin": False}
     return {"username": current_admin}
 
 @router.get("/requests")

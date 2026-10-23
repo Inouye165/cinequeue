@@ -428,3 +428,13 @@ class WatchlistRepository(ABC):
     def add_major_news(self, news_dict: dict[str, Any]) -> dict[str, Any]:
         """Add or update a major entertainment news story."""
         ...
+
+    @abstractmethod
+    def get_sports_preferences(self, user_id: str) -> dict[str, Any]:
+        """Get user's sports streaming services, tracked teams, and queue display preferences."""
+        ...
+
+    @abstractmethod
+    def save_sports_preferences(self, user_id: str, prefs: dict[str, Any]) -> dict[str, Any]:
+        """Save or update user's sports streaming services, tracked teams, and queue preferences."""
+        ...

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { MediaDetails, Trailer } from "../types";
 import { StarRating } from "./StarRating";
 import { formatPosterUrl } from "../utils/mediaUtils";
@@ -95,6 +95,48 @@ export function DetailModal({
 }: Props) {
   const providers = details.watch_providers?.categories ?? {};
   const releaseInfo = details.release_info as Record<string, string | number | null | undefined>;
+  const touchStartYRef = useRef<number | null>(null);
+  const [dragOffsetY, setDragOffsetY] = useState(0);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        onClose();
+      }
+    };
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.body.style.overflow = prevOverflow;
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [onClose]);
+
+  const handleTouchStart = (e: React.TouchEvent) => {
+    if (e.touches.length === 1) {
+      touchStartYRef.current = e.touches[0].clientY;
+    }
+  };
+
+  const handleTouchMove = (e: React.TouchEvent) => {
+    if (touchStartYRef.current === null) return;
+    const deltaY = e.touches[0].clientY - touchStartYRef.current;
+    if (deltaY > 0) {
+      setDragOffsetY(Math.min(deltaY, 180));
+    }
+  };
+
+  const handleTouchEnd = () => {
+    if (dragOffsetY > 72) {
+      setDragOffsetY(0);
+      touchStartYRef.current = null;
+      onClose();
+      return;
+    }
+    setDragOffsetY(0);
+    touchStartYRef.current = null;
+  };
 
   const handleFormatChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     onUpdateOwned(details, true, e.target.value as any);
@@ -102,11 +144,45 @@ export function DetailModal({
 
   return (
     <div className="detail-overlay" onClick={onClose}>
-      <div className="detail-panel" onClick={(e) => e.stopPropagation()}>
-        <div className="mobile-sheet-handle" aria-hidden="true" />
-        <button className="icon-button close-button" onClick={onClose} aria-label="Close details">
-          Close
-        </button>
+      <div
+        className="detail-panel"
+        role="dialog"
+        aria-modal="true"
+        aria-label={`${details.title} details`}
+        onClick={(e) => e.stopPropagation()}
+        style={dragOffsetY > 0 ? { transform: `translateY(${dragOffsetY}px)`, transition: "none" } : undefined}
+      >
+        <div
+          className="detail-sheet-topbar"
+          onTouchStart={handleTouchStart}
+          onTouchMove={handleTouchMove}
+          onTouchEnd={handleTouchEnd}
+        >
+          <div className="mobile-sheet-handle" aria-hidden="true" />
+          <button
+            type="button"
+            className="icon-button close-button"
+            onClick={onClose}
+            aria-label="Close details"
+          >
+            <svg
+              className="close-button-icon"
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <line x1="18" y1="6" x2="6" y2="18" />
+              <line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+            <span className="close-button-text">Close</span>
+          </button>
+        </div>
         <div
           className="detail-hero"
           style={
@@ -121,7 +197,9 @@ export function DetailModal({
             ) : null}
             <div>
               <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 10 }}>
-                <p style={{ margin: 0 }}>{details.media_type === "tv" ? "TV Series" : "Movie"}</p>
+                <p style={{ margin: 0, fontSize: "0.82rem", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--text-muted)" }}>
+                  {details.media_type === "tv" ? "TV Series" : "Movie"}
+                </p>
                 {isOwned && (
                   <span className="badge-owned" style={{ position: "static", boxShadow: "none" }}>
                     Owned
@@ -144,7 +222,7 @@ export function DetailModal({
                 )}
               </div>
               <h2>{details.title}</h2>
-              {details.tagline ? <p>{details.tagline}</p> : null}
+              {details.tagline ? <p className="detail-tagline">{details.tagline}</p> : null}
               <div className="meta-row">
                 {details.media_type === "tv" && details.next_season ? (
                   <div className="tv-seasons-info">
@@ -160,7 +238,7 @@ export function DetailModal({
                   </div>
                 ) : (
                   <>
-                    <span className="countdown">{details.days_label}</span>
+                    {details.days_label ? <span className="countdown">{details.days_label}</span> : null}
                     {details.release_date ? <span>{details.release_date}</span> : null}
                   </>
                 )}
@@ -190,26 +268,26 @@ export function DetailModal({
                   <>
                     {isOnQueue && (
                       <>
-                        <button className="pill-button" onClick={onMoveToFollowing}>
+                        <button type="button" className="pill-button secondary" onClick={onMoveToFollowing}>
                           Monitor Alerts
                         </button>
-                        <button className="pill-button" onClick={onRemove}>
+                        <button type="button" className="pill-button danger" onClick={onRemove}>
                           Remove from queue
                         </button>
                       </>
                     )}
                     {isFollowing && (
                       <>
-                        <button className="pill-button" onClick={onMoveToQueue}>
+                        <button type="button" className="pill-button primary" onClick={onMoveToQueue}>
                           Move to Queue
                         </button>
-                        <button className="pill-button" onClick={onRemove}>
+                        <button type="button" className="pill-button danger" onClick={onRemove}>
                           Remove from monitoring
                         </button>
                       </>
                     )}
                     {!isOnQueue && !isFollowing && (
-                      <button className="pill-button" onClick={onAdd}>
+                      <button type="button" className="pill-button primary" onClick={onAdd}>
                         Add to queue
                       </button>
                     )}
@@ -230,8 +308,8 @@ export function DetailModal({
                       <option value="hard_copy">Hard copy</option>
                     </select>
                     <button
-                      className="pill-button"
-                      style={{ border: "1px solid rgba(240, 113, 120, 0.3)", background: "rgba(240, 113, 120, 0.08)", color: "var(--danger)" }}
+                      type="button"
+                      className="pill-button danger"
                       onClick={() => onUpdateOwned(details, false)}
                     >
                       Remove from library
@@ -239,8 +317,8 @@ export function DetailModal({
                   </div>
                 ) : (
                   <button
-                    className="pill-button"
-                    style={{ border: "1px solid rgba(95, 211, 141, 0.4)", background: "rgba(95, 211, 141, 0.08)", color: "var(--success)" }}
+                    type="button"
+                    className="pill-button success"
                     onClick={() => onUpdateOwned(details, true, "electronic")}
                   >
                     + Mark as Owned
@@ -248,7 +326,7 @@ export function DetailModal({
                 )}
 
                 {details.homepage ? (
-                  <a className="pill-button" href={details.homepage} target="_blank" rel="noreferrer">
+                  <a className="pill-button secondary" href={details.homepage} target="_blank" rel="noreferrer">
                     Official site
                   </a>
                 ) : null}

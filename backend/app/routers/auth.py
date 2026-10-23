@@ -207,6 +207,9 @@ async def create_session(
         log_failure("unknown", "origin_validation_failed", 401)
         raise
 
+    is_session_restore = request.headers.get("X-Session-Restore") == "1"
+    max_auth_age_seconds = 365 * 24 * 60 * 60 if is_session_restore else 5 * 60
+
     # Stage 3.5: Early auth_time pre-check (decode JWT payload without verification)
     try:
         payload_part = body.id_token.split(".")[1]
@@ -217,7 +220,7 @@ async def create_session(
         pre_auth_time = unverified_payload.get("auth_time")
         if pre_auth_time:
             pre_age = time.time() - pre_auth_time
-            if pre_age > 5 * 60:
+            if pre_age > max_auth_age_seconds:
                 pre_email = unverified_payload.get("email", "unknown").strip().lower()
                 logger.warning(
                     "Session Creation Stage 3.5: auth_time is %.0f seconds old — rejecting immediately",
@@ -275,7 +278,7 @@ async def create_session(
             log_failure(email, "auth_time_missing", 401)
             raise HTTPException(status_code=401, detail="Authentication time is too old")
         age = time.time() - auth_time
-        if age > 5 * 60:
+        if age > max_auth_age_seconds:
             logger.warning("Session Creation Stage 5: ID token auth_time is too old: %s", auth_time)
             log_failure(email, "auth_time_expired", 401)
             raise HTTPException(status_code=401, detail="Authentication time is too old")

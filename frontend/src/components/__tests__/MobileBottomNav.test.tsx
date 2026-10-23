@@ -3,10 +3,11 @@ import { render, screen, fireEvent } from "@testing-library/react";
 import { MobileBottomNav } from "../MobileBottomNav";
 
 describe("MobileBottomNav", () => {
-  it("renders 5 mobile nav items with correct active tab", () => {
+  it("renders mobile nav items including Sports with correct active tab", () => {
     render(<MobileBottomNav activeTab="watchlist" onChangeTab={() => {}} />);
 
     expect(screen.getByRole("tab", { name: /queue/i })).not.toBeNull();
+    expect(screen.getByRole("tab", { name: /sports/i })).not.toBeNull();
     expect(screen.getByRole("tab", { name: /monitoring/i })).not.toBeNull();
     expect(screen.getByRole("tab", { name: /library/i })).not.toBeNull();
     expect(screen.getByRole("tab", { name: /ratings/i })).not.toBeNull();

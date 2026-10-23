@@ -18,7 +18,7 @@ from app.config import (
     PUBLIC_AUTH_DOMAIN,
 )
 from app.logging_config import setup_logging
-from app.routers import movies, watchlist, auth, admin, agent, ratings, sync
+from app.routers import movies, watchlist, auth, admin, agent, ratings, sync, sports
 from app.services.tmdb import TmdbClient
 
 setup_logging()
@@ -139,7 +139,7 @@ async def add_security_headers(request, call_next):
             "script-src 'self' https://apis.google.com https://www.gstatic.com; "
             "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
             "font-src 'self' https://fonts.gstatic.com; "
-            "img-src 'self' data: https://image.tmdb.org https://*.tmdb.org https://*.googleusercontent.com https://img.youtube.com https://i.ytimg.com; "
+            "img-src 'self' data: https://image.tmdb.org https://*.tmdb.org https://*.googleusercontent.com https://img.youtube.com https://i.ytimg.com https://a.espncdn.com https://*.espncdn.com; "
             "frame-src 'self' https://cinequeue-inouye-2026.firebaseapp.com https://*.firebaseapp.com https://www.youtube.com https://www.youtube-nocookie.com; "
             "connect-src 'self' https://image.tmdb.org https://*.tmdb.org https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://*.googleapis.com;"
         )
@@ -168,6 +168,7 @@ async def check_tmdb_key(request, call_next):
         and not request.url.path.startswith("/api/ratings")
         and not request.url.path.startswith("/api/watchlist")
         and not request.url.path.startswith("/api/sync")
+        and not request.url.path.startswith("/api/sports")
         and request.url.path != "/api/health"
     ):
         if not getattr(app.state, "tmdb", None):
@@ -296,9 +297,10 @@ app.include_router(auth.router)
 app.include_router(admin.router)
 app.include_router(agent.router)
 app.include_router(watchlist.router)
-app.include_router(movies.router)
 app.include_router(ratings.router)
 app.include_router(sync.router)
+app.include_router(sports.router)
+app.include_router(movies.router)
 
 
 @app.get("/sw.js")

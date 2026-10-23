@@ -98,6 +98,9 @@ async def get_current_admin(
             )
 
             if not is_admin:
+                if request.headers.get("X-Admin-Role-Check") == "1" and request.url.path == "/api/admin/me":
+                    logger.debug("User %s is a standard user (not admin) during passive role check", email_normalized)
+                    return ""
                 logger.warning("User %s is not an authorized administrator", email_normalized)
                 raise HTTPException(status_code=403, detail="Not authorized as an administrator")
 

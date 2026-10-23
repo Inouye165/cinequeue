@@ -63,7 +63,7 @@ PUBLIC_AUTH_DOMAIN = os.getenv("PUBLIC_AUTH_DOMAIN", "").strip()
 FIREBASE_APP_ID = os.getenv("FIREBASE_APP_ID", "1:568212960791:web:000e9657bed24ce73e8e52").strip()
 FIREBASE_MESSAGING_SENDER_ID = os.getenv("FIREBASE_MESSAGING_SENDER_ID", "568212960791").strip()
 
-SESSION_COOKIE_DAYS = int(os.getenv("SESSION_COOKIE_DAYS", "5"))
+SESSION_COOKIE_DAYS = int(os.getenv("SESSION_COOKIE_DAYS", "14"))
 
 # Cookie security settings
 # Use Secure cookies in production by default

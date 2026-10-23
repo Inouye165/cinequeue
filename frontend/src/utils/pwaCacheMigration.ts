@@ -47,7 +47,6 @@ export async function requestServiceWorkerUpdate(): Promise<void> {
     for (const reg of registrations) {
       try {
         await reg.update();
-        console.log("[PWA Migration] Service worker update requested successfully");
       } catch (err) {
         console.warn("[PWA Migration] Failed to update service worker registration:", err);
       }
