@@ -193,36 +193,46 @@ async def get_current_user(
             photo_url=None
         )
 
-    if not session_cookie:
-        logger.warning("Missing session cookie")
+    auth_header = request.headers.get("Authorization") or request.headers.get("authorization") or ""
+    bearer_token = auth_header[7:].strip() if auth_header.startswith("Bearer ") else ""
+
+    if not session_cookie and not bearer_token:
+        logger.warning("Missing session cookie and Bearer token")
         raise HTTPException(status_code=401, detail="Session cookie is missing")
 
     try:
-        try:
-            # Verify the session cookie, checking for revoked or disabled sessions.
-            # Local verification is used (check_revoked=False) to avoid network overhead.
-            decoded_claims = auth.verify_session_cookie(session_cookie, check_revoked=False, clock_skew_seconds=60)
-        except Exception as e:  # pylint: disable=broad-exception-caught
-            if "Token used too early" in str(e):
-                match = re.search(r"Token used too early,\s*(\d+)\s*<\s*(\d+)", str(e))
-                sleep_time = 5.0
-                drift_val = "unknown"
-                if match:
-                    local_time_val = int(match.group(1))
-                    token_time_val = int(match.group(2))
-                    drift_seconds = token_time_val - local_time_val
-                    drift_val = str(drift_seconds)
-                    sleep_time = min(max(float(drift_seconds) + 1.0, 0.0), 10.0)
+        decoded_claims = None
+        if session_cookie:
+            try:
+                # Verify the session cookie, checking for revoked or disabled sessions.
+                # Local verification is used (check_revoked=False) to avoid network overhead.
+                decoded_claims = auth.verify_session_cookie(session_cookie, check_revoked=False, clock_skew_seconds=60)
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                if "Token used too early" in str(e):
+                    match = re.search(r"Token used too early,\s*(\d+)\s*<\s*(\d+)", str(e))
+                    sleep_time = 5.0
+                    drift_val = "unknown"
+                    if match:
+                        local_time_val = int(match.group(1))
+                        token_time_val = int(match.group(2))
+                        drift_seconds = token_time_val - local_time_val
+                        drift_val = str(drift_seconds)
+                        sleep_time = min(max(float(drift_seconds) + 1.0, 0.0), 10.0)
 
-                logger.warning(
-                    "Session cookie used too early due to clock skew (%s seconds drift). "
-                    "Retrying in %s seconds...",
-                    drift_val, sleep_time
-                )
-                await asyncio.sleep(sleep_time)
-                decoded_claims = auth.verify_session_cookie(session_cookie, check_revoked=False)
-            else:
-                raise
+                    logger.warning(
+                        "Session cookie used too early due to clock skew (%s seconds drift). "
+                        "Retrying in %s seconds...",
+                        drift_val, sleep_time
+                    )
+                    await asyncio.sleep(sleep_time)
+                    decoded_claims = auth.verify_session_cookie(session_cookie, check_revoked=False)
+                elif bearer_token:
+                    logger.debug("Session cookie verification failed (%s); falling back to Bearer token", e)
+                else:
+                    raise
+
+        if decoded_claims is None and bearer_token:
+            decoded_claims = auth.verify_id_token(bearer_token, clock_skew_seconds=60)
 
         email = decoded_claims.get("email")
         if not email:

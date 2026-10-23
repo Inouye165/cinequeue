@@ -328,3 +328,60 @@ export interface SearchFilterState {
   mediaType: "all" | "movie" | "tv";
 }
 
+
+export type SportsLeague = "NFL" | "NBA";
+
+export interface StreamingServiceInfo {
+  id: string;
+  name: string;
+  short_name: string;
+  color: string;
+  badge_bg: string;
+  description: string;
+}
+
+export interface SportsTeam {
+  id: string;
+  league: SportsLeague;
+  abbr: string;
+  name: string;
+  short_name: string;
+  logo: string;
+  score?: string | number | null;
+  record?: string;
+  color?: string | null;
+  alt_color?: string | null;
+}
+
+export interface SportsGame {
+  id: string;
+  league: SportsLeague;
+  title: string;
+  short_title: string;
+  start_time: string;
+  status: "scheduled" | "live" | "completed";
+  status_detail: string;
+  is_live: boolean;
+  is_completed: boolean;
+  venue?: string;
+  home_team: SportsTeam;
+  away_team: SportsTeam;
+  broadcasts: string[];
+  streaming_service_ids: string[];
+  streaming_services: StreamingServiceInfo[];
+}
+
+export interface SportsCatalog {
+  leagues: SportsLeague[];
+  streaming_services: StreamingServiceInfo[];
+  teams: SportsTeam[];
+}
+
+export interface SportsPreferences {
+  user_id?: string;
+  streaming_services: string[];
+  tracked_teams: string[];
+  show_in_queue: boolean;
+  setup_completed: boolean;
+  updated_at?: string | null;
+}

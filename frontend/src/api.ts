@@ -8,6 +8,9 @@ import {
   detectPrematureMeRequest,
 } from "./utils/authPerformanceMonitor";
 import { authLog } from "./utils/authDebugLog";
+import { getAuthToken, setAuthToken } from "./utils/authTokenStore";
+
+export { getAuthToken as getApiAuthToken, setAuthToken as setApiAuthToken };
 
 export interface FirebaseConfig {
   apiKey: string;
@@ -40,6 +43,17 @@ let adminMeRequestCount = 0;
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const reqInit = { ...init };
   reqInit.credentials = "include"; // Ensure cookies are sent
+
+  const bearerToken = getAuthToken();
+  if (bearerToken) {
+    const existingHeaders = (reqInit.headers as Record<string, string>) || {};
+    if (!("Authorization" in existingHeaders) && !("authorization" in existingHeaders)) {
+      reqInit.headers = {
+        ...existingHeaders,
+        Authorization: `Bearer ${bearerToken}`,
+      };
+    }
+  }
   
   const method = reqInit.method?.toUpperCase() || "GET";
   if (["POST", "PUT", "DELETE", "PATCH"].includes(method)) {
@@ -131,7 +145,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
 
   if (!response.ok) {
-    if (response.status === 401) {
+    if (response.status === 401 && path !== "/api/auth/me" && path !== "/api/admin/me") {
       window.dispatchEvent(new CustomEvent("cinequeue-unauthorized"));
     }
     const error = await response.json().catch(() => ({ detail: response.statusText }));
@@ -176,7 +190,10 @@ export const api = {
   createSession: (idToken: string, csrfToken: string) =>
     request<{ status: string }>("/api/auth/session", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "X-Session-Restore": "1",
+      },
       body: JSON.stringify({ id_token: idToken, csrf_token: csrfToken }),
     }),
   me: () => request<UserMe>("/api/auth/me"),
@@ -204,9 +221,10 @@ export const api = {
     if (!token) {
       throw new Error("[AuthPerformance] /api/admin/me called without a token");
     }
-    return request<{ username: string }>("/api/admin/me", {
+    return request<{ username: string; is_admin?: boolean }>("/api/admin/me", {
       headers: {
-        Authorization: `Bearer ${token}`
+        Authorization: `Bearer ${token}`,
+        "X-Admin-Role-Check": "1",
       }
     });
   },
@@ -469,6 +487,27 @@ export const api = {
 
   // Ratings endpoints
   getRatings: () => request<import("./types").RatedMovie[]>("/api/ratings"),
+  sportsCatalog: () => request<import("./types").SportsCatalog>("/api/sports/catalog"),
+  sportsSchedule: (trackedTeams?: string[], forceRefresh = false) => {
+    const params = new URLSearchParams();
+    if (trackedTeams && trackedTeams.length > 0) {
+      params.set("teams", trackedTeams.join(","));
+    }
+    if (forceRefresh) {
+      params.set("force_refresh", "true");
+    }
+    const qs = params.toString();
+    return request<{ games: import("./types").SportsGame[] }>(
+      `/api/sports/schedule${qs ? `?${qs}` : ""}`
+    );
+  },
+  sportsPreferences: () => request<import("./types").SportsPreferences>("/api/sports/preferences"),
+  saveSportsPreferences: (prefs: Partial<import("./types").SportsPreferences>) =>
+    request<import("./types").SportsPreferences>("/api/sports/preferences", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(prefs),
+    }),
   rateMovie: (item: {
     media_type: string;
     tmdb_id: number;
@@ -497,5 +536,3 @@ export const api = {
     return Promise.all(items.map((item) => api.rateMovie(item)));
   },
 };
-
-

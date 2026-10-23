@@ -1,6 +1,6 @@
 /**
- * Auth Debug Logger — timestamped, in-memory + console logging for diagnosing
- * the "Verifying session…" spinner hang.
+ * Auth Debug Logger — timestamped, in-memory + optional console logging for diagnosing
+ * authentication flows.
  *
  * Every entry captures:
  *   - ISO wall-clock timestamp
@@ -74,6 +74,18 @@ function sanitize(detail?: Record<string, unknown>): Record<string, unknown> | u
   return clean;
 }
 
+function isConsoleDebugEnabled(): boolean {
+  try {
+    if (import.meta.env.VITE_AUTH_DEBUG === "true") return true;
+    if (typeof localStorage !== "undefined" && localStorage.getItem("cinequeue_auth_debug") === "true") {
+      return true;
+    }
+  } catch {
+    // ignore storage access issues
+  }
+  return false;
+}
+
 function pushEntry(
   level: AuthDebugEntry["level"],
   label: string,
@@ -102,18 +114,20 @@ function pushEntry(
     entries = entries.slice(-MAX_ENTRIES);
   }
 
-  // Console output — always, regardless of debug env var, since we're diagnosing a hang.
-  const tag = `[AuthDebug +${entry.elapsedMs.toFixed(0)}ms Δ${entry.deltaMs.toFixed(0)}ms]`;
-  const consoleFn =
-    level === "error"
-      ? console.error
-      : level === "warn"
-        ? console.warn
-        : console.log;
-  if (entry.detail) {
-    consoleFn(tag, label, entry.detail);
-  } else {
-    consoleFn(tag, label);
+  // Output to console only for errors or when verbose auth debug mode is enabled.
+  if (level === "error" || isConsoleDebugEnabled()) {
+    const tag = `[AuthDebug +${entry.elapsedMs.toFixed(0)}ms Δ${entry.deltaMs.toFixed(0)}ms]`;
+    const consoleFn =
+      level === "error"
+        ? console.error
+        : level === "warn"
+          ? console.warn
+          : console.log;
+    if (entry.detail) {
+      consoleFn(tag, label, entry.detail);
+    } else {
+      consoleFn(tag, label);
+    }
   }
 
   notifyListeners();

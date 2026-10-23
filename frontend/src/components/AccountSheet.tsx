@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
 import { syncService, type SyncStatusInfo } from "../services/syncService";
+import { DEFAULT_STREAMING_SERVICES } from "../services/sportsService";
 import { DeviceDataPanel } from "./DeviceDataPanel";
 import { syncStatusLabel } from "../utils/syncStatusLabel";
+import type { StreamingServiceInfo } from "../types";
 
 interface AccountSheetProps {
   isOpen: boolean;
@@ -12,6 +14,10 @@ interface AccountSheetProps {
   ownerId: string;
   onDataCleared?: () => void;
   onRequestInstall?: () => void;
+  availableStreamingServices?: StreamingServiceInfo[];
+  selectedStreamingServices?: string[];
+  onToggleStreamingService?: (serviceId: string) => void;
+  onOpenSportsSetup?: () => void;
 }
 
 export function AccountSheet({
@@ -23,6 +29,10 @@ export function AccountSheet({
   ownerId,
   onDataCleared,
   onRequestInstall,
+  availableStreamingServices = DEFAULT_STREAMING_SERVICES,
+  selectedStreamingServices = [],
+  onToggleStreamingService,
+  onOpenSportsSetup,
 }: AccountSheetProps) {
   const [syncStatus, setSyncStatus] = useState<SyncStatusInfo>(syncService.getStatus());
   const [showClearModal, setShowClearModal] = useState(false);
@@ -144,6 +154,53 @@ export function AccountSheet({
             {syncStatus.state === "syncing" ? "Syncing changes..." : "🔄 Sync Now"}
           </button>
         </div>
+
+        {/* My Streaming Services & Sports Preferences */}
+        {(onToggleStreamingService || onOpenSportsSetup) && (
+          <div className="account-section">
+            <div className="section-row" style={{ marginBottom: "6px" }}>
+              <span className="section-heading" style={{ margin: 0 }}>
+                📺 My Streaming Services ({selectedStreamingServices.length})
+              </span>
+            </div>
+            <p className="sync-subtext" style={{ marginBottom: "10px" }}>
+              Tap to add or remove services you have. My Queue only shows games you can watch.
+            </p>
+            {onToggleStreamingService && (
+              <div className="sports-active-pills" style={{ marginBottom: "12px" }}>
+                {availableStreamingServices.map((svc) => {
+                  const isSelected = selectedStreamingServices.includes(svc.id);
+                  return (
+                    <button
+                      key={svc.id}
+                      type="button"
+                      className={`sports-service-toggle-chip ${isSelected ? "active" : ""}`}
+                      onClick={() => onToggleStreamingService(svc.id)}
+                      aria-pressed={isSelected}
+                      title={isSelected ? `Remove ${svc.name}` : `Add ${svc.name}`}
+                    >
+                      {isSelected ? "✓ " : "+ "}
+                      {svc.short_name}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+            {onOpenSportsSetup && (
+              <button
+                type="button"
+                className="account-menu-btn"
+                onClick={() => {
+                  onClose();
+                  onOpenSportsSetup();
+                }}
+              >
+                <span className="menu-btn-icon">🏈</span>
+                <span className="menu-btn-text">Manage Streaming Services &amp; Tracked Teams</span>
+              </button>
+            )}
+          </div>
+        )}
 
         {/* AI Agent Features */}
         {onOpenAgentModal && (

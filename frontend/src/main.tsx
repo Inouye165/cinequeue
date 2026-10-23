@@ -7,19 +7,19 @@ import {
   requestServiceWorkerUpdate,
 } from "./utils/pwaCacheMigration";
 
-// Complete legacy cache cleanup before React renders, then request service-worker update asynchronously
-clearLegacyTmdbImageCache()
-  .catch((err) => {
-    console.warn("[main] Pre-render legacy cache cleanup failed:", err);
-  })
-  .finally(() => {
-    createRoot(document.getElementById("root")!).render(
-      <StrictMode>
-        <App />
-      </StrictMode>,
-    );
+// Render the local-first app shell immediately without waiting on async cache or SW tasks
+createRoot(document.getElementById("root")!).render(
+  <StrictMode>
+    <App />
+  </StrictMode>,
+);
 
-    requestServiceWorkerUpdate().catch((err) => {
-      console.warn("[main] Post-render service-worker update failed:", err);
-    });
+// Run legacy cache cleanup and service-worker update check asynchronously in the background
+queueMicrotask(() => {
+  clearLegacyTmdbImageCache().catch((err) => {
+    console.warn("[main] Background legacy cache cleanup failed:", err);
   });
+  requestServiceWorkerUpdate().catch((err) => {
+    console.warn("[main] Post-render service-worker update failed:", err);
+  });
+});

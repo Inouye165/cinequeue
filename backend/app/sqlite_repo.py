@@ -450,6 +450,18 @@ class SqliteWatchlistRepository(WatchlistRepository):
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS sports_preferences (
+                    user_id TEXT PRIMARY KEY,
+                    streaming_services_json TEXT NOT NULL DEFAULT '[]',
+                    tracked_teams_json TEXT NOT NULL DEFAULT '[]',
+                    show_in_queue INTEGER NOT NULL DEFAULT 1,
+                    setup_completed INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
 
     @contextmanager
     def _connection(self):
@@ -1771,3 +1783,73 @@ class SqliteWatchlistRepository(WatchlistRepository):
             )
         news_dict["story_id"] = story_id
         return news_dict
+
+    def get_sports_preferences(self, user_id: str) -> dict[str, Any]:
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM sports_preferences WHERE user_id = ?", (user_id,)
+            ).fetchone()
+        if not row:
+            return {
+                "user_id": user_id,
+                "streaming_services": [],
+                "tracked_teams": [],
+                "show_in_queue": True,
+                "setup_completed": False,
+                "updated_at": None,
+            }
+        try:
+            services = json.loads(row["streaming_services_json"] or "[]")
+        except Exception:
+            services = []
+        try:
+            teams = json.loads(row["tracked_teams_json"] or "[]")
+        except Exception:
+            teams = []
+        return {
+            "user_id": user_id,
+            "streaming_services": services if isinstance(services, list) else [],
+            "tracked_teams": teams if isinstance(teams, list) else [],
+            "show_in_queue": bool(row["show_in_queue"]),
+            "setup_completed": bool(row["setup_completed"]),
+            "updated_at": row["updated_at"],
+        }
+
+    def save_sports_preferences(self, user_id: str, prefs: dict[str, Any]) -> dict[str, Any]:
+        current = self.get_sports_preferences(user_id)
+        services = prefs.get("streaming_services", current["streaming_services"])
+        teams = prefs.get("tracked_teams", current["tracked_teams"])
+        show_in_queue = prefs.get("show_in_queue", current["show_in_queue"])
+        setup_completed = prefs.get("setup_completed", True)
+        now = self.utc_now_iso()
+        with self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO sports_preferences (
+                    user_id, streaming_services_json, tracked_teams_json,
+                    show_in_queue, setup_completed, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    streaming_services_json = excluded.streaming_services_json,
+                    tracked_teams_json = excluded.tracked_teams_json,
+                    show_in_queue = excluded.show_in_queue,
+                    setup_completed = excluded.setup_completed,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    user_id,
+                    json.dumps(services),
+                    json.dumps(teams),
+                    1 if show_in_queue else 0,
+                    1 if setup_completed else 0,
+                    now,
+                ),
+            )
+        return {
+            "user_id": user_id,
+            "streaming_services": services,
+            "tracked_teams": teams,
+            "show_in_queue": bool(show_in_queue),
+            "setup_completed": bool(setup_completed),
+            "updated_at": now,
+        }

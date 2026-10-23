@@ -1172,3 +1172,50 @@ class FirestoreWatchlistRepository(WatchlistRepository):
         res = dict(news_dict)
         res["story_id"] = story_id
         return res
+
+    def get_sports_preferences(self, user_id: str) -> dict[str, Any]:
+        doc = (
+            self._db.collection("users")
+            .document(user_id)
+            .collection("settings")
+            .document("sports")
+            .get()
+        )
+        if not doc.exists:
+            return {
+                "user_id": user_id,
+                "streaming_services": [],
+                "tracked_teams": [],
+                "show_in_queue": True,
+                "setup_completed": False,
+                "updated_at": None,
+            }
+        data = doc.to_dict() or {}
+        return {
+            "user_id": user_id,
+            "streaming_services": data.get("streaming_services") or [],
+            "tracked_teams": data.get("tracked_teams") or [],
+            "show_in_queue": bool(data.get("show_in_queue", True)),
+            "setup_completed": bool(data.get("setup_completed", False)),
+            "updated_at": data.get("updated_at"),
+        }
+
+    def save_sports_preferences(self, user_id: str, prefs: dict[str, Any]) -> dict[str, Any]:
+        current = self.get_sports_preferences(user_id)
+        now = self.utc_now_iso()
+        updated = {
+            "user_id": user_id,
+            "streaming_services": prefs.get("streaming_services", current["streaming_services"]),
+            "tracked_teams": prefs.get("tracked_teams", current["tracked_teams"]),
+            "show_in_queue": bool(prefs.get("show_in_queue", current["show_in_queue"])),
+            "setup_completed": bool(prefs.get("setup_completed", True)),
+            "updated_at": now,
+        }
+        (
+            self._db.collection("users")
+            .document(user_id)
+            .collection("settings")
+            .document("sports")
+            .set(updated, merge=True)
+        )
+        return updated

@@ -281,9 +281,14 @@ export function printConsoleSummary() {
   const latest = activeTrace || traceHistory[traceHistory.length - 1];
   if (!latest) return;
 
-  const debugEnabled =
-    import.meta.env.VITE_AUTH_PERFORMANCE_DEBUG === "true" ||
-    import.meta.env.DEV;
+  let debugEnabled = import.meta.env.VITE_AUTH_PERFORMANCE_DEBUG === "true";
+  try {
+    if (typeof localStorage !== "undefined" && localStorage.getItem("cinequeue_auth_debug") === "true") {
+      debugEnabled = true;
+    }
+  } catch {
+    // ignore storage errors
+  }
 
   if (!debugEnabled) return;
 

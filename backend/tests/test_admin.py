@@ -582,3 +582,23 @@ def test_fallback_admin_config_startup_validation():
     import app.config
     importlib.reload(app.config)
 
+
+@patch("firebase_admin.auth.verify_id_token")
+def test_admin_bearer_token_passive_role_check_returns_200_for_non_admin(mock_verify_token, client_with_admin_auth):
+    """When X-Admin-Role-Check: 1 is passed on /api/admin/me, non-admin receives 200 with is_admin=False."""
+    mock_verify_token.return_value = {
+        "uid": "nonadmin_uid_456",
+        "email": "user@example.com",
+    }
+
+    response = client_with_admin_auth.get(
+        "/api/admin/me",
+        headers={
+            "Authorization": "Bearer user-test-token",
+            "X-Admin-Role-Check": "1",
+        },
+    )
+    assert response.status_code == 200
+    assert response.json() == {"username": "", "is_admin": False}
+
+
