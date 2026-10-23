@@ -188,18 +188,18 @@ describe("SportsTab Component", () => {
 
   it("filters games to Friday + Weekend when today is Friday, and current day only on other days", () => {
     const sampleGames: SportsGame[] = [
-      { ...MOCK_GAMES[0], id: "fri_game", start_time: "2026-10-23T19:00:00-07:00" },
-      { ...MOCK_GAMES[0], id: "sat_game", start_time: "2026-10-24T17:00:00-07:00" },
-      { ...MOCK_GAMES[0], id: "sun_game", start_time: "2026-10-25T13:00:00-07:00" },
-      { ...MOCK_GAMES[0], id: "mon_game", start_time: "2026-10-26T17:00:00-07:00" },
+      { ...MOCK_GAMES[0], id: "fri_game", start_time: "2026-10-23T12:00:00" },
+      { ...MOCK_GAMES[0], id: "sat_game", start_time: "2026-10-24T12:00:00" },
+      { ...MOCK_GAMES[0], id: "sun_game", start_time: "2026-10-25T12:00:00" },
+      { ...MOCK_GAMES[0], id: "mon_game", start_time: "2026-10-26T12:00:00" },
     ];
 
     // On Friday Oct 23, 2026: keeps Fri, Sat, Sun (excludes Mon)
-    const fridayResult = filterGamesForActiveWindow(sampleGames, new Date("2026-10-23T12:00:00-07:00"));
+    const fridayResult = filterGamesForActiveWindow(sampleGames, new Date("2026-10-23T10:00:00"));
     expect(fridayResult.map((g) => g.id)).toEqual(["fri_game", "sat_game", "sun_game"]);
 
     // On Sunday Oct 25, 2026: keeps only Sunday's game
-    const sundayResult = filterGamesForActiveWindow(sampleGames, new Date("2026-10-25T10:00:00-07:00"));
+    const sundayResult = filterGamesForActiveWindow(sampleGames, new Date("2026-10-25T10:00:00"));
     expect(sundayResult.map((g) => g.id)).toEqual(["sun_game"]);
   });
 
