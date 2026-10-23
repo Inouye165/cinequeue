@@ -2,7 +2,17 @@ import { db } from "../db/cinequeueDb";
 import { api } from "../api";
 import type { SportsCatalog, SportsGame, SportsPreferences, SportsTeam, StreamingServiceInfo } from "../types";
 
+export const FOX_ONE_SERVICE: StreamingServiceInfo = {
+  id: "fox_one",
+  name: "FOX One (FOX Sports)",
+  short_name: "FOX One",
+  color: "#003366",
+  badge_bg: "#1e3a8a",
+  description: "NFL on FOX live games, FS1, FS2 & FOX Sports",
+};
+
 export const DEFAULT_STREAMING_SERVICES: StreamingServiceInfo[] = [
+  FOX_ONE_SERVICE,
   { id: "peacock", name: "Peacock", short_name: "Peacock", color: "#000000", badge_bg: "#1e293b", description: "NBC Sunday Night Football, NBA on NBC/Peacock" },
   { id: "paramount_plus", name: "Paramount+", short_name: "Paramount+", color: "#0064ff", badge_bg: "#1d4ed8", description: "NFL on CBS live local & national games" },
   { id: "prime_video", name: "Prime Video", short_name: "Prime Video", color: "#00a8e1", badge_bg: "#0369a1", description: "Thursday Night Football & NBA on Prime" },
@@ -119,14 +129,41 @@ export function getActiveScheduleDateKeys(now: Date = new Date()): string[] {
   return [toLocalDateKey(base)];
 }
 
+export function enrichGameStreamingServices(game: SportsGame): SportsGame {
+  const broadcastsUpper = (game.broadcasts || []).map((b) => b.toUpperCase());
+  const isFoxBroadcast = broadcastsUpper.some(
+    (b) => b === "FOX" || b.includes("FOX") || b === "FS1" || b === "FS2"
+  );
+  if (isFoxBroadcast && !game.streaming_service_ids.includes("fox_one")) {
+    return {
+      ...game,
+      streaming_service_ids: ["fox_one", ...game.streaming_service_ids],
+      streaming_services: [FOX_ONE_SERVICE, ...game.streaming_services],
+    };
+  }
+  return game;
+}
+
+export function mergeCatalogWithDefaults(cat: SportsCatalog): SportsCatalog {
+  const existingIds = new Set((cat.streaming_services || []).map((s) => s.id));
+  const missingServices = DEFAULT_STREAMING_SERVICES.filter((s) => !existingIds.has(s.id));
+  if (missingServices.length === 0) return cat;
+  return {
+    ...cat,
+    streaming_services: [...missingServices, ...(cat.streaming_services || [])],
+  };
+}
+
 export function filterGamesForActiveWindow(games: SportsGame[], now: Date = new Date()): SportsGame[] {
   const allowedKeys = new Set(getActiveScheduleDateKeys(now));
-  return games.filter((game) => {
-    if (game.is_live) return true;
-    const dt = new Date(game.start_time);
-    if (isNaN(dt.getTime())) return true;
-    return allowedKeys.has(toLocalDateKey(dt));
-  });
+  return games
+    .filter((game) => {
+      if (game.is_live) return true;
+      const dt = new Date(game.start_time);
+      if (isNaN(dt.getTime())) return true;
+      return allowedKeys.has(toLocalDateKey(dt));
+    })
+    .map(enrichGameStreamingServices);
 }
 
 export const sportsService = {
@@ -269,7 +306,7 @@ export const sportsService = {
   async getCatalog(): Promise<SportsCatalog> {
     if (navigator.onLine) {
       try {
-        const cat = await api.sportsCatalog();
+        const cat = mergeCatalogWithDefaults(await api.sportsCatalog());
         await db.localMetadata.put({
           key: "sports_catalog",
           value: cat,
@@ -282,7 +319,7 @@ export const sportsService = {
     }
     const cached = await db.localMetadata.get("sports_catalog");
     if (cached && cached.value) {
-      return cached.value as SportsCatalog;
+      return mergeCatalogWithDefaults(cached.value as SportsCatalog);
     }
     return DEFAULT_CATALOG;
   },

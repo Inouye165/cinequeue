@@ -5952,10 +5952,24 @@ body {
 }
 
 .sports-service-badge {
+  all: unset;
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
   font-size: 0.68rem;
   font-weight: 700;
   padding: 2px 7px;
   border-radius: 6px;
+}
+
+.sports-service-badge.interactive {
+  cursor: pointer;
+  transition: transform 0.12s ease, border-color 0.15s ease, background 0.15s ease;
+}
+
+.sports-service-badge.interactive:hover {
+  transform: translateY(-1px);
+  border-color: rgba(255, 255, 255, 0.38);
 }
 
 .sports-service-badge.owned {
@@ -5980,6 +5994,19 @@ body {
 }
 
 /* Setup / Manage Modal */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  background: rgba(6, 9, 15, 0.82);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+
 .sports-setup-modal {
   max-width: 780px;
   width: 95%;
@@ -5989,6 +6016,11 @@ body {
   display: flex;
   flex-direction: column;
   gap: 20px;
+  background: #141923;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 20px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.75);
+  color: var(--text);
 }
 
 .sports-modal-header {
@@ -5996,6 +6028,64 @@ body {
   justify-content: space-between;
   align-items: flex-start;
   gap: 12px;
+}
+
+.sports-modal-header .close-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: 9999px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1rem;
+  flex-shrink: 0;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.sports-modal-header .close-btn:hover {
+  background: rgba(255, 255, 255, 0.14);
+  border-color: var(--accent);
+}
+
+.btn-primary,
+.btn-secondary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border-radius: 9999px;
+  padding: 9px 16px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.btn-primary {
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  color: #0b0d12;
+  font-weight: 700;
+}
+
+.btn-primary:hover {
+  background: #f3b55a;
+  border-color: #f3b55a;
+}
+
+.btn-secondary {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  color: var(--text);
+}
+
+.btn-secondary:hover {
+  background: rgba(255, 255, 255, 0.14);
+  border-color: rgba(255, 255, 255, 0.3);
 }
 
 .sports-modal-section h3 {

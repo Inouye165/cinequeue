@@ -13,7 +13,7 @@ import { MobileBottomNav } from "../components/MobileBottomNav";
 import { useAuth } from "../context/AuthContext";
 import { StarRating } from "../components/StarRating";
 import { BatchRateModal } from "../components/BatchRateModal";
-import { SportsTab, SportsGameCard } from "../components/SportsTab";
+import { SportsTab, SportsGameCard, SportsSetupModal } from "../components/SportsTab";
 import { movieService } from "../services/movieService";
 import { DEFAULT_CATALOG, sportsService } from "../services/sportsService";
 import { syncService } from "../services/syncService";
@@ -628,21 +628,7 @@ export function CinequeueDashboard({ onSignIn }: { onSignIn?: () => void }) {
   }, [watchlist, tab]);
 
   const [queueFilter, setQueueFilter] = useState<"all" | "available" | "upcoming" | "tv" | "movies" | "sports">("all");
-
-  const queueSportsGames = useMemo(() => {
-    if (!sportsPrefs.show_in_queue || !sportsPrefs.tracked_teams.length) return [];
-    if (queueFilter === "tv" || queueFilter === "movies") return [];
-    const trackedSet = new Set(sportsPrefs.tracked_teams);
-    return sportsGames
-      .filter((g) => {
-        if (g.is_completed) return false;
-        const isTracked = trackedSet.has(g.home_team.id) || trackedSet.has(g.away_team.id);
-        if (!isTracked) return false;
-        if (queueFilter === "available") return g.is_live;
-        return true;
-      })
-      .slice(0, 6);
-  }, [sportsPrefs.show_in_queue, sportsPrefs.tracked_teams, sportsGames, queueFilter]);
+  const [isSportsSetupModalOpen, setIsSportsSetupModalOpen] = useState(false);
 
   const userServicesSet = useMemo(
     () => new Set(sportsPrefs.streaming_services),
@@ -653,6 +639,38 @@ export function CinequeueDashboard({ onSignIn }: { onSignIn?: () => void }) {
     () => new Set(sportsPrefs.tracked_teams),
     [sportsPrefs.tracked_teams]
   );
+
+  const handleToggleStreamingService = useCallback(
+    async (serviceId: string) => {
+      const next = new Set(sportsPrefs.streaming_services);
+      if (next.has(serviceId)) next.delete(serviceId);
+      else next.add(serviceId);
+      await handleSaveSportsPrefs({
+        streaming_services: Array.from(next),
+        setup_completed: true,
+      });
+    },
+    [sportsPrefs.streaming_services, handleSaveSportsPrefs]
+  );
+
+  const queueSportsGames = useMemo(() => {
+    if (!sportsPrefs.show_in_queue || !sportsPrefs.tracked_teams.length) return [];
+    if (queueFilter === "tv" || queueFilter === "movies") return [];
+    return sportsGames
+      .filter((g) => {
+        if (g.is_completed) return false;
+        const isTracked = trackedTeamsSet.has(g.home_team.id) || trackedTeamsSet.has(g.away_team.id);
+        if (!isTracked) return false;
+        // Only show games in My Queue that the user can actually watch on their streaming services
+        const isWatchable =
+          g.streaming_service_ids.some((id) => userServicesSet.has(id)) ||
+          g.streaming_services.some((s) => userServicesSet.has(s.id));
+        if (!isWatchable) return false;
+        if (queueFilter === "available") return g.is_live;
+        return true;
+      })
+      .slice(0, 6);
+  }, [sportsPrefs.show_in_queue, sportsPrefs.tracked_teams, sportsGames, queueFilter, trackedTeamsSet, userServicesSet]);
 
   const [agentModalOpen, setAgentModalOpen] = useState(false);
   const [agentModalTab, setAgentModalTab] = useState<"chat" | "settings" | "logs">("chat");
@@ -753,6 +771,10 @@ export function CinequeueDashboard({ onSignIn }: { onSignIn?: () => void }) {
         onOpenAgentModal={user ? openAgentModal : undefined}
         ownerId={ownerId}
         onDataCleared={reloadFromDb}
+        availableStreamingServices={sportsCatalog.streaming_services}
+        selectedStreamingServices={sportsPrefs.streaming_services}
+        onToggleStreamingService={(serviceId) => void handleToggleStreamingService(serviceId)}
+        onOpenSportsSetup={() => setIsSportsSetupModalOpen(true)}
       />
 
       <SyncStatusBar ownerId={ownerId} onDataCleared={reloadFromDb} />
@@ -851,6 +873,8 @@ export function CinequeueDashboard({ onSignIn }: { onSignIn?: () => void }) {
           loading={sportsLoading}
           onSavePreferences={handleSaveSportsPrefs}
           onRefreshSchedule={() => loadSportsData(true)}
+          isSetupModalOpen={isSportsSetupModalOpen}
+          onSetSetupModalOpen={setIsSportsSetupModalOpen}
         />
       ) : loading ? (
         <MediaCardSkeleton count={6} />
@@ -931,6 +955,8 @@ export function CinequeueDashboard({ onSignIn }: { onSignIn?: () => void }) {
                 trackedTeams={trackedTeamsSet}
                 compactQueueMode={true}
                 onOpenSportsTab={() => setTab("sports")}
+                onOpenSetupModal={() => setIsSportsSetupModalOpen(true)}
+                onToggleService={(serviceId) => void handleToggleStreamingService(serviceId)}
                 onToggleTrackTeam={(teamId) => {
                   const next = new Set(sportsPrefs.tracked_teams);
                   if (next.has(teamId)) next.delete(teamId);
@@ -972,7 +998,30 @@ export function CinequeueDashboard({ onSignIn }: { onSignIn?: () => void }) {
         </div>
       ) : (
         <div className="empty-state">
-          {tab === "watchlist"
+          {tab === "watchlist" && queueFilter === "sports" ? (
+            <div>
+              <p>
+                No upcoming games for your tracked teams match your current streaming services (
+                {sportsPrefs.streaming_services.length} selected).
+              </p>
+              <div style={{ display: "flex", gap: "10px", justifyContent: "center", flexWrap: "wrap", marginTop: "10px" }}>
+                <button
+                  type="button"
+                  className="pill-button primary"
+                  onClick={() => setIsSportsSetupModalOpen(true)}
+                >
+                  📺 Add / Edit Streaming Services
+                </button>
+                <button
+                  type="button"
+                  className="pill-button secondary"
+                  onClick={() => setTab("sports")}
+                >
+                  View All Games in Sports Tab →
+                </button>
+              </div>
+            </div>
+          ) : tab === "watchlist"
             ? "Your queue is empty. Search for something to add."
             : tab === "following"
             ? "You are not monitoring any shows or movies. Move them from your Queue here to start tracking prices, streaming availability, and alerts."
@@ -980,6 +1029,16 @@ export function CinequeueDashboard({ onSignIn }: { onSignIn?: () => void }) {
             ? "Your library is empty. Search for something or mark items as owned."
             : "Nothing to show right now."}
         </div>
+      )}
+
+      {tab !== "sports" && isSportsSetupModalOpen && (
+        <SportsSetupModal
+          isOpen={isSportsSetupModalOpen}
+          catalog={sportsCatalog}
+          preferences={sportsPrefs}
+          onSavePreferences={handleSaveSportsPrefs}
+          onClose={() => setIsSportsSetupModalOpen(false)}
+        />
       )}
 
 

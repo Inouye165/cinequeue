@@ -15,6 +15,14 @@ logger = logging.getLogger(__name__)
 # Catalog of major sports streaming services
 STREAMING_SERVICES: list[dict[str, str]] = [
     {
+        "id": "fox_one",
+        "name": "FOX One (FOX Sports)",
+        "short_name": "FOX One",
+        "color": "#003366",
+        "badge_bg": "#1e3a8a",
+        "description": "NFL on FOX live games, FS1, FS2 & FOX Sports",
+    },
+    {
         "id": "peacock",
         "name": "Peacock",
         "short_name": "Peacock",
@@ -106,8 +114,12 @@ BROADCAST_TO_STREAMING: dict[str, list[str]] = {
     "TNT": ["max", "youtube_tv"],
     "TRUTV": ["max", "youtube_tv"],
     "MAX": ["max"],
-    "FOX": ["youtube_tv", "nfl_plus"],
-    "FS1": ["youtube_tv"],
+    "FOX": ["fox_one", "youtube_tv", "nfl_plus"],
+    "FOX ONE": ["fox_one"],
+    "FOX SPORTS": ["fox_one", "youtube_tv"],
+    "FS1": ["fox_one", "youtube_tv"],
+    "FS2": ["fox_one", "youtube_tv"],
+    "FOX DEPORTES": ["fox_one", "youtube_tv"],
     "NFL NETWORK": ["nfl_plus", "youtube_tv"],
     "NFL NET": ["nfl_plus", "youtube_tv"],
     "NFL+": ["nfl_plus"],
@@ -259,7 +271,9 @@ def map_broadcasts_to_services(league: str, broadcasts: list[str]) -> tuple[list
                 elif "NETFLIX" in upper:
                     if "netflix" not in service_ids:
                         service_ids.append("netflix")
-                elif upper in ("FOX", "FS1"):
+                elif "FOX" in upper or upper in ("FS1", "FS2"):
+                    if "fox_one" not in service_ids:
+                        service_ids.append("fox_one")
                     if "youtube_tv" not in service_ids:
                         service_ids.append("youtube_tv")
 
@@ -296,11 +310,11 @@ def _build_fallback_games(now: datetime | None = None) -> list[dict[str, Any]]:
     matchups = [
         ("NBA", "nba_lal", "2-0", "nba_bos", "2-0", 0, 19, ["ESPN", "ABC"], "Crypto.com Arena"),
         ("NBA", "nba_gs", "1-1", "nba_den", "2-0", 0, 21, ["TNT", "Max"], "Chase Center"),
-        ("NFL", "nfl_kc", "5-1", "nfl_sf", "4-3", 2 if is_friday_weekend else 0, 13, ["NBC", "Peacock"], "Arrowhead Stadium"),
+        ("NFL", "nfl_atl", "4-3", "nfl_sf", "4-3", 2 if is_friday_weekend else 0, 10, ["FOX", "FOX One"], "Mercedes-Benz Stadium"),
         ("NFL", "nfl_buf", "5-2", "nfl_bal", "5-2", 2 if is_friday_weekend else 0, 16, ["CBS", "Paramount+"], "Highmark Stadium"),
         ("NBA", "nba_ny", "1-1", "nba_mil", "1-1", 1 if is_friday_weekend else 0, 17, ["Prime Video", "NBA League Pass"], "Madison Square Garden"),
         ("NBA", "nba_phx", "2-0", "nba_okc", "2-0", 1 if is_friday_weekend else 0, 20, ["NBC", "Peacock"], "Footprint Center"),
-        ("NFL", "nfl_det", "5-1", "nfl_gb", "5-2", 2 if is_friday_weekend else 0, 10, ["FOX"], "Ford Field"),
+        ("NFL", "nfl_det", "5-1", "nfl_gb", "5-2", 2 if is_friday_weekend else 0, 10, ["FOX", "FOX One"], "Ford Field"),
         ("NFL", "nfl_dal", "3-3", "nfl_phi", "4-2", 2 if is_friday_weekend else 0, 17, ["NBC", "Peacock"], "AT&T Stadium"),
     ]
     team_by_id = {t["id"]: t for t in TEAMS_CATALOG}

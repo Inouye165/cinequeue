@@ -2,7 +2,7 @@ import React, { useState } from "react";
 import { AccountSheet } from "./AccountSheet";
 import { InstallAppModal, usePwaInstall } from "./InstallAppBanner";
 import { SearchFiltersPanel } from "./SearchFiltersPanel";
-import type { SearchFilterState } from "../types";
+import type { SearchFilterState, StreamingServiceInfo } from "../types";
 
 interface SearchHeaderProps {
   query: string;
@@ -16,6 +16,10 @@ interface SearchHeaderProps {
   onOpenAgentModal?: (tab: "chat" | "settings" | "logs") => void;
   ownerId?: string;
   onDataCleared?: () => void;
+  availableStreamingServices?: StreamingServiceInfo[];
+  selectedStreamingServices?: string[];
+  onToggleStreamingService?: (serviceId: string) => void;
+  onOpenSportsSetup?: () => void;
 }
 
 export function SearchHeader({
@@ -30,6 +34,10 @@ export function SearchHeader({
   onOpenAgentModal,
   ownerId = "local_owner",
   onDataCleared,
+  availableStreamingServices,
+  selectedStreamingServices = [],
+  onToggleStreamingService,
+  onOpenSportsSetup,
 }: SearchHeaderProps) {
   const [showAccountSheet, setShowAccountSheet] = useState(false);
   const [showFiltersPanel, setShowFiltersPanel] = useState(false);
@@ -94,6 +102,19 @@ export function SearchHeader({
         </div>
 
         <div className="app-bar-actions">
+          {onOpenSportsSetup && (
+            <button
+              type="button"
+              className="install-app-pill-btn streaming-services-header-btn"
+              onClick={onOpenSportsSetup}
+              aria-label="Manage Streaming Services and Teams"
+              title="Add or remove your streaming services and tracked sports teams"
+            >
+              <span aria-hidden="true">📺</span>
+              <span>My Services ({selectedStreamingServices.length})</span>
+            </button>
+          )}
+
           {!isStandalone && (
             <button
               type="button"
@@ -335,6 +356,10 @@ export function SearchHeader({
         onOpenAgentModal={onOpenAgentModal}
         ownerId={ownerId}
         onDataCleared={onDataCleared}
+        availableStreamingServices={availableStreamingServices}
+        selectedStreamingServices={selectedStreamingServices}
+        onToggleStreamingService={onToggleStreamingService}
+        onOpenSportsSetup={onOpenSportsSetup}
         onRequestInstall={() => {
           setShowAccountSheet(false);
           void triggerInstall();

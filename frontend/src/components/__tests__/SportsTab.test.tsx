@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import "@testing-library/jest-dom";
 import { SportsTab } from "../SportsTab";
-import { DEFAULT_CATALOG, filterGamesForActiveWindow } from "../../services/sportsService";
+import { DEFAULT_CATALOG, enrichGameStreamingServices, filterGamesForActiveWindow } from "../../services/sportsService";
 import type { SportsGame, SportsPreferences } from "../../types";
 
 const MOCK_GAMES: SportsGame[] = [
@@ -201,5 +201,41 @@ describe("SportsTab Component", () => {
     // On Sunday Oct 25, 2026: keeps only Sunday's game
     const sundayResult = filterGamesForActiveWindow(sampleGames, new Date("2026-10-25T10:00:00-07:00"));
     expect(sundayResult.map((g) => g.id)).toEqual(["sun_game"]);
+  });
+
+  it("maps FOX broadcasts to FOX One (fox_one) and allows adding FOX One to watch 49ers on FOX", () => {
+    const foxNinersGame: SportsGame = enrichGameStreamingServices({
+      ...MOCK_GAMES[0],
+      id: "nfl_sf_atl",
+      title: "San Francisco 49ers at Atlanta Falcons",
+      short_title: "SF @ ATL",
+      broadcasts: ["Fox"],
+      streaming_service_ids: ["youtube_tv", "nfl_plus"],
+      streaming_services: [],
+    });
+
+    expect(foxNinersGame.streaming_service_ids).toContain("fox_one");
+    expect(foxNinersGame.streaming_services.some((s) => s.id === "fox_one")).toBe(true);
+
+    const handleSave = vi.fn().mockResolvedValue(undefined);
+    const prefs: SportsPreferences = {
+      streaming_services: ["fox_one"],
+      tracked_teams: ["nfl_sf"],
+      show_in_queue: true,
+      setup_completed: true,
+    };
+
+    render(
+      <SportsTab
+        catalog={DEFAULT_CATALOG}
+        games={[foxNinersGame]}
+        preferences={prefs}
+        loading={false}
+        onSavePreferences={handleSave}
+        onRefreshSchedule={vi.fn()}
+      />
+    );
+
+    expect(screen.getByText(/Watch on FOX One/i)).toBeInTheDocument();
   });
 });
