@@ -39,13 +39,26 @@ export function isIosDevice(): boolean {
   return /iphone|ipad|ipod/i.test(navigator.userAgent || "");
 }
 
+function syncStandaloneRootClass() {
+  if (typeof document === "undefined") return;
+  const standalone = isRunningStandalone();
+  document.documentElement.classList.toggle("pwa-standalone", standalone);
+  document.documentElement.classList.toggle("ios-standalone", standalone && isIosDevice());
+}
+
+if (typeof window !== "undefined") {
+  syncStandaloneRootClass();
+}
+
 export function usePwaInstall() {
   const [promptEvent, setPromptEvent] = useState<BeforeInstallPromptEvent | null>(deferredInstallPrompt);
   const [standalone, setStandalone] = useState<boolean>(() => isRunningStandalone());
   const [showGuide, setShowGuide] = useState(false);
 
   useEffect(() => {
+    syncStandaloneRootClass();
     const update = () => {
+      syncStandaloneRootClass();
       setPromptEvent(deferredInstallPrompt);
       setStandalone(isRunningStandalone());
     };

@@ -737,6 +737,24 @@ export function CinequeueDashboard({ onSignIn }: { onSignIn?: () => void }) {
 
   return (
     <div className="app-shell">
+      <SearchHeader
+        query={query}
+        setQuery={handleSetQuery}
+        onSubmit={handleSearch}
+        filters={searchFilters}
+        onUpdateFilters={handleUpdateFilters}
+        onResetFilters={handleResetFilters}
+        user={user ?? (firebaseUser?.uid === ownerId ? firebaseUser : { display_name: ownerId === "guest_local" ? "This device" : "Saved account workspace" })}
+        onLogout={ownerId !== "guest_local" ? logout : undefined}
+        onOpenAgentModal={user ? openAgentModal : undefined}
+        ownerId={ownerId}
+        onDataCleared={reloadFromDb}
+        availableStreamingServices={sportsCatalog.streaming_services}
+        selectedStreamingServices={sportsPrefs.streaming_services}
+        onToggleStreamingService={(serviceId) => void handleToggleStreamingService(serviceId)}
+        onOpenSportsSetup={() => setIsSportsSetupModalOpen(true)}
+      />
+
       {!user && !isRestoringSavedSession && (
         <div role="status" className="local-workspace-bar">
           <div className="local-workspace-bar-text">
@@ -759,23 +777,6 @@ export function CinequeueDashboard({ onSignIn }: { onSignIn?: () => void }) {
           </div>
         </div>
       )}
-      <SearchHeader
-        query={query}
-        setQuery={handleSetQuery}
-        onSubmit={handleSearch}
-        filters={searchFilters}
-        onUpdateFilters={handleUpdateFilters}
-        onResetFilters={handleResetFilters}
-        user={user ?? (firebaseUser?.uid === ownerId ? firebaseUser : { display_name: ownerId === "guest_local" ? "This device" : "Saved account workspace" })}
-        onLogout={ownerId !== "guest_local" ? logout : undefined}
-        onOpenAgentModal={user ? openAgentModal : undefined}
-        ownerId={ownerId}
-        onDataCleared={reloadFromDb}
-        availableStreamingServices={sportsCatalog.streaming_services}
-        selectedStreamingServices={sportsPrefs.streaming_services}
-        onToggleStreamingService={(serviceId) => void handleToggleStreamingService(serviceId)}
-        onOpenSportsSetup={() => setIsSportsSetupModalOpen(true)}
-      />
 
       <SyncStatusBar ownerId={ownerId} onDataCleared={reloadFromDb} />
 
