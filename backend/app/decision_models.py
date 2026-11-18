@@ -532,6 +532,10 @@ def set_current_run_context(ctx: Optional[StartupRunContext]):
     return _CURRENT_RUN_CONTEXT.set(ctx)
 
 
+def reset_current_run_context(token) -> None:
+    _CURRENT_RUN_CONTEXT.reset(token)
+
+
 @dataclass
 class DecisionLog:
     log_id: str

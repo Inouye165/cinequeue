@@ -731,6 +731,8 @@ class FirestoreWatchlistRepository(WatchlistRepository):
                     if status == "generating" and exp_str:
                         try:
                             exp_dt = datetime.fromisoformat(exp_str)
+                            if exp_dt.tzinfo is None:
+                                exp_dt = exp_dt.replace(tzinfo=timezone.utc)
                             if exp_dt > now_dt:
                                 return False, b_data
                         except Exception:
@@ -750,7 +752,7 @@ class FirestoreWatchlistRepository(WatchlistRepository):
             return _in_transaction(transaction, doc_ref)
         except Exception as e:
             logger.warning(f"Firestore claim_daily_greeting_generation error: {e}")
-            return True, None
+            return False, None
 
     def save_daily_greeting(self, user_id: str, date_str: str, briefing_data: dict[str, Any]) -> dict[str, Any]:
         now = self.utc_now_iso()

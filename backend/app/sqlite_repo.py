@@ -465,11 +465,17 @@ class SqliteWatchlistRepository(WatchlistRepository):
 
     @contextmanager
     def _connection(self):
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=10.0)
         conn.row_factory = sqlite3.Row
         try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA busy_timeout=5000")
             yield conn
             conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 
@@ -1224,6 +1230,7 @@ class SqliteWatchlistRepository(WatchlistRepository):
         lease_exp = (now_dt + timedelta(seconds=lease_seconds)).isoformat()
 
         with self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 "SELECT briefing_json FROM daily_greetings WHERE user_id = ? AND date_str = ?",
                 (user_id, date_str),
@@ -1241,6 +1248,8 @@ class SqliteWatchlistRepository(WatchlistRepository):
                     if status == "generating" and exp_str:
                         try:
                             exp_dt = datetime.fromisoformat(exp_str)
+                            if exp_dt.tzinfo is None:
+                                exp_dt = exp_dt.replace(tzinfo=timezone.utc)
                             if exp_dt > now_dt:
                                 return False, data
                         except Exception:

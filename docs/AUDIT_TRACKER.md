@@ -3,7 +3,7 @@
 This document tracks all **22 verified findings** across Security, Infrastructure, Race Conditions & Concurrency, Modularity, and Regression Test Coverage, fixed incrementally one item at a time.
 
 **Branch:** `fix/comprehensive-app-audit`  
-**Status:** `13 / 22` completed
+**Status:** `14 / 22` completed
 
 ---
 
@@ -29,7 +29,7 @@ This document tracks all **22 verified findings** across Security, Infrastructur
 - [x] **Item 13 (`[INF-04]`)** — Cloud Build CI/CD Parity, Vite Preview Port 5180 Enforcement, Dev PWA Guard & Startup Script Cleanup
 
 ### Race Conditions & Concurrency
-- [ ] **Item 14 (`[RACE-01]`)** — SQLite `WAL` + `busy_timeout`, Atomic `claim_daily_greeting_generation`, & `BriefingService` Step 4 Concurrent Wait Fix
+- [x] **Item 14 (`[RACE-01]`)** — SQLite `WAL` + `busy_timeout`, Atomic `claim_daily_greeting_generation`, & `BriefingService` Step 4 Concurrent Wait Fix
 - [ ] **Item 15 (`[RACE-02]`)** — Transactional Repository Mutations, Watchlist/Ratings Dual-Store Sync, Deterministic Hashing & Firestore Slash-Safe IDs
 - [ ] **Item 16 (`[RACE-03]`)** — Offload Blocking Auth/DB Work Off Async Event Loop & Share Lifespan `httpx.AsyncClient`
 - [ ] **Item 17 (`[RACE-04]`)** — Fix `SyncStatusBar` Zombie-Movie Bug, `syncLock` `ifAvailable` Semantics, & Protocol v2 Type Alignment
