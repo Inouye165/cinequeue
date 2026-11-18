@@ -4,12 +4,16 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
-from app.auth import CurrentUser, get_current_user
+from app.auth import CurrentUser, get_current_user, require_cookie_csrf_and_origin
 from app.services.agent_service import AiAgentService
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/agent", tags=["agent"], dependencies=[Depends(get_current_user)])
+router = APIRouter(
+    prefix="/api/agent",
+    tags=["agent"],
+    dependencies=[Depends(get_current_user), Depends(require_cookie_csrf_and_origin)],
+)
 
 
 class AgentSettingsPayload(BaseModel):

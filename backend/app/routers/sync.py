@@ -4,12 +4,16 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field, StrictInt, StrictStr
 
-from app.auth import get_current_user
+from app.auth import get_current_user, require_cookie_csrf_and_origin
 from app.repository import DuplicateItemError, WatchlistRepository
 from app.sync_protocol import validate_operation
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/api/sync", tags=["sync"])
+router = APIRouter(
+    prefix="/api/sync",
+    tags=["sync"],
+    dependencies=[Depends(require_cookie_csrf_and_origin)],
+)
 
 
 class SyncOperationPayload(BaseModel):

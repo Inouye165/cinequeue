@@ -182,6 +182,51 @@ def verify_csrf_token(token_a: str, token_b: str) -> bool:
     return hmac.compare_digest(token_a, token_b)
 
 
+def validate_origin(request: Request) -> None:
+    """Validate the Origin header against exact configured allowlist when auth is enabled."""
+    if not config.AUTH_ENABLED:
+        return
+
+    origin = request.headers.get("origin")
+    if origin:
+        normalized_origin = origin.rstrip("/")
+        if normalized_origin not in config.AUTH_ALLOWED_ORIGINS:
+            logger.warning("Origin validation failed: %s not in %s", origin, config.AUTH_ALLOWED_ORIGINS)
+            raise HTTPException(status_code=401, detail="Origin not allowed")
+    else:
+        logger.warning("Origin header is missing for state-changing operation")
+        raise HTTPException(status_code=401, detail="Missing Origin header")
+
+
+def validate_csrf(request: Request, request_csrf: str) -> None:
+    """Validate CSRF token against the cookie value without logging raw tokens."""
+    cookies = getattr(request, "cookies", None) or {}
+    cookie_csrf = cookies.get("cinequeue_csrf")
+    if not request_csrf or not cookie_csrf or not verify_csrf_token(request_csrf, cookie_csrf):
+        logger.warning(
+            "CSRF token mismatch or missing (request_present=%s, cookie_present=%s)",
+            bool(request_csrf),
+            bool(cookie_csrf),
+        )
+        raise HTTPException(status_code=401, detail="CSRF validation failed")
+
+
+async def require_cookie_csrf_and_origin(request: Request) -> None:
+    """Enforce Origin + X-CSRF-Token header validation on cookie-authenticated mutations."""
+    if not config.AUTH_ENABLED or request.method in {"GET", "HEAD", "OPTIONS"}:
+        return
+
+    auth_header = request.headers.get("Authorization") or request.headers.get("authorization") or ""
+    if auth_header.startswith("Bearer ") and auth_header[7:].strip():
+        return
+
+    cookies = getattr(request, "cookies", None) or {}
+    if cookies.get(config.SESSION_COOKIE_NAME):
+        validate_origin(request)
+        csrf_header = request.headers.get("X-CSRF-Token") or request.headers.get("x-csrf-token") or ""
+        validate_csrf(request, csrf_header)
+
+
 async def get_current_user(
     request: Request,
     session_cookie: Optional[str] = Depends(session_cookie_scheme)

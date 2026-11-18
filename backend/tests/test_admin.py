@@ -404,7 +404,8 @@ def test_admin_session_revocation(client_with_admin_auth):
     
     login_res = client_with_admin_auth.post(
         "/api/admin/login",
-        json={"username": "revokeme", "password": "secretpass123", "csrf_token": csrf_token}
+        json={"username": "revokeme", "password": "secretpass123", "csrf_token": csrf_token},
+        headers={"Origin": "https://cinequeue-7tvty3vmvq-uw.a.run.app"},
     )
     assert login_res.status_code == 200
     

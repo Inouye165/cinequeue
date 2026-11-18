@@ -31,6 +31,8 @@ from app.auth import (
     generate_csrf_token,
     verify_csrf_token,
     get_current_user,
+    validate_origin,
+    validate_csrf,
 )
 
 logger = logging.getLogger(__name__)
@@ -43,28 +45,6 @@ class SessionRequest(BaseModel):
 
 class LogoutRequest(BaseModel):
     csrf_token: str
-
-def validate_origin(request: Request):
-    """Validate the Origin header against exact configured allowlist in production."""
-    if not AUTH_ENABLED:
-        return
-
-    origin = request.headers.get("origin")
-    if origin:
-        normalized_origin = origin.rstrip("/")
-        if normalized_origin not in AUTH_ALLOWED_ORIGINS:
-            logger.warning("Origin validation failed: %s not in %s", origin, AUTH_ALLOWED_ORIGINS)
-            raise HTTPException(status_code=401, detail="Origin not allowed")
-    else:
-        logger.warning("Origin header is missing for state-changing operation")
-        raise HTTPException(status_code=401, detail="Missing Origin header")
-
-def validate_csrf(request: Request, request_csrf: str):
-    """Validate CSRF token against the cookie value."""
-    cookie_csrf = request.cookies.get("cinequeue_csrf")
-    if not request_csrf or not cookie_csrf or not verify_csrf_token(request_csrf, cookie_csrf):
-        logger.warning("CSRF token mismatch or missing: request=%s, cookie=%s", request_csrf, cookie_csrf)
-        raise HTTPException(status_code=401, detail="CSRF validation failed")
 
 @router.get("/config")
 async def get_config():

@@ -38,6 +38,10 @@ function getCookie(name: string): string | null {
   return null;
 }
 
+export function getCsrfCookie(): string | null {
+  return getCookie("cinequeue_csrf");
+}
+
 let adminMeRequestCount = 0;
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {

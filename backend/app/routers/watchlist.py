@@ -6,14 +6,18 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, Depends, BackgroundTasks
 
-from app.auth import get_current_user, CurrentUser
+from app.auth import get_current_user, require_cookie_csrf_and_origin, CurrentUser
 from app.models import days_label, days_until, poster_url
 from app.repository import DuplicateItemError
 from app.services.tmdb import TmdbClient, fetch_news
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/watchlist", tags=["watchlist"], dependencies=[Depends(get_current_user)])
+router = APIRouter(
+    prefix="/api/watchlist",
+    tags=["watchlist"],
+    dependencies=[Depends(get_current_user), Depends(require_cookie_csrf_and_origin)],
+)
 
 
 async def refresh_cache_in_background(repo, user_id: str, media_type: str, tmdb_id: int, tmdb: TmdbClient):

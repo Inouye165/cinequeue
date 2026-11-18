@@ -10,7 +10,7 @@ from app.config import (
     ADMIN_SESSION_COOKIE_NAME,
     SESSION_COOKIE_SECURE,
 )
-from app.routers.auth import validate_csrf
+from app.auth import validate_csrf, validate_origin
 from app.services.admin_auth import (
     verify_password,
     hash_password,
@@ -46,7 +46,8 @@ async def admin_login(
     request: Request,
     response: Response
 ) -> dict[str, str]:
-    # 1. CSRF Validation
+    # 1. Origin & CSRF Validation
+    validate_origin(request)
     validate_csrf(request, body.csrf_token)
 
     ip_address = request.client.host if request.client else "unknown"
@@ -117,6 +118,7 @@ async def admin_logout(
     request: Request,
     response: Response,
 ) -> dict[str, str]:
+    validate_origin(request)
     validate_csrf(request, body.csrf_token)
 
     session_cookie = request.cookies.get(ADMIN_SESSION_COOKIE_NAME)
@@ -155,6 +157,7 @@ async def approve_request(
     request: Request,
     current_admin: str = Depends(get_current_admin)
 ) -> dict[str, str]:
+    validate_origin(request)
     validate_csrf(request, body.csrf_token)
     email_normalized = body.email.strip().lower()
 
@@ -175,6 +178,7 @@ async def deny_request(
     request: Request,
     current_admin: str = Depends(get_current_admin)
 ) -> dict[str, str]:
+    validate_origin(request)
     validate_csrf(request, body.csrf_token)
     email_normalized = body.email.strip().lower()
 
@@ -195,6 +199,7 @@ async def invite_user(
     request: Request,
     current_admin: str = Depends(get_current_admin)
 ) -> dict[str, Any]:
+    validate_origin(request)
     validate_csrf(request, body.csrf_token)
     email_normalized = body.email.strip().lower()
 
@@ -298,13 +303,14 @@ class PreviewDecisionRequest(BaseModel):
 
 
 def _validate_cookie_csrf(request: Request) -> None:
-    """Validate X-CSRF-Token header when state-changing admin routes use cookie authentication."""
+    """Validate Origin and X-CSRF-Token header when state-changing admin routes use cookie authentication."""
     headers = getattr(request, "headers", None) or {}
     cookies = getattr(request, "cookies", None) or {}
     auth_header = headers.get("Authorization") or headers.get("authorization") or ""
     if auth_header.startswith("Bearer "):
         return
     if cookies.get(ADMIN_SESSION_COOKIE_NAME):
+        validate_origin(request)
         csrf_header = headers.get("X-CSRF-Token") or headers.get("x-csrf-token") or ""
         validate_csrf(request, csrf_header)
 

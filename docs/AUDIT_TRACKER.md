@@ -3,7 +3,7 @@
 This document tracks all **22 verified findings** across Security, Infrastructure, Race Conditions & Concurrency, Modularity, and Regression Test Coverage, fixed incrementally one item at a time.
 
 **Branch:** `fix/comprehensive-app-audit`  
-**Status:** `2 / 22` completed
+**Status:** `3 / 22` completed
 
 ---
 
@@ -14,7 +14,7 @@ This document tracks all **22 verified findings** across Security, Infrastructur
 
 ### Security
 - [x] **Item 2 (`[SEC-01]`)** — Authenticate `/api/sports`, Fix Cloud Run UTC Evening Game Drop & Fake Fallback Games, & Fix Empty Schedule Client Fallback
-- [ ] **Item 3 (`[SEC-02]`)** — Enforce Cookie CSRF & Origin Validation Across All Mutating Routers + Attach `X-CSRF-Token` in `syncService.ts`
+- [x] **Item 3 (`[SEC-02]`)** — Enforce Cookie CSRF & Origin Validation Across All Mutating Routers + Attach `X-CSRF-Token` in `syncService.ts`
 - [ ] **Item 4 (`[SEC-03]`)** — Production CORS/Origin Hardening, Fail-Closed Config Checks, & Root-Anchored `DATA_DIR`
 - [ ] **Item 5 (`[SEC-04]`)** — Bearer Token `email_verified` Enforcement, Approval Fail-Closed, Admin Dual-Auth Fallback, & `X-Session-Restore` Hardening
 - [ ] **Item 6 (`[SEC-05]`)** — Admin Auth Hardening: Timing-Safe Login, Brute-Force Rate Limiter, Hashed Session IDs, Startup Seeding Guard, & Proxy Cookie Stripping
