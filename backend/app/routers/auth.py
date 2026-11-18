@@ -188,7 +188,7 @@ async def create_session(
         raise
 
     is_session_restore = request.headers.get("X-Session-Restore") == "1"
-    max_auth_age_seconds = 365 * 24 * 60 * 60 if is_session_restore else 5 * 60
+    max_auth_age_seconds = 30 * 24 * 60 * 60 if is_session_restore else 5 * 60
 
     # Stage 3.5: Early auth_time pre-check (decode JWT payload without verification)
     try:
@@ -220,7 +220,10 @@ async def create_session(
     t_stage3 = time.perf_counter()
     decoded_token = None
     try:
-        decoded_token = firebase_auth.verify_id_token(body.id_token, clock_skew_seconds=60)
+        if is_session_restore:
+            decoded_token = firebase_auth.verify_id_token(body.id_token, check_revoked=True, clock_skew_seconds=60)
+        else:
+            decoded_token = firebase_auth.verify_id_token(body.id_token, clock_skew_seconds=60)
     except Exception as e:
         if "Token used too early" in str(e):
             match = re.search(r"Token used too early,\s*(\d+)\s*<\s*(\d+)", str(e))
@@ -239,7 +242,10 @@ async def create_session(
             )
             await asyncio.sleep(sleep_time)
             try:
-                decoded_token = firebase_auth.verify_id_token(body.id_token, clock_skew_seconds=60)
+                if is_session_restore:
+                    decoded_token = firebase_auth.verify_id_token(body.id_token, check_revoked=True, clock_skew_seconds=60)
+                else:
+                    decoded_token = firebase_auth.verify_id_token(body.id_token, clock_skew_seconds=60)
             except Exception as retry_err:
                 log_failure("unknown", "clock_skew_verification_failed", 401)
                 raise HTTPException(status_code=401, detail="Invalid ID token or session generation failed")
@@ -461,6 +467,18 @@ async def logout(body: LogoutRequest, request: Request, response: Response):
 
     # 2. Validate Origin
     validate_origin(request)
+
+    # 2.5 Best-effort Firebase refresh token revocation for active session
+    session_cookie = request.cookies.get(SESSION_COOKIE_NAME)
+    if session_cookie and AUTH_ENABLED:
+        try:
+            from firebase_admin import auth as firebase_auth
+            decoded = firebase_auth.verify_session_cookie(session_cookie, check_revoked=False)
+            uid = decoded.get("uid") or decoded.get("sub")
+            if uid:
+                firebase_auth.revoke_refresh_tokens(uid)
+        except Exception as e:
+            logger.debug("Best-effort refresh token revocation during logout skipped: %s", e)
 
     # 3. Clear session cookie
     response.delete_cookie(

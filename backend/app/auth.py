@@ -285,6 +285,9 @@ async def get_current_user(
 
         if decoded_claims is None and bearer_token:
             decoded_claims = auth.verify_id_token(bearer_token, clock_skew_seconds=60)
+            if not decoded_claims.get("email_verified"):
+                logger.warning("Bearer token email is not verified")
+                raise HTTPException(status_code=401, detail="Email is not verified")
 
         email = decoded_claims.get("email")
         if not email:
@@ -314,8 +317,8 @@ async def get_current_user(
                     logger.warning("User %s access status is %s", email_normalized, status)
                     raise HTTPException(status_code=403, detail=f"Forbidden: User status is {status}")
             else:
-                # No DB approval record found
-                if config.AUTH_MODE == "allowlist" and email_normalized not in config.AUTH_ALLOWED_EMAILS:
+                # No DB approval record found — fail closed unless explicitly on static allowlist
+                if email_normalized not in config.AUTH_ALLOWED_EMAILS:
                     ip_address = request.client.host if request.client else "unknown"
                     user_agent = request.headers.get("user-agent", "unknown")
                     repo.log_login_attempt(
@@ -329,7 +332,7 @@ async def get_current_user(
                     logger.warning("User %s is not approved in database or static allowlist", email_normalized)
                     raise HTTPException(status_code=403, detail="Forbidden: User is not authorized")
         else:
-            if config.AUTH_MODE == "allowlist" and email_normalized not in config.AUTH_ALLOWED_EMAILS:
+            if email_normalized not in config.AUTH_ALLOWED_EMAILS:
                 logger.warning("User %s is not in static allowlist", email_normalized)
                 raise HTTPException(status_code=403, detail="Forbidden: User is not authorized")
 

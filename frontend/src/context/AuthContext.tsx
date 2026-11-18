@@ -308,7 +308,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
                       authLog.info("performAuthSequence: calling createSession…");
                       recordEvent("session_creation_started", "start");
-                      await api.createSession(token, csrfData.csrf_token);
+                      if (restoringSession) {
+                        await api.createSession(token, csrfData.csrf_token, true);
+                      } else {
+                        await api.createSession(token, csrfData.csrf_token);
+                      }
                       authLog.info("performAuthSequence: createSession succeeded");
                       recordEvent("session_creation_completed", "success");
                       if (!isCurrent()) { authLog.debug("stale after createSession"); return; }

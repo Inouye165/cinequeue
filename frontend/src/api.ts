@@ -191,12 +191,12 @@ export const api = {
   // Auth endpoints
   firebaseConfig: () => request<FirebaseConfig>("/api/auth/config"),
   csrf: () => request<CsrfResponse>("/api/auth/csrf"),
-  createSession: (idToken: string, csrfToken: string) =>
+  createSession: (idToken: string, csrfToken: string, isSessionRestore = false) =>
     request<{ status: string }>("/api/auth/session", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "X-Session-Restore": "1",
+        ...(isSessionRestore ? { "X-Session-Restore": "1" } : {}),
       },
       body: JSON.stringify({ id_token: idToken, csrf_token: csrfToken }),
     }),

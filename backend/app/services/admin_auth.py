@@ -72,6 +72,9 @@ async def get_current_admin(
             email = decoded_token.get("email")
             if not email:
                 raise HTTPException(status_code=401, detail="Invalid token claims: email missing")
+            if not decoded_token.get("email_verified"):
+                logger.warning("Admin Bearer token email is not verified")
+                raise HTTPException(status_code=401, detail="Email is not verified")
 
             email_normalized = email.strip().lower()
 
@@ -101,10 +104,14 @@ async def get_current_admin(
                 if request.headers.get("X-Admin-Role-Check") == "1" and request.url.path == "/api/admin/me":
                     logger.debug("User %s is a standard user (not admin) during passive role check", email_normalized)
                     return ""
-                logger.warning("User %s is not an authorized administrator", email_normalized)
-                raise HTTPException(status_code=403, detail="Not authorized as an administrator")
-
-            return email_normalized
+                cookies = getattr(request, "cookies", None) or {}
+                has_admin_cookie = bool(cookies.get(ADMIN_SESSION_COOKIE_NAME) or session_cookie)
+                if not has_admin_cookie:
+                    logger.warning("User %s is not an authorized administrator", email_normalized)
+                    raise HTTPException(status_code=403, detail="Not authorized as an administrator")
+                logger.info("Bearer user %s is not admin; falling through to admin session cookie check", email_normalized)
+            else:
+                return email_normalized
         except HTTPException:
             raise
         except Exception as e:

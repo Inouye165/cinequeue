@@ -27,7 +27,7 @@ def test_trace_id_extraction_and_propagation(client):
 @patch("firebase_admin.auth.verify_id_token")
 def test_admin_token_verification_success(mock_verify, client):
     """Test that a valid admin Bearer token returns 200 and timing headers."""
-    mock_verify.return_value = {"email": "admin@example.com"}
+    mock_verify.return_value = {"email": "admin@example.com", "email_verified": True}
     
     with patch("app.services.admin_auth.ADMIN_USERNAME", "admin@example.com"), patch("app.services.admin_auth.ENABLE_FALLBACK_ADMIN_AUTH", True):
         response = client.get(
@@ -48,7 +48,7 @@ def test_admin_token_verification_success(mock_verify, client):
 @patch("firebase_admin.auth.verify_id_token")
 def test_non_admin_token_verification_forbidden(mock_verify, client):
     """Test that a valid non-admin Bearer token returns 403 Forbidden."""
-    mock_verify.return_value = {"email": "normal-user@example.com"}
+    mock_verify.return_value = {"email": "normal-user@example.com", "email_verified": True}
     
     with patch("app.services.admin_auth.ADMIN_USERNAME", "admin@example.com"):
         response = client.get(

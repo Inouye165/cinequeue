@@ -304,6 +304,7 @@ def test_admin_bearer_token_success(mock_verify_token, client_with_admin_auth):
     mock_verify_token.return_value = {
         "uid": "admin_uid_123",
         "email": "admin@example.com",
+        "email_verified": True,
     }
     
     # We temporarily patch ADMIN_USERNAME in config to admin@example.com for matching
@@ -322,6 +323,7 @@ def test_admin_bearer_token_forbidden(mock_verify_token, client_with_admin_auth)
     mock_verify_token.return_value = {
         "uid": "nonadmin_uid_456",
         "email": "user@example.com",
+        "email_verified": True,
     }
     
     response = client_with_admin_auth.get(
@@ -354,6 +356,7 @@ def test_admin_bearer_token_normalization(mock_verify_token, client_with_admin_a
     mock_verify_token.return_value = {
         "uid": "admin_uid_123",
         "email": "  Admin@Example.Com  ",
+        "email_verified": True,
     }
     
     with patch("app.services.admin_auth.ADMIN_USERNAME", "admin@example.com"):
@@ -375,6 +378,7 @@ def test_admin_bearer_token_no_raw_token_logged(mock_verify_token, client_with_a
     mock_verify_token.return_value = {
         "uid": "admin_uid_123",
         "email": "admin@example.com",
+        "email_verified": True,
     }
     
     with patch("app.services.admin_auth.ADMIN_USERNAME", "admin@example.com"):
@@ -577,6 +581,7 @@ def test_admin_bearer_token_passive_role_check_returns_200_for_non_admin(mock_ve
     mock_verify_token.return_value = {
         "uid": "nonadmin_uid_456",
         "email": "user@example.com",
+        "email_verified": True,
     }
 
     response = client_with_admin_auth.get(
@@ -588,5 +593,48 @@ def test_admin_bearer_token_passive_role_check_returns_200_for_non_admin(mock_ve
     )
     assert response.status_code == 200
     assert response.json() == {"username": "", "is_admin": False}
+
+
+@patch("firebase_admin.auth.verify_id_token")
+def test_admin_bearer_token_unverified_email_rejected(mock_verify_token, client_with_admin_auth):
+    """Admin Bearer token without email_verified=True receives 401."""
+    mock_verify_token.return_value = {
+        "uid": "admin_uid_123",
+        "email": "admin@example.com",
+        "email_verified": False,
+    }
+
+    with patch("app.services.admin_auth.ADMIN_USERNAME", "admin@example.com"):
+        response = client_with_admin_auth.get(
+            "/api/admin/me",
+            headers={"Authorization": "Bearer unverified-token"},
+        )
+        assert response.status_code == 401
+        assert "not verified" in response.json()["detail"].lower()
+
+
+@patch("firebase_admin.auth.verify_id_token")
+def test_admin_dual_auth_falls_back_to_admin_cookie(mock_verify_token, client_with_admin_auth):
+    """Non-admin Bearer user with valid fallback admin session cookie authenticates via cookie."""
+    from datetime import datetime, timedelta, timezone
+    from app.services.admin_auth import ADMIN_SESSION_COOKIE_NAME
+
+    repo = client_with_admin_auth.app.state.watchlist_repo
+    expires_at = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    repo.create_admin_session("valid_fallback_admin_sid", "admin", expires_at)
+
+    mock_verify_token.return_value = {
+        "uid": "nonadmin_uid_456",
+        "email": "user@example.com",
+        "email_verified": True,
+    }
+    client_with_admin_auth.cookies.set(ADMIN_SESSION_COOKIE_NAME, "valid_fallback_admin_sid")
+
+    response = client_with_admin_auth.get(
+        "/api/admin/me",
+        headers={"Authorization": "Bearer user-test-token"},
+    )
+    assert response.status_code == 200
+    assert response.json() == {"username": "admin"}
 
 
