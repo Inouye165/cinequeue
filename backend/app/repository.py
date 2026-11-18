@@ -148,6 +148,11 @@ class WatchlistRepository(ABC):
         ...
 
     @abstractmethod
+    def delete_admin_sessions_for_user(self, username: str) -> None:
+        """Delete all active admin sessions belonging to username."""
+        ...
+
+    @abstractmethod
     def get_user_approval(self, email: str) -> dict[str, Any] | None:
         """Retrieve approval status for a user email."""
         ...

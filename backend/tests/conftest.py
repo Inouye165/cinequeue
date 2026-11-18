@@ -29,11 +29,14 @@ from app.sqlite_repo import SqliteWatchlistRepository
 def setup_database():
     """Initialize SQLite repo and attach to app state before each test."""
     from app.main import app
+    from app.services.admin_auth import reset_admin_login_rate_limits
 
+    reset_admin_login_rate_limits()
     repo = SqliteWatchlistRepository()
     app.state.watchlist_repo = repo
     repo.clear_all("local_test_user")
     yield
+    reset_admin_login_rate_limits()
 
 
 @pytest.fixture
@@ -55,6 +58,7 @@ def reload_all_app_modules():
     app.services.admin_auth.ADMIN_SESSION_COOKIE_NAME = app.config.ADMIN_SESSION_COOKIE_NAME
     app.services.admin_auth.ADMIN_USERNAME = app.config.ADMIN_USERNAME
     app.services.admin_auth.ENABLE_FALLBACK_ADMIN_AUTH = app.config.ENABLE_FALLBACK_ADMIN_AUTH
+    app.services.admin_auth.reset_admin_login_rate_limits()
     import app.routers.auth
     importlib.reload(app.routers.auth)
     import app.routers.admin

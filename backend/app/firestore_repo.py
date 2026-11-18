@@ -308,10 +308,11 @@ class FirestoreWatchlistRepository(WatchlistRepository):
         return True
 
     def create_admin_session(self, session_id: str, username: str, expires_at: str) -> None:
+        username_normalized = (username or "").strip().lower()
         created_at = self.utc_now_iso()
         doc_ref = self._db.collection("admin_sessions").document(session_id)
         doc_ref.set({
-            "username": username,
+            "username": username_normalized,
             "created_at": created_at,
             "expires_at": expires_at
         })
@@ -329,6 +330,14 @@ class FirestoreWatchlistRepository(WatchlistRepository):
     def delete_admin_session(self, session_id: str) -> None:
         doc_ref = self._db.collection("admin_sessions").document(session_id)
         doc_ref.delete()
+
+    def delete_admin_sessions_for_user(self, username: str) -> None:
+        username_normalized = (username or "").strip().lower()
+        if not username_normalized:
+            return
+        sessions = self._db.collection("admin_sessions").where("username", "==", username_normalized).stream()
+        for sess in sessions:
+            sess.reference.delete()
 
     def get_user_approval(self, email: str) -> dict[str, Any] | None:
         doc_ref = self._db.collection("user_approvals").document(email)

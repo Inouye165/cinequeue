@@ -16,6 +16,8 @@ from app.config import (
     ENVIRONMENT,
     FIREBASE_AUTH_DOMAIN,
     PUBLIC_AUTH_DOMAIN,
+    SESSION_COOKIE_NAME,
+    ADMIN_SESSION_COOKIE_NAME,
 )
 from app.logging_config import setup_logging
 from app.routers import movies, watchlist, auth, admin, agent, ratings, sync, sports
@@ -77,16 +79,29 @@ async def lifespan(app: FastAPI):
         logger.warning("TMDB_API_KEY not configured")
         app.state.tmdb = None
     # -- Initialize Admin User -------------------------------------------------
+    import app.config as config
     repo = app.state.watchlist_repo
-    from app.config import ADMIN_USERNAME, ADMIN_PASSWORD
     from app.services.admin_auth import hash_password, generate_salt
-    if ADMIN_USERNAME and ADMIN_PASSWORD:
+    _PLACEHOLDER_ADMIN_PASSWORDS = {
+        "change_me_immediately",
+        "changeme",
+        "admin",
+        "password",
+        "your_admin_password",
+    }
+    if (
+        config.ENABLE_FALLBACK_ADMIN_AUTH
+        and config.ADMIN_USERNAME
+        and config.ADMIN_PASSWORD
+        and config.ADMIN_PASSWORD.strip().lower() not in _PLACEHOLDER_ADMIN_PASSWORDS
+    ):
+        seeded_username = config.ADMIN_USERNAME.strip().lower()
         try:
-            if not repo.get_admin_user(ADMIN_USERNAME):
+            if not repo.get_admin_user(seeded_username):
                 salt = generate_salt()
-                pwd_hash = hash_password(ADMIN_PASSWORD, salt)
-                repo.create_admin_user(ADMIN_USERNAME, pwd_hash, salt)
-                logger.info("Initialized default admin user '%s' in database", ADMIN_USERNAME)
+                pwd_hash = hash_password(config.ADMIN_PASSWORD, salt)
+                repo.create_admin_user(seeded_username, pwd_hash, salt)
+                logger.info("Initialized default admin user '%s' in database", seeded_username)
         except Exception as e:
             logger.error("Failed to initialize default admin user: %s", e)
 
@@ -229,7 +244,15 @@ async def firebase_auth_proxy(path: str, request: Request):
                     continue
                 if "=" in pair:
                     cname, _ = pair.split("=", 1)
-                    if cname.strip() not in ("__Host-cinequeue_session", "cinequeue_session", "cinequeue_csrf"):
+                    if cname.strip() not in (
+                        "__Host-cinequeue_session",
+                        "cinequeue_session",
+                        "cinequeue_csrf",
+                        "cinequeue_admin_session",
+                        "__Host-cinequeue_admin_session",
+                        SESSION_COOKIE_NAME,
+                        ADMIN_SESSION_COOKIE_NAME,
+                    ):
                         filtered_cookies.append(pair)
                 else:
                     filtered_cookies.append(pair)

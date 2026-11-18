@@ -1,6 +1,8 @@
 """Authentication and authorization utilities using Firebase Admin SDK."""
 
 import logging
+import os
+import ipaddress
 import secrets
 import hmac
 import re
@@ -26,6 +28,19 @@ from app.config import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def extract_client_ip(request: Request) -> str:
+    """Safely extract client IP address, trusting X-Forwarded-For only under Cloud Run."""
+    if os.getenv("K_SERVICE"):
+        forwarded = request.headers.get("x-forwarded-for")
+        if forwarded:
+            candidate = forwarded.split(",")[-1].strip()
+            try:
+                return str(ipaddress.ip_address(candidate))
+            except ValueError:
+                pass
+    return request.client.host if request.client else "unknown"
 
 
 class KeepAliveHTTPAdapter(HTTPAdapter):

@@ -65,9 +65,9 @@ def main():
                     sys.exit(0)
             
             # Prompt for password securely
-            password = getpass.getpass("Enter administrator password: ")
-            if not password:
-                print("Error: Password cannot be empty.", file=sys.stderr)
+            password = getpass.getpass("Enter administrator password (min 12 characters): ")
+            if not password or len(password) < 12:
+                print("Error: Password must be at least 12 characters long.", file=sys.stderr)
                 sys.exit(1)
                 
             password_confirm = getpass.getpass("Confirm administrator password: ")
@@ -78,6 +78,8 @@ def main():
             salt = generate_salt()
             pwd_hash = hash_password(password, salt)
             repo.create_admin_user(username, pwd_hash, salt)
+            if existing and hasattr(repo, "delete_admin_sessions_for_user"):
+                repo.delete_admin_sessions_for_user(username)
             print(f"Successfully added/updated administrator '{username}' in {datastore_name}.")
         except Exception as e:
             print(f"Error: Failed to add administrator: {e}", file=sys.stderr)

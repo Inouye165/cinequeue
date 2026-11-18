@@ -10,13 +10,19 @@ from app.config import (
     ADMIN_SESSION_COOKIE_NAME,
     SESSION_COOKIE_SECURE,
 )
-from app.auth import validate_csrf, validate_origin
+from app.auth import validate_csrf, validate_origin, extract_client_ip
 from app.services.admin_auth import (
     verify_password,
+    verify_password_async,
+    dummy_password_work,
     hash_password,
+    hash_session_token,
     generate_salt,
     generate_session_token,
     get_current_admin,
+    is_admin_login_rate_limited,
+    record_admin_login_failure,
+    clear_admin_login_failures,
 )
 from app.services.email_service import send_invite_email
 
@@ -50,46 +56,72 @@ async def admin_login(
     validate_origin(request)
     validate_csrf(request, body.csrf_token)
 
-    ip_address = request.client.host if request.client else "unknown"
+    ip_address = extract_client_ip(request)
     user_agent = request.headers.get("user-agent", "unknown")
     repo = request.app.state.watchlist_repo
     timestamp = repo.utc_now_iso()
+    username_normalized = (body.username or "").strip().lower()
 
-    # 2. Check credentials
-    admin_user = repo.get_admin_user(body.username)
+    if is_admin_login_rate_limited(ip_address):
+        repo.log_login_attempt(
+            email=username_normalized or "unknown",
+            status="failed",
+            reason="rate_limited",
+            ip_address=ip_address,
+            user_agent=user_agent,
+            timestamp=timestamp,
+        )
+        logger.warning("Admin login rate limited for IP %s", ip_address)
+        raise HTTPException(status_code=429, detail="Too many failed login attempts. Please try again later.")
+
+    # 2. Check credentials with constant-time / dummy PBKDF2 defense
+    admin_user = repo.get_admin_user(username_normalized) if username_normalized else None
     success = False
     reason = "invalid_credentials"
 
-    if admin_user and verify_password(body.password, admin_user["password_hash"], admin_user["salt"]):
-        success = True
-    elif config.ENABLE_FALLBACK_ADMIN_AUTH and config.ADMIN_USERNAME and config.ADMIN_PASSWORD:
-        if secrets.compare_digest(body.username, config.ADMIN_USERNAME) and secrets.compare_digest(body.password, config.ADMIN_PASSWORD):
-            success = True
+    if admin_user:
+        success = await verify_password_async(body.password, admin_user["password_hash"], admin_user["salt"])
+    else:
+        await dummy_password_work(body.password)
+        if config.ENABLE_FALLBACK_ADMIN_AUTH and config.ADMIN_USERNAME and config.ADMIN_PASSWORD:
+            user_match = secrets.compare_digest(
+                username_normalized.encode("utf-8"),
+                config.ADMIN_USERNAME.strip().lower().encode("utf-8"),
+            )
+            pass_match = secrets.compare_digest(
+                body.password.encode("utf-8"),
+                config.ADMIN_PASSWORD.encode("utf-8"),
+            )
+            if user_match and pass_match:
+                success = True
 
     if not success:
+        record_admin_login_failure(ip_address)
         repo.log_login_attempt(
-            email=body.username,
+            email=username_normalized or "unknown",
             status="failed",
             reason=reason,
             ip_address=ip_address,
             user_agent=user_agent,
             timestamp=timestamp,
         )
-        logger.warning("Admin login failed for user: %s", body.username)
+        logger.warning("Admin login failed for user: %s", username_normalized or "<empty>")
         raise HTTPException(status_code=401, detail="Invalid admin credentials")
 
-    # 3. Create Admin Session
+    clear_admin_login_failures(ip_address)
+
+    # 3. Create Admin Session (store SHA-256 hash; return raw token in HttpOnly cookie)
     session_token = generate_session_token()
     expires_at = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
     repo.create_admin_session(
-        session_id=session_token,
-        username=body.username,
+        session_id=hash_session_token(session_token),
+        username=username_normalized,
         expires_at=expires_at,
     )
 
     # 4. Log attempt
     repo.log_login_attempt(
-        email=body.username,
+        email=username_normalized,
         status="success",
         reason="admin_login",
         ip_address=ip_address,
@@ -109,7 +141,7 @@ async def admin_login(
         max_age=max_age,
     )
 
-    logger.info("Admin %s logged in successfully", body.username)
+    logger.info("Admin %s logged in successfully", username_normalized)
     return {"status": "success"}
 
 @router.post("/logout")
@@ -124,6 +156,7 @@ async def admin_logout(
     session_cookie = request.cookies.get(ADMIN_SESSION_COOKIE_NAME)
     if session_cookie:
         repo = request.app.state.watchlist_repo
+        repo.delete_admin_session(hash_session_token(session_cookie))
         repo.delete_admin_session(session_cookie)
 
     response.delete_cookie(

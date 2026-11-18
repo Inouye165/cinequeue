@@ -78,12 +78,11 @@ async def get_csrf(response: Response):
 
 def extract_client_ip(request: Request) -> str:
     """Safely extract client IP address, handling Cloud Run X-Forwarded-For proxies."""
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        first_ip = forwarded.split(",")[0].strip()
-        if first_ip:
-            return first_ip
-    return request.client.host if request.client else "unknown"
+    try:
+        from app.auth import extract_client_ip as _extract_ip
+        return _extract_ip(request)
+    except Exception:
+        return request.client.host if request.client else "unknown"
 
 def log_auth_audit_event(
     request: Request,

@@ -762,6 +762,7 @@ class SqliteWatchlistRepository(WatchlistRepository):
             return result.rowcount > 0
 
     def create_admin_session(self, session_id: str, username: str, expires_at: str) -> None:
+        username_normalized = (username or "").strip().lower()
         created_at = self.utc_now_iso()
         with self._connection() as conn:
             conn.execute(
@@ -769,7 +770,7 @@ class SqliteWatchlistRepository(WatchlistRepository):
                 INSERT INTO admin_sessions (session_id, username, created_at, expires_at)
                 VALUES (?, ?, ?, ?)
                 """,
-                (session_id, username, created_at, expires_at),
+                (session_id, username_normalized, created_at, expires_at),
             )
 
     def get_admin_session(self, session_id: str) -> dict[str, Any] | None:
@@ -782,6 +783,13 @@ class SqliteWatchlistRepository(WatchlistRepository):
     def delete_admin_session(self, session_id: str) -> None:
         with self._connection() as conn:
             conn.execute("DELETE FROM admin_sessions WHERE session_id = ?", (session_id,))
+
+    def delete_admin_sessions_for_user(self, username: str) -> None:
+        username_normalized = (username or "").strip().lower()
+        if not username_normalized:
+            return
+        with self._connection() as conn:
+            conn.execute("DELETE FROM admin_sessions WHERE LOWER(username) = ?", (username_normalized,))
 
     def get_user_approval(self, email: str) -> dict[str, Any] | None:
         with self._connection() as conn:
