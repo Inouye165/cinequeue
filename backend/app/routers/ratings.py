@@ -33,7 +33,7 @@ async def list_rated_movies(
         return repo.list_rated_movies(current_user.uid)
     except Exception as e:
         logger.error("Error listing rated movies for user %s: %s", current_user.uid, e, exc_info=True)
-        return []
+        raise HTTPException(status_code=503, detail="Database unavailable")
 
 
 @router.post("")
@@ -75,4 +75,4 @@ async def delete_rated_movie(
         raise
     except Exception as e:
         logger.error("Error deleting rated movie for user %s: %s", current_user.uid, e, exc_info=True)
-        return {"success": True}
+        raise HTTPException(status_code=503, detail="Database unavailable")

@@ -9,7 +9,18 @@ from app.services.tmdb import TmdbClient, TmdbUpstreamError, fetch_news
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api", tags=["movies"], dependencies=[Depends(get_current_user)])
+def require_tmdb_client(request: Request) -> TmdbClient:
+    tmdb = getattr(request.app.state, "tmdb", None)
+    if not tmdb:
+        raise HTTPException(status_code=503, detail="TMDB_API_KEY is not configured")
+    return tmdb
+
+
+router = APIRouter(
+    prefix="/api",
+    tags=["movies"],
+    dependencies=[Depends(get_current_user), Depends(require_tmdb_client)],
+)
 
 
 @router.get("/search")

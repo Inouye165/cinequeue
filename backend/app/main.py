@@ -180,28 +180,6 @@ async def add_security_headers(request, call_next):
     return response
 
 
-@app.middleware("http")
-async def check_tmdb_key(request, call_next):
-    if (
-        request.url.path.startswith("/api")
-        and not request.url.path.startswith("/api/auth")
-        and not request.url.path.startswith("/api/agent")
-        and not request.url.path.startswith("/api/ratings")
-        and not request.url.path.startswith("/api/watchlist")
-        and not request.url.path.startswith("/api/sync")
-        and not request.url.path.startswith("/api/sports")
-        and request.url.path != "/api/health"
-    ):
-        if not getattr(app.state, "tmdb", None):
-            from fastapi.responses import JSONResponse
-
-            return JSONResponse(
-                status_code=503,
-                content={"detail": "TMDB_API_KEY is not configured"},
-            )
-    return await call_next(request)
-
-
 @app.get("/api/health")
 async def health():
     return {"status": "ok", "tmdb_configured": bool(TMDB_API_KEY)}

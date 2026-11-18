@@ -818,7 +818,7 @@ class FirestoreWatchlistRepository(WatchlistRepository):
             return res
         except Exception as e:
             logger.error("Error listing rated movies in Firestore: %s", e, exc_info=True)
-            return []
+            raise
 
     def rate_movie(
         self,
