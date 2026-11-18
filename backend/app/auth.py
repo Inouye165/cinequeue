@@ -16,6 +16,7 @@ from requests.adapters import HTTPAdapter
 import firebase_admin
 from firebase_admin import auth, credentials
 
+import app.config as config
 from app.config import (
     AUTH_ENABLED,
     AUTH_MODE,
@@ -97,11 +98,15 @@ def configure_firebase_adapters(app_instance=None):
 
 def warmup_firebase_auth():
     """Pre-fetch Google public certs & pre-warm Identity Toolkit TCP connection."""
-    if not AUTH_ENABLED:
+    if not config.AUTH_ENABLED:
         return
     t_start = time.perf_counter()
     try:
-        f_app = firebase_admin.get_app()
+        try:
+            f_app = firebase_admin.get_app()
+        except ValueError:
+            cred = credentials.ApplicationDefault()
+            f_app = firebase_admin.initialize_app(cred, {"projectId": config.FIREBASE_PROJECT_ID})
         client = auth._get_client(f_app)
         configure_firebase_adapters(f_app)
 
@@ -122,7 +127,7 @@ def warmup_firebase_auth():
         if hasattr(client, "_token_generator") and hasattr(client._token_generator, "http_client"):
             sess = getattr(client._token_generator.http_client, "session", None)
             if sess:
-                url = f"https://identitytoolkit.googleapis.com/v1/projects/{FIREBASE_PROJECT_ID}:createSessionCookie"
+                url = f"https://identitytoolkit.googleapis.com/v1/projects/{config.FIREBASE_PROJECT_ID}:createSessionCookie"
                 try:
                     # Send lightweight dummy POST to establish TLS 1.3 Keep-Alive session
                     sess.post(url, json={"idToken": "warmup_ping", "validDuration": 3600}, timeout=5.0)
@@ -185,7 +190,7 @@ async def get_current_user(
     FastAPI dependency to retrieve the authenticated user.
     If AUTH_ENABLED is False, returns a mock user.
     """
-    if not AUTH_ENABLED:
+    if not config.AUTH_ENABLED:
         return CurrentUser(
             uid="local_test_user",
             email="local@test.com",
@@ -193,6 +198,8 @@ async def get_current_user(
             photo_url=None
         )
 
+    cookies = getattr(request, "cookies", None) or {}
+    session_cookie = cookies.get(config.SESSION_COOKIE_NAME) or session_cookie
     auth_header = request.headers.get("Authorization") or request.headers.get("authorization") or ""
     bearer_token = auth_header[7:].strip() if auth_header.startswith("Bearer ") else ""
 
@@ -263,7 +270,7 @@ async def get_current_user(
                     raise HTTPException(status_code=403, detail=f"Forbidden: User status is {status}")
             else:
                 # No DB approval record found
-                if AUTH_MODE == "allowlist" and email_normalized not in AUTH_ALLOWED_EMAILS:
+                if config.AUTH_MODE == "allowlist" and email_normalized not in config.AUTH_ALLOWED_EMAILS:
                     ip_address = request.client.host if request.client else "unknown"
                     user_agent = request.headers.get("user-agent", "unknown")
                     repo.log_login_attempt(
@@ -277,7 +284,7 @@ async def get_current_user(
                     logger.warning("User %s is not approved in database or static allowlist", email_normalized)
                     raise HTTPException(status_code=403, detail="Forbidden: User is not authorized")
         else:
-            if AUTH_MODE == "allowlist" and email_normalized not in AUTH_ALLOWED_EMAILS:
+            if config.AUTH_MODE == "allowlist" and email_normalized not in config.AUTH_ALLOWED_EMAILS:
                 logger.warning("User %s is not in static allowlist", email_normalized)
                 raise HTTPException(status_code=403, detail="Forbidden: User is not authorized")
 

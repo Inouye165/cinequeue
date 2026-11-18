@@ -12,48 +12,29 @@ from fastapi.testclient import TestClient
 @pytest.fixture
 def client_with_auth():
     """Fixture to provide a test client with mock Firebase Auth enabled."""
-    # Force AUTH_ENABLED=True during these tests
-    with patch.dict("os.environ", {
-        "AUTH_ENABLED": "true",
-        "AUTH_MODE": "allowlist",
-        "AUTH_ALLOWED_EMAILS": "inouye165@gmail.com",
-        "AUTH_ALLOWED_ORIGINS": "https://cinequeue-7tvty3vmvq-uw.a.run.app",
-        "ENVIRONMENT": "production",
-        "SESSION_COOKIE_SECURE": "true",
-        "FIREBASE_API_KEY": "mock_firebase_api_key",
-        "ADMIN_PASSWORD": "mock_admin_password_2026"
-    }):
-        # Reload app configurations to pick up env vars
-        import importlib
-        import app.config
-        importlib.reload(app.config)
-        import app.auth
-        importlib.reload(app.auth)
-        import app.routers.auth
-        importlib.reload(app.routers.auth)
-        import app.routers.watchlist
-        importlib.reload(app.routers.watchlist)
-        import app.routers.movies
-        importlib.reload(app.routers.movies)
+    from conftest import reload_all_app_modules
 
-        # We need to reload main to recreate App and mount new route dependencies
-        import app.main
-        importlib.reload(app.main)
+    try:
+        # Force AUTH_ENABLED=True during these tests
+        with patch.dict("os.environ", {
+            "AUTH_ENABLED": "true",
+            "AUTH_MODE": "allowlist",
+            "AUTH_ALLOWED_EMAILS": "inouye165@gmail.com",
+            "AUTH_ALLOWED_ORIGINS": "https://cinequeue-7tvty3vmvq-uw.a.run.app",
+            "ENVIRONMENT": "production",
+            "SESSION_COOKIE_SECURE": "true",
+            "FIREBASE_API_KEY": "mock_firebase_api_key",
+            "ADMIN_PASSWORD": "mock_admin_password_2026"
+        }):
+            reload_all_app_modules()
+            import app.main
 
-        with TestClient(app.main.app, base_url="https://testserver") as c:
-            app.main.app.state.tmdb = AsyncMock()
-            yield c
-
-    # Reload only after patch.dict restores the unauthenticated test environment.
-    importlib.reload(app.config)
-    importlib.reload(app.auth)
-    import app.routers.auth
-    importlib.reload(app.routers.auth)
-    import app.routers.watchlist
-    importlib.reload(app.routers.watchlist)
-    import app.routers.movies
-    importlib.reload(app.routers.movies)
-    importlib.reload(app.main)
+            with TestClient(app.main.app, base_url="https://testserver") as c:
+                app.main.app.state.tmdb = AsyncMock()
+                yield c
+    finally:
+        # Reload only after patch.dict restores the unauthenticated test environment.
+        reload_all_app_modules()
 
 
 def test_health_remains_public(client_with_auth):
@@ -370,15 +351,19 @@ def test_user_watchlist_isolation(mock_verify_cookie, client_with_auth):
 
 def test_production_fails_closed_if_config_missing():
     """Production configuration fails closed on missing parameters."""
-    with patch.dict("os.environ", {
-        "AUTH_ENABLED": "true",
-        "ENVIRONMENT": "production",
-        "AUTH_ALLOWED_EMAILS": "",  # Missing allowlist
-    }):
-        with pytest.raises(ValueError):
-            import importlib
-            import app.config
-            importlib.reload(app.config)
+    from conftest import reload_all_app_modules
+    try:
+        with patch.dict("os.environ", {
+            "AUTH_ENABLED": "true",
+            "ENVIRONMENT": "production",
+            "AUTH_ALLOWED_EMAILS": "",  # Missing allowlist
+        }):
+            with pytest.raises(ValueError):
+                import importlib
+                import app.config
+                importlib.reload(app.config)
+    finally:
+        reload_all_app_modules()
 
 
 def test_config_auth_domain_local(client_with_auth):
@@ -605,9 +590,7 @@ def test_normal_route_retains_strict_csp(client_with_auth):
 @patch("app.routers.auth.firebase_auth.create_session_cookie")
 def test_origin_validation_policy(mock_create_cookie, mock_verify_token):
     """Test all origin validation scenarios for /api/auth/session."""
-    import importlib
-    import app.config
-    import app.routers.auth
+    from conftest import reload_all_app_modules
     import app.main
 
     try:
@@ -619,9 +602,7 @@ def test_origin_validation_policy(mock_create_cookie, mock_verify_token):
             "FIREBASE_API_KEY": "mock_firebase_api_key",
             "ADMIN_PASSWORD": "mock_admin_password_2026",
         }):
-            importlib.reload(app.config)
-            importlib.reload(app.routers.auth)
-            importlib.reload(app.main)
+            reload_all_app_modules()
 
             from fastapi.testclient import TestClient
             with TestClient(app.main.app, base_url="https://testserver") as client:
@@ -678,9 +659,7 @@ def test_origin_validation_policy(mock_create_cookie, mock_verify_token):
                 mock_verify_token.assert_not_called()
     finally:
         # Restore environment settings by reloading after patch is gone
-        importlib.reload(app.config)
-        importlib.reload(app.routers.auth)
-        importlib.reload(app.main)
+        reload_all_app_modules()
 
 
 @patch("app.routers.auth.firebase_auth.verify_id_token")

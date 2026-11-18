@@ -3,14 +3,14 @@
 This document tracks all **22 verified findings** across Security, Infrastructure, Race Conditions & Concurrency, Modularity, and Regression Test Coverage, fixed incrementally one item at a time.
 
 **Branch:** `fix/comprehensive-app-audit`  
-**Status:** `0 / 22` completed
+**Status:** `1 / 22` completed
 
 ---
 
 ## Checklist
 
 ### Test Harness Hygiene
-- [ ] **Item 1 (`[TEST-01]`)** — Fix Test Harness Module-Reload Isolation, Shadowed Duplicate Tests, & Live Network Calls in Unit Tests
+- [x] **Item 1 (`[TEST-01]`)** — Fix Test Harness Module-Reload Isolation, Shadowed Duplicate Tests, & Live Network Calls in Unit Tests
 
 ### Security
 - [ ] **Item 2 (`[SEC-01]`)** — Authenticate `/api/sports`, Fix Cloud Run UTC Evening Game Drop & Fake Fallback Games, & Fix Empty Schedule Client Fallback

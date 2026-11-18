@@ -6,47 +6,34 @@ from fastapi.testclient import TestClient
 @pytest.fixture
 def client_with_admin_auth():
     """Fixture to provide a test client with auth enabled and reloaded modules."""
-    with patch.dict("os.environ", {
-        "AUTH_ENABLED": "true",
-        "AUTH_MODE": "allowlist",
-        "AUTH_ALLOWED_EMAILS": "inouye165@gmail.com,test@example.com",
-        "AUTH_ALLOWED_ORIGINS": "https://cinequeue-7tvty3vmvq-uw.a.run.app",
-        "ENVIRONMENT": "production",
-        "SESSION_COOKIE_SECURE": "false",
-        "FIREBASE_API_KEY": "mock_firebase_api_key",
-        "ENABLE_FALLBACK_ADMIN_AUTH": "true",
-        "ADMIN_USERNAME": "admin",
-        "ADMIN_PASSWORD": "admin_secure_pass_2026"
-    }):
-        import importlib
-        import app.config
-        importlib.reload(app.config)
-        app.config.ENABLE_FALLBACK_ADMIN_AUTH = True
-        app.config.ADMIN_USERNAME = "admin"
-        app.config.ADMIN_PASSWORD = "admin_secure_pass_2026"
-        import app.auth
-        importlib.reload(app.auth)
-        import app.services.admin_auth
-        importlib.reload(app.services.admin_auth)
-        import app.routers.auth
-        importlib.reload(app.routers.auth)
-        import app.routers.admin
-        importlib.reload(app.routers.admin)
-        import app.main
-        importlib.reload(app.main)
+    from conftest import reload_all_app_modules
 
-        with TestClient(app.main.app, base_url="https://testserver") as c:
-            app.main.app.state.tmdb = AsyncMock()
-            yield c
+    try:
+        with patch.dict("os.environ", {
+            "AUTH_ENABLED": "true",
+            "AUTH_MODE": "allowlist",
+            "AUTH_ALLOWED_EMAILS": "inouye165@gmail.com,test@example.com",
+            "AUTH_ALLOWED_ORIGINS": "https://cinequeue-7tvty3vmvq-uw.a.run.app",
+            "ENVIRONMENT": "production",
+            "SESSION_COOKIE_SECURE": "false",
+            "FIREBASE_API_KEY": "mock_firebase_api_key",
+            "ENABLE_FALLBACK_ADMIN_AUTH": "true",
+            "ADMIN_USERNAME": "admin",
+            "ADMIN_PASSWORD": "admin_secure_pass_2026"
+        }):
+            reload_all_app_modules()
+            import app.config
+            app.config.ENABLE_FALLBACK_ADMIN_AUTH = True
+            app.config.ADMIN_USERNAME = "admin"
+            app.config.ADMIN_PASSWORD = "admin_secure_pass_2026"
+            import app.main
 
-    # Clean up and restore defaults
-    importlib.reload(app.config)
-    importlib.reload(app.auth)
-    import app.routers.auth
-    importlib.reload(app.routers.auth)
-    import app.routers.admin
-    importlib.reload(app.routers.admin)
-    importlib.reload(app.main)
+            with TestClient(app.main.app, base_url="https://testserver") as c:
+                app.main.app.state.tmdb = AsyncMock()
+                yield c
+    finally:
+        # Clean up and restore defaults
+        reload_all_app_modules()
 
 
 def test_admin_login_success(client_with_admin_auth):
@@ -567,20 +554,20 @@ def test_fallback_admin_auth_fails_closed_on_blank_credentials(client_with_admin
 def test_fallback_admin_config_startup_validation():
     """Config raises ValueError if ENABLE_FALLBACK_ADMIN_AUTH is True but credentials are missing."""
     import importlib
-    with patch("app.config.load_dotenv"):
-        with patch.dict("os.environ", {
-            "ENABLE_FALLBACK_ADMIN_AUTH": "true",
-            "ADMIN_USERNAME": "",
-            "ADMIN_PASSWORD": ""
-        }):
-            with pytest.raises(ValueError) as exc_info:
-                import app.config
-                importlib.reload(app.config)
-            assert "ENABLE_FALLBACK_ADMIN_AUTH" in str(exc_info.value)
-
-    # Restore config
-    import app.config
-    importlib.reload(app.config)
+    from conftest import reload_all_app_modules
+    try:
+        with patch("app.config.load_dotenv"):
+            with patch.dict("os.environ", {
+                "ENABLE_FALLBACK_ADMIN_AUTH": "true",
+                "ADMIN_USERNAME": "",
+                "ADMIN_PASSWORD": ""
+            }):
+                with pytest.raises(ValueError) as exc_info:
+                    import app.config
+                    importlib.reload(app.config)
+                assert "ENABLE_FALLBACK_ADMIN_AUTH" in str(exc_info.value)
+    finally:
+        reload_all_app_modules()
 
 
 @patch("firebase_admin.auth.verify_id_token")

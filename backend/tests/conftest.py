@@ -45,36 +45,58 @@ def client():
         yield c
 
 
+def reload_all_app_modules():
+    """Reload config and routers/main while preserving auth dependency function identities."""
+    import importlib
+    import app.config
+    importlib.reload(app.config)
+    import app.auth
+    import app.services.admin_auth
+    app.services.admin_auth.ADMIN_SESSION_COOKIE_NAME = app.config.ADMIN_SESSION_COOKIE_NAME
+    app.services.admin_auth.ADMIN_USERNAME = app.config.ADMIN_USERNAME
+    app.services.admin_auth.ENABLE_FALLBACK_ADMIN_AUTH = app.config.ENABLE_FALLBACK_ADMIN_AUTH
+    import app.routers.auth
+    importlib.reload(app.routers.auth)
+    import app.routers.admin
+    importlib.reload(app.routers.admin)
+    import app.routers.agent
+    importlib.reload(app.routers.agent)
+    import app.routers.movies
+    importlib.reload(app.routers.movies)
+    import app.routers.ratings
+    importlib.reload(app.routers.ratings)
+    import app.routers.sports
+    importlib.reload(app.routers.sports)
+    import app.routers.sync
+    importlib.reload(app.routers.sync)
+    import app.routers.watchlist
+    importlib.reload(app.routers.watchlist)
+    import app.main
+    importlib.reload(app.main)
+
+
 @pytest.fixture
 def client_with_auth():
     """Fixture to provide a test client with mock Firebase Auth enabled."""
     from unittest.mock import patch, AsyncMock
     from fastapi.testclient import TestClient
 
-    with patch.dict("os.environ", {
-        "AUTH_ENABLED": "true",
-        "AUTH_MODE": "allowlist",
-        "AUTH_ALLOWED_EMAILS": "inouye165@gmail.com,sync@example.com",
-        "AUTH_ALLOWED_ORIGINS": "https://cinequeue-7tvty3vmvq-uw.a.run.app",
-        "ENVIRONMENT": "production",
-        "SESSION_COOKIE_SECURE": "true",
-        "FIREBASE_API_KEY": "mock_firebase_api_key",
-        "ADMIN_PASSWORD": "mock_admin_password_2026"
-    }):
-        import importlib
-        import app.config
-        importlib.reload(app.config)
-        import app.auth
-        importlib.reload(app.auth)
-        import app.routers.auth
-        importlib.reload(app.routers.auth)
-        import app.routers.watchlist
-        importlib.reload(app.routers.watchlist)
-        import app.routers.movies
-        importlib.reload(app.routers.movies)
-        import app.main
-        importlib.reload(app.main)
+    try:
+        with patch.dict("os.environ", {
+            "AUTH_ENABLED": "true",
+            "AUTH_MODE": "allowlist",
+            "AUTH_ALLOWED_EMAILS": "inouye165@gmail.com,sync@example.com",
+            "AUTH_ALLOWED_ORIGINS": "https://cinequeue-7tvty3vmvq-uw.a.run.app",
+            "ENVIRONMENT": "production",
+            "SESSION_COOKIE_SECURE": "true",
+            "FIREBASE_API_KEY": "mock_firebase_api_key",
+            "ADMIN_PASSWORD": "mock_admin_password_2026"
+        }):
+            reload_all_app_modules()
+            import app.main
 
-        with TestClient(app.main.app, base_url="https://testserver") as c:
-            app.main.app.state.tmdb = AsyncMock()
-            yield c
+            with TestClient(app.main.app, base_url="https://testserver") as c:
+                app.main.app.state.tmdb = AsyncMock()
+                yield c
+    finally:
+        reload_all_app_modules()

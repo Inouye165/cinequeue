@@ -112,6 +112,8 @@ async def get_current_admin(
             raise HTTPException(status_code=401, detail="Invalid ID token")
 
     # 2. Traditional Cookie fallback path
+    cookies = getattr(request, "cookies", None) or {}
+    session_cookie = cookies.get(ADMIN_SESSION_COOKIE_NAME) or session_cookie
     if not session_cookie:
         logger.warning("Admin session cookie is missing")
         raise HTTPException(status_code=401, detail="Admin session required")
