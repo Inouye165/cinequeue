@@ -236,7 +236,7 @@ async def add_to_watchlist(request: Request, body: dict[str, Any], current_user:
     if is_owned and owned_format not in {"electronic", "cloud", "hard_copy"}:
         raise HTTPException(status_code=400, detail="Invalid owned_format. Must be 'electronic', 'cloud', or 'hard_copy'")
 
-    if status not in {"queue", "following", "library"}:
+    if status not in {"queue", "following", "library", "watched"}:
         raise HTTPException(status_code=400, detail="Invalid status. Must be 'queue', 'following', or 'library'")
 
     try:
@@ -366,7 +366,7 @@ async def update_watchlist_item(
     if is_owned is not None and is_owned and owned_format not in {"electronic", "cloud", "hard_copy"}:
         raise HTTPException(status_code=400, detail="Invalid owned_format. Must be 'electronic', 'cloud', or 'hard_copy'")
 
-    if status is not None and status not in {"queue", "following", "library"}:
+    if status is not None and status not in {"queue", "following", "library", "watched"}:
         raise HTTPException(status_code=400, detail="Invalid status. Must be 'queue', 'following', or 'library'")
 
     try:

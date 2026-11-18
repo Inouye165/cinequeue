@@ -534,7 +534,7 @@ class FirestoreWatchlistRepository(WatchlistRepository):
         col = self._db.collection("users").document(user_id).collection("agent_conversations")
         docs = (
             col
-            .order_by("created_at", direction=firestore.Query.ASCENDING)
+            .order_by("created_at", direction=firestore.Query.DESCENDING)
             .limit(limit)
             .stream()
         )
@@ -545,6 +545,7 @@ class FirestoreWatchlistRepository(WatchlistRepository):
                 d["id"] = doc.id
                 d.setdefault("actions", [])
                 res.append(d)
+        res.reverse()
         return res
 
     def add_chat_message(

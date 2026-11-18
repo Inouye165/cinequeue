@@ -25,6 +25,7 @@ class AgentSettingsPayload(BaseModel):
     notify_on_login: bool = True
     auto_add_mentioned: bool = True
     track_price_drops: bool = True
+    auto_speak_briefing: bool = False
 
 
 class ChatMessagePayload(BaseModel):

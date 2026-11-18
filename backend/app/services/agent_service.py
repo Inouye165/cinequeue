@@ -6,6 +6,7 @@ import re
 import time
 import uuid
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 
@@ -89,9 +90,12 @@ RECOMMENDED_SYSTEM_PROMPT = (
 
 
 def get_system_prompt(settings: dict[str, Any], weather_report: str | None = None) -> str:
+    preset = settings.get("personality_preset", "cinephile")
     custom = settings.get("custom_prompt", "").strip()
-    if settings.get("personality_preset") == "custom" and custom:
+    if preset == "custom" and custom:
         base_prompt = f"{RECOMMENDED_SYSTEM_PROMPT}\n\nUser Custom Preference:\n{custom}"
+    elif preset in PERSONALITY_PRESETS and preset != "cinephile":
+        base_prompt = f"{RECOMMENDED_SYSTEM_PROMPT}\n\nPersona Style:\n{PERSONALITY_PRESETS[preset]}"
     else:
         base_prompt = RECOMMENDED_SYSTEM_PROMPT
 
@@ -464,22 +468,14 @@ class AiAgentService:
         return await BriefingService.evaluate_startup_briefing(user_id, repo, tmdb)
 
     @staticmethod
-    def _get_time_of_day() -> str:
-        import datetime
-        hour = datetime.datetime.now().hour
-        if 5 <= hour < 12:
-            return "morning"
-        elif 12 <= hour < 17:
-            return "afternoon"
-        elif 17 <= hour < 22:
-            return "evening"
-        else:
-            return "night"
-
-    @staticmethod
-    def _get_time_of_day() -> str:
-        import datetime
-        hour = datetime.datetime.now().hour
+    def _get_time_of_day(tz_name: str | None = None) -> str:
+        resolved_tz = ZoneInfo("America/New_York")
+        if isinstance(tz_name, str) and tz_name.strip():
+            try:
+                resolved_tz = ZoneInfo(tz_name.strip())
+            except ZoneInfoNotFoundError:
+                pass
+        hour = datetime.now(resolved_tz).hour
         if 5 <= hour < 12:
             return "morning"
         elif 12 <= hour < 17:
@@ -615,7 +611,8 @@ class AiAgentService:
         force_refresh: bool = False,
     ) -> str:
         location = settings.get("location", "").strip()
-        time_of_day = AiAgentService._get_time_of_day()
+        tz_name = settings.get("timezone") or settings.get("user_timezone")
+        time_of_day = AiAgentService._get_time_of_day(tz_name)
 
         weather_json = None
         if weather_data:
@@ -703,6 +700,8 @@ class AiAgentService:
         """Process chat message, recognize intents (auto-monitoring, ratings, status, search), update history, and generate response."""
         settings = repo.get_agent_settings(user_id)
         history = repo.list_chat_messages(user_id, limit=20)
+        repo.add_chat_message(user_id, "user", user_message)
+        allow_implicit_add = bool(settings.get("auto_add_mentioned", True))
 
         actions_taken = []
         context_notes: list[str] = []
@@ -746,7 +745,7 @@ class AiAgentService:
 
         # Extract intent titles first to check for explicit movie/series names
         rate_title, rating_val = AiAgentService._extract_rating_action(user_message)
-        ext_title, target_price = AiAgentService._extract_title_and_price(user_message)
+        ext_title, target_price = AiAgentService._extract_title_and_price(user_message, allow_implicit=allow_implicit_add)
         explicit_title_raw = rate_title or ext_title
         parsed_title, start_idx, end_idx, is_range = AiAgentService._parse_ordinal_range(explicit_title_raw) if explicit_title_raw else (None, None, None, False)
 
@@ -755,8 +754,9 @@ class AiAgentService:
         has_explicit_title = bool(parsed_title and len(parsed_words - ignored_words) > 0 and len(parsed_title) > 1)
 
         # 0. Intent Recognition: Conversational Context / Pronoun Action (ONLY if NO explicit title is named)
-        pronoun_words = ["those", "them", "these", "it", "the remaining ones", "those movies", "the movies", "all of them", "yes add", "yes rate", "do it", "sure", "add those", "rate those"]
-        is_pronoun_ref = not has_explicit_title and any(p in msg_lower for p in pronoun_words)
+        has_pronoun_phrase = bool(re.search(r"\b(?:those|them|these|it|that|this|the remaining ones|those movies|the movies|all of them)\b", msg_lower))
+        is_short_confirm = bool(re.search(r"^\s*(?:yes(?:\s+(?:add|rate))?|sure|do\s+it)\s*[.!]?\s*$", msg_lower))
+        is_pronoun_ref = not has_explicit_title and (has_pronoun_phrase or is_short_confirm)
         if is_pronoun_ref and history:
             recent_titles = AiAgentService._extract_titles_from_recent_history(history)
             if recent_titles:
@@ -768,15 +768,16 @@ class AiAgentService:
                         rate_val = int(val)
                     except ValueError:
                         pass
-                if rate_val is None and any(k in msg_lower for k in ["rate", "rating", "rated", "stars", "star"]):
+                if rate_val is None and re.search(r"\b(?:rate|rating|rated|stars?)\b", msg_lower):
                     rate_val = 5
 
-                has_rate_intent = rate_val is not None or any(k in msg_lower for k in ["rate", "rating", "rated", "stars", "star"])
-                has_add_intent = any(k in msg_lower for k in ["add", "queue", "watchlist", "list", "put", "insert", "log"]) or not has_rate_intent
+                has_rate_intent = rate_val is not None or bool(re.search(r"\b(?:rate|rating|rated|stars?)\b", msg_lower))
+                has_add_intent = bool(re.search(r"\b(?:add|queue|watchlist|put|insert|save|track|monitor|yes\s+add)\b", msg_lower)) or is_short_confirm
+                target_titles = recent_titles if (has_rate_intent or has_add_intent) else []
 
                 processed_count = 0
                 from app.models import poster_url
-                for title_item in recent_titles:
+                for title_item in target_titles:
                     t_name = title_item
                     m_type = "movie"
                     t_id = None
@@ -1002,26 +1003,35 @@ class AiAgentService:
             items = repo.list_items(user_id)
             match_i = next((i for i in items if status_title.lower() in (i.get("title") or "").lower()), None)
             if match_i:
-                repo.update_item(
-                    user_id,
-                    match_i["media_type"],
-                    match_i["tmdb_id"],
-                    status=new_status,
-                    is_owned=is_owned_flag,
-                )
-                act_desc = f"Updated status of '{match_i['title']}' to {new_status or 'updated'}"
-                if is_owned_flag is True:
-                    act_desc += " and marked as owned"
-                actions_taken.append({
-                    "action": "update_status",
-                    "title": match_i["title"],
-                    "status": new_status,
-                    "is_owned": is_owned_flag,
-                })
-                context_notes.append(f"Status Update Action Executed: {act_desc}.")
+                if new_status == "dropped":
+                    repo.remove_item(user_id, match_i["media_type"], match_i["tmdb_id"])
+                    actions_taken.append({
+                        "action": "remove_item",
+                        "title": match_i["title"],
+                    })
+                    context_notes.append(f"Remove Action Executed: Removed '{match_i['title']}' from queue.")
+                else:
+                    effective_status = "following" if new_status == "watching" else new_status
+                    repo.update_item(
+                        user_id,
+                        match_i["media_type"],
+                        match_i["tmdb_id"],
+                        status=effective_status,
+                        is_owned=is_owned_flag,
+                    )
+                    act_desc = f"Updated status of '{match_i['title']}' to {effective_status or 'updated'}"
+                    if is_owned_flag is True:
+                        act_desc += " and marked as owned"
+                    actions_taken.append({
+                        "action": "update_status",
+                        "title": match_i["title"],
+                        "status": effective_status,
+                        "is_owned": is_owned_flag,
+                    })
+                    context_notes.append(f"Status Update Action Executed: {act_desc}.")
 
         # 4. Intent Recognition: Auto-Monitoring / Add to Queue Execution
-        ext_title, target_price = AiAgentService._extract_title_and_price(user_message)
+        ext_title, target_price = AiAgentService._extract_title_and_price(user_message, allow_implicit=allow_implicit_add)
         already_acted = any(
             (a.get("title") or "").lower() in (ext_title or "").lower() or (ext_title or "").lower() in (a.get("title") or "").lower()
             for a in actions_taken
@@ -1262,6 +1272,9 @@ class AiAgentService:
                         rating_rec_note = f"\n[System Note: Recommendation Request: The user asked for a recommendation. User loved '{sample_top['title']}' (rated {sample_top['user_rating']}/5 stars). Suggest '{r_title}' which is similar, mentioning why they might like it: {r_overview[:120]}...]"
             except Exception as e:
                 logger.warning(f"Error generating recommendation from ratings: {e}")
+
+        if rating_rec_note:
+            context_notes.append(rating_rec_note.strip())
 
         location = settings.get("location", "").strip()
         weather_report = await WeatherService.get_weather_report(location) if location else None
@@ -1578,19 +1591,22 @@ class AiAgentService:
 
 
     @staticmethod
-    def _extract_title_and_price(text: str) -> tuple[str | None, float | None]:
+    def _extract_title_and_price(text: str, allow_implicit: bool = True) -> tuple[str | None, float | None]:
         """Extract title and optional target price from user prompt."""
         price_match = re.search(r'(?:\$|under\s+\$?|to\s+rent\s+for\s+\$?)\s*(\d+(?:\.\d{1,2})?)', text, re.IGNORECASE)
         target_price = float(price_match.group(1)) if price_match else None
 
-        patterns = [
+        explicit_patterns = [
             r"(?:add|track|monitor|follow|enter|put|insert|save|log)\s+['\"]?([^'.\"$\n]+?)['\"]?\s+(?:to|into|in|on)\s+(?:my\s+)?(?:monitor\s+|watch\s*)?(?:list|queue|monitoring|watchlist)",
-            r"(?:waiting|wait|looking)\s+for\s+(?:the\s+movie\s+|the\s+show\s+)?['\"]?([^'.\"$\n]+?)['\"]?\s*(?:to\s+(?:come|air|drop|rent|release)|under|\$|$)",
             r"(?:notify|alert|tell)\s+me\s+when\s+(?:the\s+movie\s+|the\s+show\s+)?['\"]?([^'.\"$\n]+?)['\"]?\s*(?:drops|is|available|to\s+rent|under|\$|$)",
             r"(?:add|track|monitor|enter|put|insert|save|log)\s+['\"]?([^'.\"$\n]+?)['\"]?$",
+        ]
+        implicit_patterns = [
+            r"(?:waiting|wait|looking)\s+for\s+(?:the\s+movie\s+|the\s+show\s+)?['\"]?([^'.\"$\n]+?)['\"]?\s*(?:to\s+(?:come|air|drop|rent|release)|under|\$|$)",
             r"(?:waiting\s+for)\s+['\"]?([^'.\"$\n]+?)['\"]?$",
             r"(?:can't|cant)\s+wait\s+for\s+['\"]?([^'.\"$\n]+?)['\"]?\s*(?:to\s+drop|to\s+rent|under|\$|$)",
         ]
+        patterns = explicit_patterns + (implicit_patterns if allow_implicit else [])
         for p in patterns:
             m = re.search(p, text.strip(), re.IGNORECASE)
             if m:

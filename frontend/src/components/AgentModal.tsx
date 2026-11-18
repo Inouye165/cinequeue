@@ -115,6 +115,7 @@ export function AgentModal({ ownerId, isOpen, onClose, onWatchlistUpdated, initi
     notify_on_login: true,
     auto_add_mentioned: true,
     track_price_drops: true,
+    auto_speak_briefing: false,
   });
   const [savingSettings, setSavingSettings] = useState(false);
   const [settingsSavedToast, setSettingsSavedToast] = useState(false);
@@ -713,6 +714,18 @@ export function AgentModal({ ownerId, isOpen, onClose, onWatchlistUpdated, initi
                   <div className="toggle-text">
                     <span className="toggle-label">🏷️ Rental Price Drop Alerts</span>
                     <span className="toggle-sub">Detect dollar price targets in chat and notify you when rental prices drop</span>
+                  </div>
+                </label>
+
+                <label className="toggle-row">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(settings.auto_speak_briefing)}
+                    onChange={(e) => setSettings((prev) => ({ ...prev, auto_speak_briefing: e.target.checked }))}
+                  />
+                  <div className="toggle-text">
+                    <span className="toggle-label">🔊 Auto-Speak Login Briefing</span>
+                    <span className="toggle-sub">Automatically read your startup briefing aloud when it appears</span>
                   </div>
                 </label>
               </div>

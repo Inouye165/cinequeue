@@ -126,6 +126,9 @@ export function AgentLoginBriefing({ ownerId, onOpenChat }: AgentLoginBriefingPr
       const data = await api.agentBriefing(sessionId, forceRefresh, { signal: controller.signal });
       if (!controller.signal.aborted && data && data.enabled && data.briefing) {
         setBriefing(data);
+        if (data.auto_speak_briefing === true && !isDismissed) {
+          speakText(data.briefing);
+        }
       }
     } catch (err) {
       if (controller.signal.aborted || (err instanceof Error && err.name === "AbortError")) return;

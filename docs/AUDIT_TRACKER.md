@@ -3,7 +3,7 @@
 This document tracks all **22 verified findings** across Security, Infrastructure, Race Conditions & Concurrency, Modularity, and Regression Test Coverage, fixed incrementally one item at a time.
 
 **Branch:** `fix/comprehensive-app-audit`  
-**Status:** `19 / 22` completed
+**Status:** `20 / 22` completed
 
 ---
 
@@ -37,7 +37,7 @@ This document tracks all **22 verified findings** across Security, Infrastructur
 - [x] **Item 19 (`[RACE-06]`)** — Add Request Cancellation (`AbortController`), Live Search Debouncing, & Optimistic/Offline Sports Preferences Sync
 
 ### Modularity & Regression Tests
-- [ ] **Item 20 (`[MOD-01]`)** — Fix AI Agent Chat Persistence (`role="user"`), Firestore `DESCENDING` Chat Order, Pronoun Bug, Valid Statuses, Persona Presets & News Provider
+- [x] **Item 20 (`[MOD-01]`)** — Fix AI Agent Chat Persistence (`role="user"`), Firestore `DESCENDING` Chat Order, Pronoun Bug, Valid Statuses, Persona Presets & News Provider
 - [ ] **Item 21 (`[MOD-02]`)** — Backend Modularity: Extract Shared Repository Helpers & Deduplicate Gemini Telemetry Logging
 - [ ] **Item 22 (`[MOD-03]` & `[TEST-02]`)** — Frontend Modularity Cleanup & Comprehensive Security / Concurrency / Sports Regression Test Suite
 

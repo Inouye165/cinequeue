@@ -128,6 +128,7 @@ export interface AgentSettings {
   notify_on_login: boolean;
   auto_add_mentioned: boolean;
   track_price_drops: boolean;
+  auto_speak_briefing?: boolean;
   ai_calls_enabled?: boolean;
   gemini_provider_enabled?: boolean;
   gemini_api_key_configured?: boolean;
@@ -197,6 +198,7 @@ export interface AgentBriefing {
   updates_count?: number;
   updates?: AgentBriefingUpdate[];
   personality_preset?: string;
+  auto_speak_briefing?: boolean;
 }
 
 export interface AgentLogEntry {

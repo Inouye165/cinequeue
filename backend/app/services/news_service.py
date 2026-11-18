@@ -142,15 +142,19 @@ class TmdbEntertainmentNewsProvider(NewsProvider):
         results = []
 
         try:
-            articles = await self.tmdb.get_news(title)
+            if hasattr(self.tmdb, "get_news"):
+                articles = await self.tmdb.get_news(title)
+            else:
+                from app.services.tmdb import fetch_news
+                articles = await fetch_news(title)
             for art in articles:
                 headline = art.get("title", "").strip()
                 if not headline:
                     continue
 
-                url = art.get("link", "")
-                source = art.get("source", "Entertainment News")
-                published_at = art.get("published") or now_iso
+                url = art.get("url") or art.get("link", "")
+                source = art.get("source") or "Entertainment News"
+                published_at = art.get("published_at") or art.get("published") or now_iso
                 norm_url = normalize_url(url) if url else f"no-url-{compute_content_fingerprint(headline)}"
                 content_fp = compute_content_fingerprint(headline)
                 category, verification = classify_news_item(headline, source)
