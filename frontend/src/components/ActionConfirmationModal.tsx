@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
+import { normalizePosterPath } from "../services/movieService";
 import { StarRating } from "./StarRating";
 
 export interface PendingActionItem {
@@ -64,9 +65,7 @@ export function ActionConfirmationModal({
       if (searchRes && searchRes.length > 0 && searchRes[0].id > 0) {
         const top = searchRes[0];
         const rawPosterPath = "poster_path" in top ? (top as any).poster_path || null : null;
-        const posterPath = typeof rawPosterPath === "string"
-          ? rawPosterPath.replace(/^https?:\/\/image\.tmdb\.org\/t\/p\/w\d+/, "")
-          : undefined;
+        const posterPath = normalizePosterPath(typeof rawPosterPath === "string" ? rawPosterPath : undefined);
         const newItem: PendingActionItem = {
           id: `custom_${Date.now()}_${top.id}`,
           tmdb_id: top.id,

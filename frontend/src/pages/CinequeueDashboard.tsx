@@ -14,7 +14,7 @@ import { useAuth } from "../context/AuthContext";
 import { StarRating } from "../components/StarRating";
 import { BatchRateModal } from "../components/BatchRateModal";
 import { SportsTab, SportsGameCard, SportsSetupModal } from "../components/SportsTab";
-import { movieService } from "../services/movieService";
+import { movieService, normalizePosterPath } from "../services/movieService";
 import { DEFAULT_CATALOG, sportsService } from "../services/sportsService";
 import { syncService } from "../services/syncService";
 import { formatPosterUrl } from "../utils/mediaUtils";
@@ -402,7 +402,7 @@ export function CinequeueDashboard({ onSignIn }: { onSignIn?: () => void }) {
           tmdbId: item.id,
           mediaType: item.media_type,
           title: item.title,
-          posterPath: item.poster_url?.replace("https://image.tmdb.org/t/p/w342", "") ?? undefined,
+          posterPath: normalizePosterPath(item.poster_url),
           releaseDate: item.release_date ?? undefined,
           status: "queue",
           details: selected?.id === item.id ? selected : undefined,

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
 import { api } from "../api";
-import { movieService } from "../services/movieService";
+import { movieService, normalizePosterPath } from "../services/movieService";
 import { syncService } from "../services/syncService";
 import { StarRating } from "./StarRating";
 import type { MediaItem } from "../types";
@@ -150,9 +150,7 @@ export const BatchRateModal: React.FC<BatchRateModalProps> = ({
             tmdbId: item.tmdb_id,
             mediaType,
             title: item.title,
-            posterPath: item.poster_path
-              ? item.poster_path.replace(/^https?:\/\/image\.tmdb\.org\/t\/p\/w\d+/, "")
-              : undefined,
+            posterPath: normalizePosterPath(item.poster_path),
             releaseDate: item.release_date ?? undefined,
             status: "watched",
             watchStatus: "watched",

@@ -75,22 +75,22 @@ export function AccountSheet({
     } catch (err) { setClearError(String(err)); }
   };
 
-  const getSyncBadge = () => {
+  const getSyncBadgeStyle = () => {
     switch (syncStatus.state) {
       case "synced":
-        return { text: "Synced", color: "#34d399", bg: "rgba(52, 211, 153, 0.1)" };
+        return { color: "#34d399", bg: "rgba(52, 211, 153, 0.1)" };
       case "syncing":
-        return { text: "Syncing...", color: "#38bdf8", bg: "rgba(56, 189, 248, 0.1)" };
+        return { color: "#38bdf8", bg: "rgba(56, 189, 248, 0.1)" };
       case "offline":
-        return { text: "Offline", color: "#facc15", bg: "rgba(250, 204, 21, 0.1)" };
+        return { color: "#facc15", bg: "rgba(250, 204, 21, 0.1)" };
       case "sync_error":
-        return { text: "Sync Error", color: "#f87171", bg: "rgba(248, 113, 113, 0.1)" };
+        return { color: "#f87171", bg: "rgba(248, 113, 113, 0.1)" };
       default:
-        return { text: "Local", color: "#94a3b8", bg: "rgba(148, 163, 184, 0.1)" };
+        return { color: "#94a3b8", bg: "rgba(148, 163, 184, 0.1)" };
     }
   };
 
-  const badge = getSyncBadge();
+  const badge = getSyncBadgeStyle();
 
   return (
     <div

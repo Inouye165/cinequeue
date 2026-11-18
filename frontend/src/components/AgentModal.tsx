@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
-import { movieService } from "../services/movieService";
+import { movieService, normalizePosterPath } from "../services/movieService";
+import { cancelSpeech, speakSpeechText } from "../utils/speech";
 import { syncService } from "../services/syncService";
 import { StarRating } from "./StarRating";
 import { ActionConfirmationModal, type PendingActionItem } from "./ActionConfirmationModal";
@@ -55,9 +56,6 @@ export function AgentModal({ ownerId, isOpen, onClose, onWatchlistUpdated, initi
     const fullJSON = JSON.stringify(logsData.logs, null, 2);
     copyToClipboard(fullJSON, "all-logs");
   };
-
-  const normalizePosterPath = (path?: string | null) =>
-    path ? path.replace(/^https?:\/\/image\.tmdb\.org\/t\/p\/w\d+/, "") : undefined;
 
   const persistLocalMutation = async (params: {
     tmdbId: number;
@@ -550,17 +548,8 @@ export function AgentModal({ ownerId, isOpen, onClose, onWatchlistUpdated, initi
                               <button
                                 className="speak-bubble-btn"
                                 onClick={() => {
-                                  if (!("speechSynthesis" in window)) return;
-                                  window.speechSynthesis.cancel();
-                                  const clean = msg.content
-                                    .replace(/\[System Note:[^\]]*\]/gi, "")
-                                    .replace(/[*_~`#]+/g, "")
-                                    .replace(/https?:\/\/\S+/g, "")
-                                    .replace(/\s+/g, " ")
-                                    .trim();
-                                  if (clean) {
-                                    window.speechSynthesis.speak(new SpeechSynthesisUtterance(clean));
-                                  }
+                                  cancelSpeech();
+                                  speakSpeechText(msg.content);
                                 }}
                                 title="Listen out loud"
                               >

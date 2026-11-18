@@ -105,7 +105,7 @@ export interface WatchlistItem extends MediaItem {
   tmdb_id: number;
   poster_path?: string;
   added_at?: string;
-  status?: string;
+  status?: string | null;
   is_owned?: boolean;
   owned_format?: "electronic" | "cloud" | "hard_copy" | null;
   watch_free_streaming?: boolean;
@@ -305,7 +305,7 @@ export interface MediaDetails extends MediaItem {
   tagline?: string;
   genres?: string[];
   runtime_minutes?: number;
-  status?: string;
+  status?: string | null;
   homepage?: string;
   watch_providers: WatchProviders;
   reviews: Review[];

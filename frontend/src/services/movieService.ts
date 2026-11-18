@@ -2,6 +2,10 @@ import { db, type LocalMovie, type SyncOperation, type SyncRecord } from "../db/
 import type { MediaDetails, RatedMovie, WatchlistItem } from "../types";
 import { formatPosterUrl } from "../utils/mediaUtils";
 
+export function normalizePosterPath(path?: string | null): string | undefined {
+  return path ? path.replace(/^https?:\/\/image\.tmdb\.org\/t\/p\/w\d+/, "") : undefined;
+}
+
 export function watchlistItemToLocalMovie(
   item: WatchlistItem,
   ownerId: string

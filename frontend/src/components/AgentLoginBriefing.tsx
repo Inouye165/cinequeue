@@ -1,21 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
+import { cancelSpeech, speakSpeechText } from "../utils/speech";
 import type { AgentBriefing, AgentBriefingUpdate } from "../types";
+
+export { cleanTextForSpeech } from "../utils/speech";
 
 interface AgentLoginBriefingProps {
   ownerId?: string;
   onOpenChat: () => void;
-}
-
-export function cleanTextForSpeech(text: string): string {
-  return text
-    .replace(/\[System Note:[^\]]*\]/gi, "")
-    .replace(/[*_~`#]+/g, "")
-    .replace(/https?:\/\/\S+/g, "")
-    .replace(/\bMEMORY RECALL:\s*/gi, "")
-    .replace(/•\s*Random movie fact:[^\n]*/gi, "")
-    .replace(/\s+/g, " ")
-    .trim();
 }
 
 export function cleanBriefingForDisplay(text: string): string {
@@ -88,21 +80,10 @@ export function AgentLoginBriefing({ ownerId, onOpenChat }: AgentLoginBriefingPr
   const briefingAbortRef = useRef<AbortController | null>(null);
 
   const speakText = (text: string) => {
-    if (!("speechSynthesis" in window)) return;
-    window.speechSynthesis.cancel();
-
-    const clean = cleanTextForSpeech(text);
-    if (!clean) return;
-
-    const utterance = new SpeechSynthesisUtterance(clean);
-    utterance.rate = 1.0;
-    utterance.pitch = 1.0;
-
-    utterance.onstart = () => setIsSpeaking(true);
-    utterance.onend = () => setIsSpeaking(false);
-    utterance.onerror = () => setIsSpeaking(false);
-
-    window.speechSynthesis.speak(utterance);
+    speakSpeechText(text, {
+      onStart: () => setIsSpeaking(true),
+      onEnd: () => setIsSpeaking(false),
+    });
   };
 
   const loadBriefing = async (forceRefresh: boolean = false, signal?: AbortSignal) => {
@@ -152,9 +133,7 @@ export function AgentLoginBriefing({ ownerId, onOpenChat }: AgentLoginBriefingPr
       briefingAbortRef.current?.abort();
       hasRequestedBriefingRef.current = false;
       if (timerRef.current) clearTimeout(timerRef.current);
-      if ("speechSynthesis" in window) {
-        window.speechSynthesis.cancel();
-      }
+      cancelSpeech();
     };
   }, []);
 
@@ -230,7 +209,7 @@ export function AgentLoginBriefing({ ownerId, onOpenChat }: AgentLoginBriefingPr
             className={`audio-toggle-btn ${isSpeaking ? "speaking" : ""}`}
             onClick={() => {
               if (isSpeaking) {
-                if ("speechSynthesis" in window) window.speechSynthesis.cancel();
+                cancelSpeech();
                 setIsSpeaking(false);
               } else if (briefing.briefing) {
                 speakText(briefing.briefing);
