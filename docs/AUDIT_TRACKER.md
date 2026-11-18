@@ -3,7 +3,7 @@
 This document tracks all **22 verified findings** across Security, Infrastructure, Race Conditions & Concurrency, Modularity, and Regression Test Coverage, fixed incrementally one item at a time.
 
 **Branch:** `fix/comprehensive-app-audit`  
-**Status:** `17 / 22` completed
+**Status:** `18 / 22` completed
 
 ---
 
@@ -33,7 +33,7 @@ This document tracks all **22 verified findings** across Security, Infrastructur
 - [x] **Item 15 (`[RACE-02]`)** — Transactional Repository Mutations, Watchlist/Ratings Dual-Store Sync, Deterministic Hashing & Firestore Slash-Safe IDs
 - [x] **Item 16 (`[RACE-03]`)** — Offload Blocking Auth/DB Work Off Async Event Loop & Share Lifespan `httpx.AsyncClient`
 - [x] **Item 17 (`[RACE-04]`)** — Fix `SyncStatusBar` Zombie-Movie Bug, `syncLock` `ifAvailable` Semantics, & Protocol v2 Type Alignment
-- [ ] **Item 18 (`[RACE-05]`)** — Fix `ActionConfirmationModal` Always-Empty Bug, Route `AgentModal` & `BatchRateModal` Through Local-First `movieService`, & Fix `AuthContext` 401 Stuck Banner
+- [x] **Item 18 (`[RACE-05]`)** — Fix `ActionConfirmationModal` Always-Empty Bug, Route `AgentModal` & `BatchRateModal` Through Local-First `movieService`, & Fix `AuthContext` 401 Stuck Banner
 - [ ] **Item 19 (`[RACE-06]`)** — Add Request Cancellation (`AbortController`), Live Search Debouncing, & Optimistic/Offline Sports Preferences Sync
 
 ### Modularity & Regression Tests

@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import { api } from "../api";
+import { movieService } from "../services/movieService";
+import { syncService } from "../services/syncService";
 import { StarRating } from "./StarRating";
 import type { MediaItem } from "../types";
 
@@ -14,12 +16,14 @@ interface DraftRatingItem {
 }
 
 interface BatchRateModalProps {
+  ownerId: string;
   isOpen: boolean;
   onClose: () => void;
   onRatingsAdded: () => void;
 }
 
 export const BatchRateModal: React.FC<BatchRateModalProps> = ({
+  ownerId,
   isOpen,
   onClose,
   onRatingsAdded,
@@ -131,16 +135,28 @@ export const BatchRateModal: React.FC<BatchRateModalProps> = ({
     setError(null);
 
     try {
-      await api.rateMoviesBatch(
-        draftItems.map((item) => ({
-          media_type: item.media_type,
-          tmdb_id: item.tmdb_id,
-          title: item.title,
-          poster_path: item.poster_path,
-          release_date: item.release_date,
-          rating: item.rating,
-        }))
-      );
+      for (const item of draftItems) {
+        if (!item.tmdb_id || item.tmdb_id <= 0) continue;
+        const mediaType = item.media_type === "tv" ? "tv" : "movie";
+        await movieService.saveMovie(
+          {
+            tmdbId: item.tmdb_id,
+            mediaType,
+            title: item.title,
+            posterPath: item.poster_path
+              ? item.poster_path.replace(/^https?:\/\/image\.tmdb\.org\/t\/p\/w\d+/, "")
+              : undefined,
+            releaseDate: item.release_date ?? undefined,
+            status: "watched",
+            watchStatus: "watched",
+            rating: item.rating,
+          },
+          ownerId
+        );
+      }
+      if (ownerId !== "guest_local") {
+        void syncService.triggerSync(ownerId);
+      }
 
       onRatingsAdded();
       onClose();

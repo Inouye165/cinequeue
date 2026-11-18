@@ -790,6 +790,7 @@ export function CinequeueDashboard({ onSignIn }: { onSignIn?: () => void }) {
       </div>
 
       {user && <AgentModal
+        ownerId={ownerId}
         isOpen={agentModalOpen}
         initialTab={agentModalTab}
         onClose={() => setAgentModalOpen(false)}
@@ -800,11 +801,12 @@ export function CinequeueDashboard({ onSignIn }: { onSignIn?: () => void }) {
       />}
 
 
-      {user && <BatchRateModal
+      <BatchRateModal
+        ownerId={ownerId}
         isOpen={isBatchRateModalOpen}
         onClose={() => setIsBatchRateModalOpen(false)}
         onRatingsAdded={() => void loadRatedMovies()}
-      />}
+      />
 
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px", flexWrap: "wrap", gap: "12px" }}>
         <h2 className="section-title" style={{ margin: 0 }}>{sectionTitle}</h2>

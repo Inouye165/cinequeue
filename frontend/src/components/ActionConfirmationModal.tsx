@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { api } from "../api";
 import { StarRating } from "./StarRating";
 
@@ -30,7 +30,15 @@ export function ActionConfirmationModal({
   const [items, setItems] = useState<PendingActionItem[]>(proposedItems);
   const [newTitle, setNewTitle] = useState("");
   const [searching, setSearching] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    if (isOpen) {
+      setItems(proposedItems);
+      setSearchError(null);
+    }
+  }, [isOpen, proposedItems]);
 
   if (!isOpen) return null;
 
@@ -50,11 +58,15 @@ export function ActionConfirmationModal({
     e.preventDefault();
     if (!newTitle.trim()) return;
     setSearching(true);
+    setSearchError(null);
     try {
       const searchRes = await api.search(newTitle.trim());
-      if (searchRes && searchRes.length > 0) {
+      if (searchRes && searchRes.length > 0 && searchRes[0].id > 0) {
         const top = searchRes[0];
-        const posterPath = "poster_path" in top ? (top as any).poster_path || null : null;
+        const rawPosterPath = "poster_path" in top ? (top as any).poster_path || null : null;
+        const posterPath = typeof rawPosterPath === "string"
+          ? rawPosterPath.replace(/^https?:\/\/image\.tmdb\.org\/t\/p\/w\d+/, "")
+          : undefined;
         const newItem: PendingActionItem = {
           id: `custom_${Date.now()}_${top.id}`,
           tmdb_id: top.id,
@@ -69,35 +81,17 @@ export function ActionConfirmationModal({
         setItems((prev) => [...prev, newItem]);
         setNewTitle("");
       } else {
-        const fallbackItem: PendingActionItem = {
-          id: `custom_${Date.now()}`,
-          media_type: "movie",
-          title: newTitle.trim(),
-          rating: 5,
-          action_type: "rate_movie",
-          checked: true,
-        };
-        setItems((prev) => [...prev, fallbackItem]);
-        setNewTitle("");
+        setSearchError(`No matching title found on TMDB for "${newTitle.trim()}".`);
       }
     } catch {
-      const fallbackItem: PendingActionItem = {
-        id: `custom_${Date.now()}`,
-        media_type: "movie",
-        title: newTitle.trim(),
-        rating: 5,
-        action_type: "rate_movie",
-        checked: true,
-      };
-      setItems((prev) => [...prev, fallbackItem]);
-      setNewTitle("");
+      setSearchError("Could not search TMDB right now. Please try again.");
     } finally {
       setSearching(false);
     }
   };
 
   const handleConfirmAll = async () => {
-    const checkedItems = items.filter((i) => i.checked);
+    const checkedItems = items.filter((i) => i.checked && Boolean(i.tmdb_id && i.tmdb_id > 0));
     if (checkedItems.length === 0) {
       onClose();
       return;
@@ -199,6 +193,11 @@ export function ActionConfirmationModal({
               {searching ? "Searching..." : "Add Title"}
             </button>
           </form>
+          {searchError ? (
+            <div style={{ color: "#f87171", fontSize: "0.82rem", marginTop: "-12px", marginBottom: "14px" }}>
+              {searchError}
+            </div>
+          ) : null}
 
           {/* Action List */}
           <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>

@@ -1,11 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
+import { movieService } from "../services/movieService";
+import { syncService } from "../services/syncService";
 import { StarRating } from "./StarRating";
 import { ActionConfirmationModal, type PendingActionItem } from "./ActionConfirmationModal";
 import type { AgentLogsResponse, AgentSettings, ChatMessage, PersonalityPreset, RatedMovie } from "../types";
 
 
 interface AgentModalProps {
+  ownerId: string;
   isOpen: boolean;
   onClose: () => void;
   onWatchlistUpdated?: () => void;
@@ -29,7 +32,7 @@ const SUGGESTIONS = [
 ];
 
 
-export function AgentModal({ isOpen, onClose, onWatchlistUpdated, initialTab = "chat" }: AgentModalProps) {
+export function AgentModal({ ownerId, isOpen, onClose, onWatchlistUpdated, initialTab = "chat" }: AgentModalProps) {
   const [activeTab, setActiveTab] = useState<"chat" | "settings" | "logs">(initialTab);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputMessage, setInputMessage] = useState("");
@@ -53,21 +56,51 @@ export function AgentModal({ isOpen, onClose, onWatchlistUpdated, initialTab = "
     copyToClipboard(fullJSON, "all-logs");
   };
 
+  const normalizePosterPath = (path?: string | null) =>
+    path ? path.replace(/^https?:\/\/image\.tmdb\.org\/t\/p\/w\d+/, "") : undefined;
+
+  const persistLocalMutation = async (params: {
+    tmdbId: number;
+    mediaType?: string | null;
+    title: string;
+    posterPath?: string | null;
+    releaseDate?: string | null;
+    status?: "queue" | "following" | "library" | "watched";
+    watchStatus?: "unwatched" | "watching" | "watched";
+    rating?: number | null;
+  }) => {
+    if (!params.tmdbId || params.tmdbId <= 0) return;
+    await movieService.saveMovie(
+      {
+        tmdbId: params.tmdbId,
+        mediaType: params.mediaType === "tv" ? "tv" : "movie",
+        title: params.title,
+        posterPath: normalizePosterPath(params.posterPath),
+        releaseDate: params.releaseDate ?? undefined,
+        status: params.status,
+        watchStatus: params.watchStatus,
+        rating: params.rating,
+      },
+      ownerId
+    );
+    if (ownerId !== "guest_local") {
+      void syncService.triggerSync(ownerId);
+    }
+  };
+
   const handleRateQuizMovie = async (movie: RatedMovie, rating: number) => {
+    if (!movie.tmdb_id || movie.tmdb_id <= 0) return;
     setQuizRatings((prev) => ({ ...prev, [movie.tmdb_id]: rating }));
     try {
-      if (rating === 0) {
-        await api.deleteRating(movie.media_type, movie.tmdb_id);
-      } else {
-        await api.rateMovie({
-          media_type: movie.media_type,
-          tmdb_id: movie.tmdb_id,
-          title: movie.title,
-          poster_path: movie.poster_path,
-          release_date: movie.release_date,
-          rating,
-        });
-      }
+      await persistLocalMutation({
+        tmdbId: movie.tmdb_id,
+        mediaType: movie.media_type,
+        title: movie.title,
+        posterPath: movie.poster_path,
+        releaseDate: movie.release_date,
+        rating,
+        ...(rating === 0 ? { watchStatus: "unwatched" } : { status: "watched", watchStatus: "watched" }),
+      });
       onWatchlistUpdated?.();
     } catch (err) {
       console.error("Failed to save quiz rating:", err);
@@ -149,27 +182,26 @@ export function AgentModal({ isOpen, onClose, onWatchlistUpdated, initialTab = "
 
   const handleConfirmBatchActions = async (confirmedItems: PendingActionItem[]) => {
     for (const item of confirmedItems) {
+      if (!item.tmdb_id || item.tmdb_id <= 0) continue;
       if (item.action_type === "rate_movie") {
-        let posterPath = item.poster_path;
-        if (posterPath) {
-          posterPath = posterPath.replace(/^https?:\/\/image\.tmdb\.org\/t\/p\/w\d+/, "");
-        }
-        await api.rateMovie({
-          media_type: item.media_type,
-          tmdb_id: item.tmdb_id ?? 0,
+        await persistLocalMutation({
+          tmdbId: item.tmdb_id,
+          mediaType: item.media_type,
           title: item.title,
           rating: item.rating,
-          poster_path: posterPath ?? undefined,
-          release_date: item.release_date ?? undefined,
+          status: "watched",
+          watchStatus: "watched",
+          posterPath: item.poster_path,
+          releaseDate: item.release_date,
         });
       } else {
-        await api.addToWatchlist({
-          media_type: item.media_type,
-          tmdb_id: item.tmdb_id ?? 0,
+        await persistLocalMutation({
+          tmdbId: item.tmdb_id,
+          mediaType: item.media_type,
           title: item.title,
           status: "queue",
-          poster_path: item.poster_path,
-          release_date: item.release_date,
+          posterPath: item.poster_path,
+          releaseDate: item.release_date,
         });
       }
     }
@@ -393,11 +425,13 @@ export function AgentModal({ isOpen, onClose, onWatchlistUpdated, initialTab = "
                                             type="button"
                                             style={{ alignSelf: "flex-start", marginTop: "4px", padding: "4px 10px", fontSize: "0.75rem", borderRadius: "4px", background: "#FFB800", color: "#000", border: "none", cursor: "pointer", fontWeight: 600 }}
                                             onClick={async () => {
-                                              if (act.tmdb_id && act.title) {
-                                                await api.addToWatchlist({
-                                                  media_type: (act.media_type as any) || "movie",
-                                                  tmdb_id: act.tmdb_id,
+                                              if (act.tmdb_id && act.tmdb_id > 0 && act.title) {
+                                                await persistLocalMutation({
+                                                  tmdbId: act.tmdb_id,
+                                                  mediaType: act.media_type,
                                                   title: act.title,
+                                                  posterPath: act.poster_url,
+                                                  releaseDate: act.release_date,
                                                   status: "queue",
                                                 });
                                                 onWatchlistUpdated?.();
@@ -453,13 +487,15 @@ export function AgentModal({ isOpen, onClose, onWatchlistUpdated, initialTab = "
                                                   type="button"
                                                   style={{ padding: "3px 8px", fontSize: "0.7rem", borderRadius: "4px", background: "#FFB800", color: "#000", border: "none", cursor: "pointer", fontWeight: 600 }}
                                                   onClick={async () => {
-                                                    await api.rateMovie({
-                                                      media_type: r.media_type || "movie",
-                                                      tmdb_id: r.tmdb_id,
+                                                    await persistLocalMutation({
+                                                      tmdbId: r.tmdb_id,
+                                                      mediaType: r.media_type,
                                                       title: r.title,
                                                       rating: 5,
-                                                      poster_path: r.poster_path,
-                                                      release_date: r.release_date,
+                                                      status: "watched",
+                                                      watchStatus: "watched",
+                                                      posterPath: r.poster_path,
+                                                      releaseDate: r.release_date,
                                                     });
                                                     onWatchlistUpdated?.();
                                                   }}
@@ -470,13 +506,13 @@ export function AgentModal({ isOpen, onClose, onWatchlistUpdated, initialTab = "
                                                   type="button"
                                                   style={{ padding: "3px 8px", fontSize: "0.7rem", borderRadius: "4px", background: "rgba(255, 255, 255, 0.15)", color: "#fff", border: "none", cursor: "pointer", fontWeight: 600 }}
                                                   onClick={async () => {
-                                                    await api.addToWatchlist({
-                                                      media_type: r.media_type || "movie",
-                                                      tmdb_id: r.tmdb_id,
+                                                    await persistLocalMutation({
+                                                      tmdbId: r.tmdb_id,
+                                                      mediaType: r.media_type,
                                                       title: r.title,
                                                       status: "queue",
-                                                      poster_path: r.poster_path || undefined,
-                                                      release_date: r.release_date || undefined,
+                                                      posterPath: r.poster_path,
+                                                      releaseDate: r.release_date,
                                                     });
                                                     onWatchlistUpdated?.();
                                                   }}
@@ -846,12 +882,14 @@ export function AgentModal({ isOpen, onClose, onWatchlistUpdated, initialTab = "
           ) : null}
         </div>
       </div>
-      <ActionConfirmationModal
-        isOpen={showConfirmModal}
-        onClose={() => setShowConfirmModal(false)}
-        proposedItems={pendingConfirmItems}
-        onConfirm={handleConfirmBatchActions}
-      />
+      {showConfirmModal && (
+        <ActionConfirmationModal
+          isOpen={showConfirmModal}
+          onClose={() => setShowConfirmModal(false)}
+          proposedItems={pendingConfirmItems}
+          onConfirm={handleConfirmBatchActions}
+        />
+      )}
     </div>
   );
 }

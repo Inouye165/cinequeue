@@ -540,7 +540,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     const handleUnauthorized = () => {
+      setAuthToken(null);
       syncService.setAuthenticatedOwner(null);
+      setIdToken(null);
+      setFirebaseUser(null);
       setSessionReady(false);
       setUser(null);
       setIsAdmin(false);
@@ -668,6 +671,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       try {
         const token = await currentUser.getIdToken(true);
         if (!isCurrent()) return;
+        setAuthToken(token);
+        setIdToken(token);
         const csrfData = await api.csrf();
         if (!isCurrent()) return;
         await api.createSession(token, csrfData.csrf_token);
