@@ -121,7 +121,10 @@ async def push_movie_sync(
 
       if op.operationType == "delete" or p.get("deletedAt") or p.get("deleted_at"):
         # Tombstone deletion
-        repo.remove_item(user_id, media_type, int(tmdb_id))
+        repo.remove_item(user_id, media_type, tmdb_id_int)
+        repo.delete_rated_movie(
+            user_id, media_type, tmdb_id_int, remove_unowned_watched=False
+        )
         processed_ids.append(op.operationId)
       else:
         status = p.get("status", "queue")
@@ -157,7 +160,7 @@ async def push_movie_sync(
               user_rating=user_rating,
           )
 
-        # Rate movie if rating present
+        # Rate movie if rating present; clear rating without removing an upserted item
         if user_rating > 0:
           repo.rate_movie(
               user_id=user_id,
@@ -168,8 +171,10 @@ async def push_movie_sync(
               release_date=p.get("releaseDate") or p.get("release_date"),
               rating=user_rating,
           )
-        elif rating is not None:
-          repo.delete_rated_movie(user_id, media_type, int(tmdb_id))
+        elif "rating" in p and rating is not None:
+          repo.delete_rated_movie(
+              user_id, media_type, int(tmdb_id), remove_unowned_watched=False
+          )
 
         processed_ids.append(op.operationId)
     except ValueError as e:

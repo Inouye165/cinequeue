@@ -176,6 +176,9 @@ class TestFirestoreRepository:
         with patch("app.firestore_repo.firestore") as mock_firestore_module:
             mock_firestore_module.Client.return_value = mock_client_instance
             mock_firestore_module.Query.DESCENDING = "DESCENDING"
+            mock_transaction = MagicMock()
+            mock_client_instance.transaction.return_value = mock_transaction
+            mock_firestore_module.transactional = lambda fn: fn
 
             from app.firestore_repo import FirestoreWatchlistRepository
             self.repo = FirestoreWatchlistRepository(project="test-project")
@@ -183,6 +186,7 @@ class TestFirestoreRepository:
             self.mock_client = mock_client_instance
             self.mock_users_collection = mock_users_collection
             self.mock_user_document = mock_user_document
+            self.mock_transaction = mock_transaction
             yield
 
     def _make_mock_doc(self, data: dict, doc_id: str = "mock_id"):
@@ -233,7 +237,8 @@ class TestFirestoreRepository:
         result = self.repo.add_item("user123", "movie", 12345, "Test Movie", "/poster.jpg", "2024-06-01")
 
         self.mock_collection.document.assert_called_with("movie_12345")
-        mock_doc_ref.set.assert_called_once()
+        self.mock_transaction.set.assert_called_once()
+        assert self.mock_transaction.set.call_args.args[0] == mock_doc_ref
         assert result["media_type"] == "movie"
         assert result["tmdb_id"] == 12345
         assert result["title"] == "Test Movie"
@@ -251,7 +256,7 @@ class TestFirestoreRepository:
         with pytest.raises(DuplicateItemError):
             self.repo.add_item("user123", "movie", 12345, "Test Movie", None, None)
 
-        mock_doc_ref.set.assert_not_called()
+        self.mock_transaction.set.assert_not_called()
         self.mock_users_collection.document.assert_called_with("user123")
 
     def test_remove_item(self):
@@ -298,7 +303,7 @@ class TestFirestoreRepository:
         # Update status
         result = self.repo.update_item("user123", "movie", 12345, status="following")
         self.mock_collection.document.assert_called_with("movie_12345")
-        mock_doc_ref.update.assert_called_with({"status": "following"})
+        self.mock_transaction.update.assert_called_with(mock_doc_ref, {"status": "following"})
         assert result is not None
         assert result["status"] == "following"
 
@@ -313,7 +318,7 @@ class TestFirestoreRepository:
         # Update watch options
         result = self.repo.update_item("user123", "movie", 12345, watch_free_streaming=True, watch_on_sale_buy=True)
         self.mock_collection.document.assert_called_with("movie_12345")
-        mock_doc_ref.update.assert_called_with({"watch_free_streaming": True, "watch_on_sale_buy": True})
+        self.mock_transaction.update.assert_called_with(mock_doc_ref, {"watch_free_streaming": True, "watch_on_sale_buy": True})
         assert result is not None
         assert result["watch_free_streaming"] is True
         assert result["watch_on_sale_buy"] is True

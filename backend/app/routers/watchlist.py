@@ -256,6 +256,16 @@ async def add_to_watchlist(request: Request, body: dict[str, Any], current_user:
                 watch_on_sale_buy=watch_on_sale_buy,
                 user_rating=user_rating,
             )
+            if user_rating and user_rating > 0:
+                repo.rate_movie(
+                    user_id=current_user.uid,
+                    media_type=media_type,
+                    tmdb_id=tmdb_id,
+                    title=title,
+                    poster_path=poster_path,
+                    release_date=release_date,
+                    rating=user_rating,
+                )
 
             days = days_until(release_date)
             logger.info(f"Successfully added to watchlist: {media_type}/{tmdb_id}")
@@ -288,6 +298,16 @@ async def add_to_watchlist(request: Request, body: dict[str, Any], current_user:
                 user_rating=user_rating,
             )
             if updated:
+                if user_rating and user_rating > 0:
+                    repo.rate_movie(
+                        user_id=current_user.uid,
+                        media_type=media_type,
+                        tmdb_id=tmdb_id,
+                        title=updated.get("title") or title,
+                        poster_path=updated.get("poster_path") or poster_path,
+                        release_date=updated.get("release_date") or release_date,
+                        rating=user_rating,
+                    )
                 days = days_until(release_date)
                 return {
                     "media_type": media_type,
@@ -365,6 +385,25 @@ async def update_watchlist_item(
         if not updated:
             logger.warning(f"Item not found for update: {media_type}/{tmdb_id}")
             raise HTTPException(status_code=404, detail="Not found")
+
+        if user_rating is not None:
+            if user_rating > 0:
+                repo.rate_movie(
+                    user_id=current_user.uid,
+                    media_type=media_type,
+                    tmdb_id=tmdb_id,
+                    title=updated.get("title") or "Untitled",
+                    poster_path=updated.get("poster_path"),
+                    release_date=updated.get("release_date"),
+                    rating=user_rating,
+                )
+            else:
+                repo.delete_rated_movie(
+                    current_user.uid,
+                    media_type,
+                    tmdb_id,
+                    remove_unowned_watched=False,
+                )
 
         logger.info(f"Successfully updated watchlist item: {media_type}/{tmdb_id}")
         return {

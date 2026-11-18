@@ -3,7 +3,7 @@
 This document tracks all **22 verified findings** across Security, Infrastructure, Race Conditions & Concurrency, Modularity, and Regression Test Coverage, fixed incrementally one item at a time.
 
 **Branch:** `fix/comprehensive-app-audit`  
-**Status:** `14 / 22` completed
+**Status:** `15 / 22` completed
 
 ---
 
@@ -30,7 +30,7 @@ This document tracks all **22 verified findings** across Security, Infrastructur
 
 ### Race Conditions & Concurrency
 - [x] **Item 14 (`[RACE-01]`)** — SQLite `WAL` + `busy_timeout`, Atomic `claim_daily_greeting_generation`, & `BriefingService` Step 4 Concurrent Wait Fix
-- [ ] **Item 15 (`[RACE-02]`)** — Transactional Repository Mutations, Watchlist/Ratings Dual-Store Sync, Deterministic Hashing & Firestore Slash-Safe IDs
+- [x] **Item 15 (`[RACE-02]`)** — Transactional Repository Mutations, Watchlist/Ratings Dual-Store Sync, Deterministic Hashing & Firestore Slash-Safe IDs
 - [ ] **Item 16 (`[RACE-03]`)** — Offload Blocking Auth/DB Work Off Async Event Loop & Share Lifespan `httpx.AsyncClient`
 - [ ] **Item 17 (`[RACE-04]`)** — Fix `SyncStatusBar` Zombie-Movie Bug, `syncLock` `ifAvailable` Semantics, & Protocol v2 Type Alignment
 - [ ] **Item 18 (`[RACE-05]`)** — Fix `ActionConfirmationModal` Always-Empty Bug, Route `AgentModal` & `BatchRateModal` Through Local-First `movieService`, & Fix `AuthContext` 401 Stuck Banner

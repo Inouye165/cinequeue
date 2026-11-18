@@ -479,7 +479,7 @@ class BriefingService:
             for cand in candidate_items:
                 c_title = cand.get("title", "Monitored Item")
                 c_summary = cand.get("summary") or cand.get("message", "")
-                c_key = cand.get("item_key", f"monitored_{hash(c_title)}")
+                c_key = cand.get("item_key", f"monitored_{hashlib.sha256(c_title.encode('utf-8')).hexdigest()[:16]}")
                 engine_candidates.append(Candidate(
                     candidate_id=c_key,
                     type=CandidateType.MONITORED_TITLE_RELEASE.value,
