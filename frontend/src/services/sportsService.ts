@@ -109,6 +109,14 @@ function prefsKey(ownerId: string): string {
   return `sports_prefs:${ownerId}`;
 }
 
+function scheduleKey(ownerId: string = "local"): string {
+  return `sports_schedule:${ownerId}`;
+}
+
+function localScheduleKey(ownerId: string = "local"): string {
+  return `cinequeue_sports_schedule:${ownerId}`;
+}
+
 export function toLocalDateKey(dt: Date): string {
   const y = dt.getFullYear();
   const m = String(dt.getMonth() + 1).padStart(2, "0");
@@ -185,10 +193,10 @@ export const sportsService = {
     }
   },
 
-  getInstantSchedule(): SportsGame[] {
+  getInstantSchedule(ownerId: string = "local"): SportsGame[] {
     try {
       if (typeof localStorage === "undefined") return [];
-      const raw = localStorage.getItem("cinequeue_sports_schedule");
+      const raw = localStorage.getItem(localScheduleKey(ownerId));
       if (!raw) return [];
       const parsed = JSON.parse(raw);
       return Array.isArray(parsed) ? filterGamesForActiveWindow(parsed as SportsGame[]) : [];
@@ -324,20 +332,20 @@ export const sportsService = {
     return DEFAULT_CATALOG;
   },
 
-  async getSchedule(trackedTeams: string[] = [], forceRefresh = false, allowNetwork = true): Promise<SportsGame[]> {
+  async getSchedule(trackedTeams: string[] = [], forceRefresh = false, allowNetwork = true, ownerId: string = "local"): Promise<SportsGame[]> {
     if (allowNetwork && navigator.onLine) {
       try {
         const res = await api.sportsSchedule(trackedTeams, forceRefresh);
         if (Array.isArray(res.games)) {
           const windowed = filterGamesForActiveWindow(res.games);
           await db.localMetadata.put({
-            key: "sports_schedule",
+            key: scheduleKey(ownerId),
             value: windowed,
             updatedAt: new Date().toISOString(),
           });
           try {
             if (typeof localStorage !== "undefined") {
-              localStorage.setItem("cinequeue_sports_schedule", JSON.stringify(windowed));
+              localStorage.setItem(localScheduleKey(ownerId), JSON.stringify(windowed));
             }
           } catch {
             // Ignore storage errors
@@ -348,7 +356,7 @@ export const sportsService = {
         // Fallback to cached schedule
       }
     }
-    const cached = await db.localMetadata.get("sports_schedule");
+    const cached = await db.localMetadata.get(scheduleKey(ownerId));
     if (cached && Array.isArray(cached.value)) {
       return filterGamesForActiveWindow(cached.value as SportsGame[]);
     }

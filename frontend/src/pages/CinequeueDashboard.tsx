@@ -66,7 +66,7 @@ export function CinequeueDashboard({ onSignIn }: { onSignIn?: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [isBatchRateModalOpen, setIsBatchRateModalOpen] = useState(false);
   const [sportsCatalog, setSportsCatalog] = useState<SportsCatalog>(DEFAULT_CATALOG);
-  const [sportsGames, setSportsGames] = useState<SportsGame[]>(() => sportsService.getInstantSchedule());
+  const [sportsGames, setSportsGames] = useState<SportsGame[]>(() => sportsService.getInstantSchedule(ownerId));
   const [sportsPrefs, setSportsPrefs] = useState<SportsPreferences>(() => sportsService.getInstantPreferences(ownerId));
   const [sportsLoading, setSportsLoading] = useState(false);
   const enrichedShows = useRef(new Set<number>());
@@ -111,7 +111,7 @@ export function CinequeueDashboard({ onSignIn }: { onSignIn?: () => void }) {
       setSportsPrefs(prefs);
       const [cat, sched] = await Promise.all([
         sportsService.getCatalog(isCloudAuth),
-        sportsService.getSchedule(undefined, forceRefresh, isCloudAuth),
+        sportsService.getSchedule(undefined, forceRefresh, isCloudAuth, ownerId),
       ]);
       setSportsCatalog(cat);
       setSportsGames(sched);
@@ -781,7 +781,7 @@ export function CinequeueDashboard({ onSignIn }: { onSignIn?: () => void }) {
 
       <SyncStatusBar ownerId={ownerId} onDataCleared={reloadFromDb} />
 
-      {user && <AgentLoginBriefing onOpenChat={() => openAgentModal("chat")} />}
+      {user && <AgentLoginBriefing key={ownerId} ownerId={ownerId} onOpenChat={() => openAgentModal("chat")} />}
 
       {error ? <div className="error-banner">{error}</div> : null}
 

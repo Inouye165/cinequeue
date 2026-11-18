@@ -12,8 +12,9 @@ import {
   startTrace,
   recordEvent,
   incrementCount,
+  clearTraceHistory,
 } from "../utils/authPerformanceMonitor";
-import { authLog } from "../utils/authDebugLog";
+import { authLog, clearAuthDebugLogs } from "../utils/authDebugLog";
 import { syncService } from "../services/syncService";
 import { setAuthToken } from "../utils/authTokenStore";
 
@@ -625,7 +626,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     } catch (err) {
       console.error("Sign out action failed:", err);
     } finally {
-      recordEvent("auth_context_state_update_started", "start");
+      try {
+        if (typeof sessionStorage !== "undefined") {
+          for (let i = sessionStorage.length - 1; i >= 0; i--) {
+            const k = sessionStorage.key(i);
+            if (k && k.startsWith("cinequeue_briefing_")) {
+              sessionStorage.removeItem(k);
+            }
+          }
+        }
+      } catch {
+        // Ignore storage errors
+      }
+      clearAuthDebugLogs();
+      clearTraceHistory();
       setUser(null);
       setFirebaseUser(null);
       setIdToken(null);
@@ -637,10 +651,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setProfileLoading(false);
       setAuthorizationReady(true);
       setLoading(false);
-      recordEvent("auth_context_state_update_completed", "success");
-      recordEvent("auth_state_callback_completed", "success");
-      recordEvent("auth_loading_cleared", "success");
-      recordEvent("auth_trace_completed", "success");
     }
   };
 

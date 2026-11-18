@@ -3,6 +3,7 @@ import { api } from "../api";
 import type { AgentBriefing, AgentBriefingUpdate } from "../types";
 
 interface AgentLoginBriefingProps {
+  ownerId?: string;
   onOpenChat: () => void;
 }
 
@@ -71,14 +72,15 @@ export function formatSummaryLines(
   return { headline, supportingText };
 }
 
-export function AgentLoginBriefing({ onOpenChat }: AgentLoginBriefingProps) {
+export function AgentLoginBriefing({ ownerId, onOpenChat }: AgentLoginBriefingProps) {
+  const storageScope = ownerId || "local";
   const [briefing, setBriefing] = useState<AgentBriefing | null>(null);
   const [loading, setLoading] = useState(true);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [showUpdatesModal, setShowUpdatesModal] = useState(false);
   const [isExpanded, setIsExpanded] = useState(false);
   const [isDismissed] = useState(() => {
-    return sessionStorage.getItem("cinequeue_briefing_dismissed") === "true";
+    return sessionStorage.getItem(`cinequeue_briefing_dismissed:${storageScope}`) === "true";
   });
 
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -106,10 +108,11 @@ export function AgentLoginBriefing({ onOpenChat }: AgentLoginBriefingProps) {
     if (loading && forceRefresh) return;
     setLoading(true);
     try {
-      let sessionId = sessionStorage.getItem("cinequeue_briefing_session_id");
+      const sessionKey = `cinequeue_briefing_session_id:${storageScope}`;
+      let sessionId = sessionStorage.getItem(sessionKey);
       if (!sessionId) {
         sessionId = "sess_" + Date.now() + "_" + Math.random().toString(36).substring(2, 9);
-        sessionStorage.setItem("cinequeue_briefing_session_id", sessionId);
+        sessionStorage.setItem(sessionKey, sessionId);
       }
 
       const data = await api.agentBriefing(sessionId, forceRefresh);
