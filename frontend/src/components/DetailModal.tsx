@@ -22,8 +22,33 @@ interface Props {
   onUpdateWatchOptions: (watchFreeStreaming: boolean, watchOnSaleBuy: boolean) => void;
 }
 
+const TRAILER_KEY_RE = /^[A-Za-z0-9_-]{6,20}$/;
+
+export function toSafeHttpUrl(rawUrl?: string | null): string | null {
+  if (!rawUrl) return null;
+  const trimmed = rawUrl.trim();
+  if (!trimmed || /["'()<>\s\r\n]/.test(trimmed)) return null;
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+      return null;
+    }
+    return parsed.href;
+  } catch {
+    return null;
+  }
+}
+
+export function isValidTrailerKey(key?: string | null): boolean {
+  return Boolean(key && TRAILER_KEY_RE.test(key.trim()));
+}
+
 function TrailerPlayer({ trailer }: { trailer: Trailer }) {
   const [isExpanded, setIsExpanded] = useState(false);
+  if (!isValidTrailerKey(trailer.key)) {
+    return null;
+  }
+  const safeKey = encodeURIComponent(trailer.key.trim());
 
   return (
     <div
@@ -55,7 +80,7 @@ function TrailerPlayer({ trailer }: { trailer: Trailer }) {
             Collapse
           </button>
           <iframe
-            src={`https://www.youtube-nocookie.com/embed/${trailer.key}?autoplay=1&rel=0`}
+            src={`https://www.youtube-nocookie.com/embed/${safeKey}?autoplay=1&rel=0`}
             title="Official trailer"
             allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
             allowFullScreen
@@ -65,7 +90,7 @@ function TrailerPlayer({ trailer }: { trailer: Trailer }) {
       ) : (
         <div
           className="trailer-thumbnail-wrapper"
-          style={{ backgroundImage: `url(https://img.youtube.com/vi/${trailer.key}/hqdefault.jpg)` }}
+          style={{ backgroundImage: `url(https://img.youtube.com/vi/${safeKey}/hqdefault.jpg)` }}
         >
           <div className="trailer-play-btn" />
           <div className="trailer-title">{trailer.name}</div>
@@ -186,8 +211,8 @@ export function DetailModal({
         <div
           className="detail-hero"
           style={
-            details.backdrop_url
-              ? { backgroundImage: `url(${details.backdrop_url})` }
+            toSafeHttpUrl(details.backdrop_url)
+              ? { backgroundImage: `url(${toSafeHttpUrl(details.backdrop_url)})` }
               : undefined
           }
         >
@@ -325,8 +350,8 @@ export function DetailModal({
                   </button>
                 )}
 
-                {details.homepage ? (
-                  <a className="pill-button secondary" href={details.homepage} target="_blank" rel="noreferrer">
+                {toSafeHttpUrl(details.homepage) ? (
+                  <a className="pill-button secondary" href={toSafeHttpUrl(details.homepage)!} target="_blank" rel="noopener noreferrer">
                     Official site
                   </a>
                 ) : null}
@@ -505,9 +530,9 @@ export function DetailModal({
               !providers.theatres?.length ? (
                 <p>No US provider data yet.</p>
               ) : null}
-              {details.watch_providers?.link ? (
+              {toSafeHttpUrl(details.watch_providers?.link) ? (
                 <p>
-                  <a href={details.watch_providers.link} target="_blank" rel="noreferrer">
+                  <a href={toSafeHttpUrl(details.watch_providers?.link)!} target="_blank" rel="noopener noreferrer">
                     View all options on JustWatch
                   </a>
                 </p>
@@ -544,8 +569,8 @@ export function DetailModal({
                     {review.rating ? ` · ${review.rating}/10` : ""}
                   </strong>
                   <p>{review.content.slice(0, 320)}{review.content.length > 320 ? "…" : ""}</p>
-                  {review.url ? (
-                    <a href={review.url} target="_blank" rel="noreferrer">
+                  {toSafeHttpUrl(review.url) ? (
+                    <a href={toSafeHttpUrl(review.url)!} target="_blank" rel="noopener noreferrer">
                       Read full review
                     </a>
                   ) : null}
@@ -559,17 +584,24 @@ export function DetailModal({
           <section className="panel">
             <h4>Latest news</h4>
             {details.news.length ? (
-              details.news.map((article) => (
-                <div className="news-item" key={article.url}>
-                  <a href={article.url} target="_blank" rel="noreferrer">
-                    <strong>{article.title}</strong>
-                  </a>
-                  <div className="meta-row">
-                    {article.source ? <span>{article.source}</span> : null}
-                    {article.published ? <span>{article.published}</span> : null}
+              details.news.map((article) => {
+                const safeArticleUrl = toSafeHttpUrl(article.url);
+                return (
+                  <div className="news-item" key={article.url}>
+                    {safeArticleUrl ? (
+                      <a href={safeArticleUrl} target="_blank" rel="noopener noreferrer">
+                        <strong>{article.title}</strong>
+                      </a>
+                    ) : (
+                      <strong>{article.title}</strong>
+                    )}
+                    <div className="meta-row">
+                      {article.source ? <span>{article.source}</span> : null}
+                      {article.published ? <span>{article.published}</span> : null}
+                    </div>
                   </div>
-                </div>
-              ))
+                );
+              })
             ) : (
               <p>No recent headlines found.</p>
             )}

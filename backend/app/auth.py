@@ -319,7 +319,7 @@ async def get_current_user(
             if approval:
                 status = approval.get("status")
                 if status != "approved":
-                    ip_address = request.client.host if request.client else "unknown"
+                    ip_address = extract_client_ip(request)
                     user_agent = request.headers.get("user-agent", "unknown")
                     repo.log_login_attempt(
                         email=email_normalized,
@@ -334,7 +334,7 @@ async def get_current_user(
             else:
                 # No DB approval record found — fail closed unless explicitly on static allowlist
                 if email_normalized not in config.AUTH_ALLOWED_EMAILS:
-                    ip_address = request.client.host if request.client else "unknown"
+                    ip_address = extract_client_ip(request)
                     user_agent = request.headers.get("user-agent", "unknown")
                     repo.log_login_attempt(
                         email=email_normalized,

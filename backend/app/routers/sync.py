@@ -101,6 +101,20 @@ async def push_movie_sync(
             {"operationId": op.operationId, "reason": "Missing tmdb_id"}
         )
         continue
+      if media_type not in {"movie", "tv"}:
+        failed_ops.append(
+            {"operationId": op.operationId, "reason": "Invalid media_type"}
+        )
+        continue
+      try:
+        tmdb_id_int = int(tmdb_id)
+        if tmdb_id_int <= 0:
+          raise ValueError("tmdb_id must be positive")
+      except (TypeError, ValueError):
+        failed_ops.append(
+            {"operationId": op.operationId, "reason": "Invalid tmdb_id"}
+        )
+        continue
 
       if op.operationType == "delete" or p.get("deletedAt") or p.get("deleted_at"):
         # Tombstone deletion

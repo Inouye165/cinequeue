@@ -1,6 +1,6 @@
 import logging
-from typing import Any
-from fastapi import APIRouter, Depends, HTTPException, Request
+from typing import Any, Literal
+from fastapi import APIRouter, Depends, HTTPException, Path, Request
 from pydantic import BaseModel, Field
 
 from app.auth import CurrentUser, get_current_user, require_cookie_csrf_and_origin
@@ -15,8 +15,8 @@ router = APIRouter(
 
 
 class RateMoviePayload(BaseModel):
-    media_type: str = "movie"
-    tmdb_id: int
+    media_type: Literal["movie", "tv"] = "movie"
+    tmdb_id: int = Field(gt=0)
     title: str
     poster_path: str | None = None
     release_date: str | None = None
@@ -60,9 +60,9 @@ async def rate_movie(
 
 @router.delete("/{media_type}/{tmdb_id}")
 async def delete_rated_movie(
-    media_type: str,
-    tmdb_id: int,
-    request: Request,
+    media_type: Literal["movie", "tv"],
+    tmdb_id: int = Path(..., gt=0),
+    request: Request = ...,
     current_user: CurrentUser = Depends(get_current_user),
 ) -> dict[str, bool]:
     repo = request.app.state.watchlist_repo

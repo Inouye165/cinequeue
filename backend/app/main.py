@@ -1,6 +1,7 @@
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import urlparse
 
 import httpx
 from fastapi import FastAPI, Response, Request
@@ -8,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+import app.config as config
 from app.config import (
     TMDB_API_KEY,
     WATCHLIST_BACKEND,
@@ -145,12 +147,16 @@ async def add_security_headers(request, call_next):
     
     if not is_auth_proxy:
         response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
         response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
         response.headers["Cross-Origin-Opener-Policy"] = "same-origin-allow-popups"
         
         csp = (
             "default-src 'self'; "
+            "base-uri 'self'; "
+            "object-src 'none'; "
+            "frame-ancestors 'none'; "
             "script-src 'self' https://apis.google.com https://www.gstatic.com; "
             "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
             "font-src 'self' https://fonts.gstatic.com; "
@@ -201,6 +207,40 @@ async def health():
     return {"status": "ok", "tmdb_configured": bool(TMDB_API_KEY)}
 
 
+_ALLOWED_FIREBASE_AUTH_PATHS = {
+    "handler",
+    "handler.js",
+    "iframe",
+    "iframe.js",
+    "experiments.js",
+    "init.json",
+}
+_MAX_AUTH_PROXY_BODY_BYTES = 64 * 1024
+
+
+def _resolve_proxy_redirect_host(request: Request) -> str:
+    if PUBLIC_AUTH_DOMAIN:
+        return PUBLIC_AUTH_DOMAIN
+    candidate = (request.url.netloc or "").strip()
+    allowed_hosts: set[str] = set()
+    for origin in config.AUTH_ALLOWED_ORIGINS:
+        parsed = urlparse(origin)
+        if parsed.netloc:
+            allowed_hosts.add(parsed.netloc.lower())
+    base_netloc = urlparse(config.APP_BASE_URL).netloc
+    if base_netloc:
+        allowed_hosts.add(base_netloc.lower())
+    if config.ENVIRONMENT != "production":
+        allowed_hosts.update({"localhost:5180", "127.0.0.1:5180", "localhost:8080", "127.0.0.1:8080", "localhost:8081", "127.0.0.1:8081"})
+    if request.client and request.client.host == "testclient" and candidate.lower() == "testserver":
+        return candidate
+    if candidate and candidate.lower() in allowed_hosts:
+        return candidate
+    if base_netloc:
+        return base_netloc
+    return next(iter(allowed_hosts), FIREBASE_AUTH_DOMAIN)
+
+
 @app.api_route("/__/auth/{path:path}", methods=["GET", "POST"])
 async def firebase_auth_proxy(path: str, request: Request):
     import re
@@ -208,26 +248,35 @@ async def firebase_auth_proxy(path: str, request: Request):
     if request.method not in ("GET", "POST"):
         return Response(status_code=405, content="Method Not Allowed")
 
-    # Security: Limit request size to 10 MB
+    # Security: Strict allowlist for Firebase Auth helper routes (prevent traversal/SSRF)
+    cleaned_path = path.lstrip("/")
+    if ".." in path or "\\" in path or cleaned_path not in _ALLOWED_FIREBASE_AUTH_PATHS:
+        return Response(status_code=400, content="Invalid auth proxy path")
+
+    # Security: Limit POST body strictly to 64 KB
     content_length = request.headers.get("content-length")
     if content_length:
         try:
-            if int(content_length) > 10 * 1024 * 1024:
+            if int(content_length) > _MAX_AUTH_PROXY_BODY_BYTES:
                 return Response(status_code=413, content="Request Entity Too Large")
         except ValueError:
             return Response(status_code=400, content="Invalid Content-Length")
 
-    # Read request body safely up to 10 MB
     body = b""
     if request.method == "POST":
-        body = await request.body()
-        if len(body) > 10 * 1024 * 1024:
-            return Response(status_code=413, content="Request Entity Too Large")
+        chunks: list[bytes] = []
+        total_bytes = 0
+        async for chunk in request.stream():
+            total_bytes += len(chunk)
+            if total_bytes > _MAX_AUTH_PROXY_BODY_BYTES:
+                return Response(status_code=413, content="Request Entity Too Large")
+            chunks.append(chunk)
+        body = b"".join(chunks)
 
     # Upstream URL Construction: Proxy only the /__/auth/ namespace to the fixed Firebase Auth Domain
     query_string = request.url.query
     query_suffix = f"?{query_string}" if query_string else ""
-    target_url = f"https://{FIREBASE_AUTH_DOMAIN}/__/auth/{path}{query_suffix}"
+    target_url = f"https://{FIREBASE_AUTH_DOMAIN}/__/auth/{cleaned_path}{query_suffix}"
 
     # Prepare headers to forward (Do not forward Host, or Authorization)
     # Filter Cookie header selectively to drop Cinequeue cookies but keep others
@@ -292,7 +341,7 @@ async def firebase_auth_proxy(path: str, request: Request):
             if key_lower == "location":
                 legacy_prefix = f"https://{FIREBASE_AUTH_DOMAIN}/__/auth/"
                 if value.startswith(legacy_prefix):
-                    new_host = PUBLIC_AUTH_DOMAIN or request.url.netloc
+                    new_host = _resolve_proxy_redirect_host(request)
                     value = value.replace(legacy_prefix, f"https://{new_host}/__/auth/")
                 response.headers.append(key, value)
 

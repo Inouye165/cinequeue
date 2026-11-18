@@ -1,3 +1,4 @@
+import re
 import secrets
 import logging
 from datetime import datetime, timezone, timedelta
@@ -27,6 +28,14 @@ from app.services.admin_auth import (
 from app.services.email_service import send_invite_email
 
 logger = logging.getLogger(__name__)
+_EMAIL_RE = re.compile(r"^[^/\s@]+@[^/\s@]+\.[^/\s@]+$")
+
+
+def _normalize_valid_email(raw_email: str) -> str:
+    normalized = (raw_email or "").strip().lower()
+    if not normalized or len(normalized) > 254 or "/" in normalized or ".." in normalized or not _EMAIL_RE.match(normalized):
+        raise HTTPException(status_code=400, detail="Invalid email address format")
+    return normalized
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -192,7 +201,7 @@ async def approve_request(
 ) -> dict[str, str]:
     validate_origin(request)
     validate_csrf(request, body.csrf_token)
-    email_normalized = body.email.strip().lower()
+    email_normalized = _normalize_valid_email(body.email)
 
     repo = request.app.state.watchlist_repo
     decided_at = repo.utc_now_iso()
@@ -213,7 +222,7 @@ async def deny_request(
 ) -> dict[str, str]:
     validate_origin(request)
     validate_csrf(request, body.csrf_token)
-    email_normalized = body.email.strip().lower()
+    email_normalized = _normalize_valid_email(body.email)
 
     repo = request.app.state.watchlist_repo
     decided_at = repo.utc_now_iso()
@@ -234,7 +243,7 @@ async def invite_user(
 ) -> dict[str, Any]:
     validate_origin(request)
     validate_csrf(request, body.csrf_token)
-    email_normalized = body.email.strip().lower()
+    email_normalized = _normalize_valid_email(body.email)
 
     repo = request.app.state.watchlist_repo
     decided_at = repo.utc_now_iso()
@@ -273,10 +282,10 @@ async def invite_user(
         sender_admin=current_admin,
     )
 
-    ip_address = request.client.host if request.client else "unknown"
+    ip_address = extract_client_ip(request)
     user_agent = request.headers.get("user-agent", "unknown")
     log_status = "success" if email_sent else "warning"
-    log_reason = "invite_email_dispatched" if email_sent else f"invite_preapproved_no_email ({email_detail})"
+    log_reason = "invite_email_dispatched" if email_sent else "invite_preapproved_no_email"
 
     repo.log_login_attempt(
         email=email_normalized,
@@ -287,7 +296,7 @@ async def invite_user(
         timestamp=decided_at,
     )
 
-    msg = email_detail if email_sent else f"User {email_normalized} pre-approved! ({email_detail})"
+    msg = email_detail if email_sent else f"User {email_normalized} pre-approved, but invitation email failed to send; check server logs."
 
     return {
         "status": "success",
