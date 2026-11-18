@@ -41,7 +41,7 @@ class PushSyncResponse(BaseModel):
 
 
 @router.post("/movies/push", response_model=PushSyncResponse)
-async def push_movie_sync(
+def push_movie_sync(
     request: Request,
     body: PushSyncRequest,
     current_user: Any = Depends(get_current_user),
@@ -193,7 +193,7 @@ async def push_movie_sync(
 
 
 @router.get("/movies/pull")
-async def pull_movie_sync(
+def pull_movie_sync(
     request: Request,
     since_cursor: Optional[str] = Query(None),
     protocolVersion: int = Query(1, ge=1, le=2),

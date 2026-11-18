@@ -116,7 +116,12 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("Failed to start Firebase Auth pre-warming task: %s", e)
 
+    app.state.http_client = httpx.AsyncClient(follow_redirects=False, timeout=(5.0, 15.0))
+
     yield
+    if getattr(app.state, "http_client", None):
+        await app.state.http_client.aclose()
+        logger.info("Shared HTTP client closed")
     if app.state.tmdb:
         await app.state.tmdb.close()
         logger.info("TMDB client closed")
@@ -289,8 +294,9 @@ async def firebase_auth_proxy(path: str, request: Request):
             headers_to_forward[key] = value
 
     try:
-        async with httpx.AsyncClient() as client:
-            upstream_resp = await client.request(
+        shared_client = getattr(request.app.state, "http_client", None)
+        if shared_client is not None:
+            upstream_resp = await shared_client.request(
                 method=request.method,
                 url=target_url,
                 headers=headers_to_forward,
@@ -298,6 +304,16 @@ async def firebase_auth_proxy(path: str, request: Request):
                 follow_redirects=False,
                 timeout=(5.0, 15.0)
             )
+        else:
+            async with httpx.AsyncClient() as client:
+                upstream_resp = await client.request(
+                    method=request.method,
+                    url=target_url,
+                    headers=headers_to_forward,
+                    content=body,
+                    follow_redirects=False,
+                    timeout=(5.0, 15.0)
+                )
 
         response = Response(
             content=upstream_resp.content,

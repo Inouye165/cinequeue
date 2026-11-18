@@ -273,7 +273,12 @@ async def get_current_user(
             try:
                 # Verify the session cookie, checking for revoked or disabled sessions.
                 # Local verification is used (check_revoked=False) to avoid network overhead.
-                decoded_claims = auth.verify_session_cookie(session_cookie, check_revoked=False, clock_skew_seconds=60)
+                decoded_claims = await asyncio.to_thread(
+                    auth.verify_session_cookie,
+                    session_cookie,
+                    check_revoked=False,
+                    clock_skew_seconds=60,
+                )
             except Exception as e:  # pylint: disable=broad-exception-caught
                 if "Token used too early" in str(e):
                     match = re.search(r"Token used too early,\s*(\d+)\s*<\s*(\d+)", str(e))
@@ -292,14 +297,18 @@ async def get_current_user(
                         drift_val, sleep_time
                     )
                     await asyncio.sleep(sleep_time)
-                    decoded_claims = auth.verify_session_cookie(session_cookie, check_revoked=False)
+                    decoded_claims = await asyncio.to_thread(
+                        auth.verify_session_cookie, session_cookie, check_revoked=False
+                    )
                 elif bearer_token:
                     logger.debug("Session cookie verification failed (%s); falling back to Bearer token", e)
                 else:
                     raise
 
         if decoded_claims is None and bearer_token:
-            decoded_claims = auth.verify_id_token(bearer_token, clock_skew_seconds=60)
+            decoded_claims = await asyncio.to_thread(
+                auth.verify_id_token, bearer_token, clock_skew_seconds=60
+            )
             if not decoded_claims.get("email_verified"):
                 logger.warning("Bearer token email is not verified")
                 raise HTTPException(status_code=401, detail="Email is not verified")
@@ -315,13 +324,14 @@ async def get_current_user(
         repo = getattr(request.app.state, "watchlist_repo", None) if hasattr(request.app, "state") else None
         
         if repo:
-            approval = repo.get_user_approval(email_normalized)
+            approval = await asyncio.to_thread(repo.get_user_approval, email_normalized)
             if approval:
                 status = approval.get("status")
                 if status != "approved":
                     ip_address = extract_client_ip(request)
                     user_agent = request.headers.get("user-agent", "unknown")
-                    repo.log_login_attempt(
+                    await asyncio.to_thread(
+                        repo.log_login_attempt,
                         email=email_normalized,
                         status="failed",
                         reason=f"session_auth_status_{status}",
@@ -336,7 +346,8 @@ async def get_current_user(
                 if email_normalized not in config.AUTH_ALLOWED_EMAILS:
                     ip_address = extract_client_ip(request)
                     user_agent = request.headers.get("user-agent", "unknown")
-                    repo.log_login_attempt(
+                    await asyncio.to_thread(
+                        repo.log_login_attempt,
                         email=email_normalized,
                         status="failed",
                         reason="session_auth_not_approved_or_allowlisted",

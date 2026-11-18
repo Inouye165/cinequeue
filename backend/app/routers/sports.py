@@ -26,7 +26,7 @@ class SportsPreferencesPayload(BaseModel):
 
 
 @router.get("/catalog")
-async def get_sports_catalog() -> dict[str, Any]:
+def get_sports_catalog() -> dict[str, Any]:
     return sports_service.get_catalog()
 
 
@@ -41,7 +41,7 @@ async def get_sports_schedule(
 
 
 @router.get("/preferences")
-async def get_sports_preferences(
+def get_sports_preferences(
     request: Request,
     current_user: CurrentUser = Depends(get_current_user),
 ) -> dict[str, Any]:
@@ -54,7 +54,7 @@ async def get_sports_preferences(
 
 
 @router.put("/preferences")
-async def save_sports_preferences(
+def save_sports_preferences(
     payload: SportsPreferencesPayload,
     request: Request,
     current_user: CurrentUser = Depends(get_current_user),

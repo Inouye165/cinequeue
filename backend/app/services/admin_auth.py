@@ -118,7 +118,9 @@ async def get_current_admin(
 
         try:
             from firebase_admin import auth as firebase_auth
-            decoded_token = firebase_auth.verify_id_token(token, clock_skew_seconds=60)
+            decoded_token = await asyncio.to_thread(
+                firebase_auth.verify_id_token, token, clock_skew_seconds=60
+            )
             
             tv_end = time.perf_counter()
             if perf:
@@ -139,7 +141,7 @@ async def get_current_admin(
                 perf["timings"]["admin_lookup_started"] = db_start
 
             repo = request.app.state.watchlist_repo
-            db_admin = repo.get_admin_user(email_normalized)
+            db_admin = await asyncio.to_thread(repo.get_admin_user, email_normalized)
             is_fallback = bool(ENABLE_FALLBACK_ADMIN_AUTH and ADMIN_USERNAME and email_normalized == ADMIN_USERNAME.strip().lower())
             is_admin = bool(db_admin or is_fallback)
 
@@ -188,11 +190,11 @@ async def get_current_admin(
 
     repo = request.app.state.watchlist_repo
     hashed_session_id = hash_session_token(session_cookie)
-    session = repo.get_admin_session(hashed_session_id)
+    session = await asyncio.to_thread(repo.get_admin_session, hashed_session_id)
     matched_session_key = hashed_session_id
     if not session:
         # Backwards compatibility for directly seeded legacy raw session IDs in tests
-        session = repo.get_admin_session(session_cookie)
+        session = await asyncio.to_thread(repo.get_admin_session, session_cookie)
         matched_session_key = session_cookie
 
     db_end = time.perf_counter()
@@ -217,7 +219,7 @@ async def get_current_admin(
         if datetime.now(timezone.utc) > expires_at:
             logger.warning("Admin session has expired")
             # Clean up expired session
-            repo.delete_admin_session(matched_session_key)
+            await asyncio.to_thread(repo.delete_admin_session, matched_session_key)
             raise HTTPException(status_code=401, detail="Admin session expired")
     except ValueError as e:
         logger.error("Failed to parse expires_at ISO string: %s", e)
@@ -226,9 +228,10 @@ async def get_current_admin(
     username = (session.get("username") or "").strip().lower()
     is_fallback = bool(ENABLE_FALLBACK_ADMIN_AUTH and ADMIN_USERNAME and username == ADMIN_USERNAME.strip().lower())
     # Check that this admin user still exists in the database or matches ENABLE_FALLBACK_ADMIN_AUTH
-    if not username or not (repo.get_admin_user(username) or is_fallback):
+    db_admin_user = await asyncio.to_thread(repo.get_admin_user, username) if username else None
+    if not username or not (db_admin_user or is_fallback):
         logger.warning("Admin session belongs to a deleted/revoked administrator: %s", username)
-        repo.delete_admin_session(matched_session_key)
+        await asyncio.to_thread(repo.delete_admin_session, matched_session_key)
         raise HTTPException(status_code=401, detail="Administrator privileges revoked")
 
     logger.info("Admin session validated for user: %s", username)

@@ -24,7 +24,7 @@ class RateMoviePayload(BaseModel):
 
 
 @router.get("")
-async def list_rated_movies(
+def list_rated_movies(
     request: Request,
     current_user: CurrentUser = Depends(get_current_user),
 ) -> list[dict[str, Any]]:
@@ -37,7 +37,7 @@ async def list_rated_movies(
 
 
 @router.post("")
-async def rate_movie(
+def rate_movie(
     payload: RateMoviePayload,
     request: Request,
     current_user: CurrentUser = Depends(get_current_user),
@@ -59,7 +59,7 @@ async def rate_movie(
 
 
 @router.delete("/{media_type}/{tmdb_id}")
-async def delete_rated_movie(
+def delete_rated_movie(
     media_type: Literal["movie", "tv"],
     tmdb_id: int = Path(..., gt=0),
     request: Request = ...,

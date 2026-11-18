@@ -53,7 +53,7 @@ async def get_agent_briefing(
 
 
 @router.get("/settings")
-async def get_agent_settings(
+def get_agent_settings(
     request: Request,
     current_user: CurrentUser = Depends(get_current_user),
 ) -> dict[str, Any]:
@@ -68,7 +68,7 @@ async def get_agent_settings(
 
 
 @router.post("/settings")
-async def save_agent_settings(
+def save_agent_settings(
     payload: AgentSettingsPayload,
     request: Request,
     current_user: CurrentUser = Depends(get_current_user),
@@ -78,7 +78,7 @@ async def save_agent_settings(
 
 
 @router.get("/chat")
-async def list_chat_messages(
+def list_chat_messages(
     request: Request,
     current_user: CurrentUser = Depends(get_current_user),
 ) -> list[dict[str, Any]]:
@@ -100,7 +100,7 @@ async def send_chat_message(
 
 
 @router.delete("/chat")
-async def clear_chat_history(
+def clear_chat_history(
     request: Request,
     current_user: CurrentUser = Depends(get_current_user),
 ) -> dict[str, str]:
@@ -110,7 +110,7 @@ async def clear_chat_history(
 
 
 @router.get("/logs")
-async def get_agent_logs(
+def get_agent_logs(
     request: Request,
     limit: int = Query(50, ge=1, le=500),
     current_user: CurrentUser = Depends(get_current_user),

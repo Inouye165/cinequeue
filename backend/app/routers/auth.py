@@ -220,9 +220,13 @@ async def create_session(
     decoded_token = None
     try:
         if is_session_restore:
-            decoded_token = firebase_auth.verify_id_token(body.id_token, check_revoked=True, clock_skew_seconds=60)
+            decoded_token = await asyncio.to_thread(
+                firebase_auth.verify_id_token, body.id_token, check_revoked=True, clock_skew_seconds=60
+            )
         else:
-            decoded_token = firebase_auth.verify_id_token(body.id_token, clock_skew_seconds=60)
+            decoded_token = await asyncio.to_thread(
+                firebase_auth.verify_id_token, body.id_token, clock_skew_seconds=60
+            )
     except Exception as e:
         if "Token used too early" in str(e):
             match = re.search(r"Token used too early,\s*(\d+)\s*<\s*(\d+)", str(e))
@@ -242,9 +246,13 @@ async def create_session(
             await asyncio.sleep(sleep_time)
             try:
                 if is_session_restore:
-                    decoded_token = firebase_auth.verify_id_token(body.id_token, check_revoked=True, clock_skew_seconds=60)
+                    decoded_token = await asyncio.to_thread(
+                        firebase_auth.verify_id_token, body.id_token, check_revoked=True, clock_skew_seconds=60
+                    )
                 else:
-                    decoded_token = firebase_auth.verify_id_token(body.id_token, clock_skew_seconds=60)
+                    decoded_token = await asyncio.to_thread(
+                        firebase_auth.verify_id_token, body.id_token, clock_skew_seconds=60
+                    )
             except Exception as retry_err:
                 log_failure("unknown", "clock_skew_verification_failed", 401)
                 raise HTTPException(status_code=401, detail="Invalid ID token or session generation failed")
@@ -291,14 +299,14 @@ async def create_session(
     # Stage 7: Email DB Authorization
     t_stage6 = time.perf_counter()
     try:
-        approval = repo.get_user_approval(email)
+        approval = await asyncio.to_thread(repo.get_user_approval, email)
         if not approval:
             if AUTH_MODE == "allowlist" and email in AUTH_ALLOWED_EMAILS:
-                repo.create_user_approval(email, "approved", timestamp)
-                repo.update_user_approval(email, "approved", timestamp, "system_allowlist")
+                await asyncio.to_thread(repo.create_user_approval, email, "approved", timestamp)
+                await asyncio.to_thread(repo.update_user_approval, email, "approved", timestamp, "system_allowlist")
                 approval = {"email": email, "status": "approved"}
             else:
-                repo.create_user_approval(email, "pending", timestamp)
+                await asyncio.to_thread(repo.create_user_approval, email, "pending", timestamp)
                 approval = {"email": email, "status": "pending"}
 
         status = approval.get("status")
@@ -324,7 +332,9 @@ async def create_session(
     # Stage 8: Firebase session-cookie creation
     try:
         expires_in = datetime.timedelta(days=SESSION_COOKIE_DAYS)
-        session_cookie = firebase_auth.create_session_cookie(body.id_token, expires_in=expires_in)
+        session_cookie = await asyncio.to_thread(
+            firebase_auth.create_session_cookie, body.id_token, expires_in=expires_in
+        )
     except Exception as e:
         logger.error("Session Creation Stage 8 failed: %s", e)
         log_failure(email, "session_cookie_creation_failed", 401)
@@ -347,7 +357,8 @@ async def create_session(
         
         # Log successful login
         try:
-            repo.log_login_attempt(
+            await asyncio.to_thread(
+                repo.log_login_attempt,
                 email=email,
                 status="success",
                 reason="google_login",
@@ -472,10 +483,12 @@ async def logout(body: LogoutRequest, request: Request, response: Response):
     if session_cookie and AUTH_ENABLED:
         try:
             from firebase_admin import auth as firebase_auth
-            decoded = firebase_auth.verify_session_cookie(session_cookie, check_revoked=False)
+            decoded = await asyncio.to_thread(
+                firebase_auth.verify_session_cookie, session_cookie, check_revoked=False
+            )
             uid = decoded.get("uid") or decoded.get("sub")
             if uid:
-                firebase_auth.revoke_refresh_tokens(uid)
+                await asyncio.to_thread(firebase_auth.revoke_refresh_tokens, uid)
         except Exception as e:
             logger.debug("Best-effort refresh token revocation during logout skipped: %s", e)
 
