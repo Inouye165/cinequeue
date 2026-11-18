@@ -3,7 +3,7 @@
 This document tracks all **22 verified findings** across Security, Infrastructure, Race Conditions & Concurrency, Modularity, and Regression Test Coverage, fixed incrementally one item at a time.
 
 **Branch:** `fix/comprehensive-app-audit`  
-**Status:** `12 / 22` completed
+**Status:** `13 / 22` completed
 
 ---
 
@@ -26,7 +26,7 @@ This document tracks all **22 verified findings** across Security, Infrastructur
 - [x] **Item 10 (`[INF-01]`)** — Replace Fragile `check_tmdb_key` Middleware with `movies.router` Dependency & Stop False-200 DB Error Swallowing
 - [x] **Item 11 (`[INF-02]`)** — Bounded Caches, Deep-Copied Cache Reads, Cloud Run Log-Leak Fix, Query Bounds, & Enrichment Semaphore
 - [x] **Item 12 (`[INF-03]`)** — Dockerfile `exec` PID-1 Signal Handling, Least-Privilege Permissions, `.dockerignore`/`.gitignore` Hardening & Dependency Split
-- [ ] **Item 13 (`[INF-04]`)** — Cloud Build CI/CD Parity, Vite Preview Port 5180 Enforcement, Dev PWA Guard & Startup Script Cleanup
+- [x] **Item 13 (`[INF-04]`)** — Cloud Build CI/CD Parity, Vite Preview Port 5180 Enforcement, Dev PWA Guard & Startup Script Cleanup
 
 ### Race Conditions & Concurrency
 - [ ] **Item 14 (`[RACE-01]`)** — SQLite `WAL` + `busy_timeout`, Atomic `claim_daily_greeting_generation`, & `BriefingService` Step 4 Concurrent Wait Fix

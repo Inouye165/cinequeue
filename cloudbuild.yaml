@@ -19,7 +19,7 @@ steps:
     args:
       - -c
       - |
-        python -m pip install --no-cache-dir -r backend/requirements.txt
+        python -m pip install --no-cache-dir -r backend/requirements-dev.txt
         PYTHONPATH=backend python -m pytest backend/tests/ -v
     dir: "."
 
@@ -42,7 +42,7 @@ steps:
   # Offline PWA browser regressions
   - name: node:22
     entrypoint: bash
-    args: ["-c", "npx playwright install --with-deps chromium && npm run test:e2e"]
+    args: ["-c", "npx playwright install --with-deps chromium && PLAYWRIGHT_SKIP_REBUILD=1 npm run test:e2e"]
     dir: "frontend"
 
   # D. Build the Docker image
