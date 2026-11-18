@@ -26,8 +26,27 @@ logger = logging.getLogger(__name__)
 COLLECTION = "watchlist"
 
 
+def _safe_firestore_id(raw_id: str, label: str = "document_id") -> str:
+    """Validate that a Firestore document ID cannot traverse collection paths."""
+    if (
+        not isinstance(raw_id, str)
+        or not raw_id
+        or len(raw_id) > 512
+        or raw_id in {".", ".."}
+        or "/" in raw_id
+        or "\\" in raw_id
+        or "\x00" in raw_id
+    ):
+        raise ValueError(f"Invalid Firestore {label}")
+    return raw_id
+
+
 def _doc_id(media_type: str, tmdb_id: int) -> str:
     """Build a deterministic document ID like 'movie_12345'."""
+    if media_type not in {"movie", "tv"}:
+        raise ValueError(f"Invalid media_type: {media_type}")
+    if not isinstance(tmdb_id, int) or isinstance(tmdb_id, bool) or tmdb_id <= 0:
+        raise ValueError(f"Invalid tmdb_id: {tmdb_id}")
     return f"{media_type}_{tmdb_id}"
 
 
@@ -45,12 +64,12 @@ class FirestoreWatchlistRepository(WatchlistRepository):
         logger.info("Firestore watchlist repository initialised (project=%s)", project)
 
     def _user_watchlist_col(self, user_id: str):
-        return self._db.collection("users").document(user_id).collection(COLLECTION)
+        return self._db.collection("users").document(_safe_firestore_id(user_id, "user_id")).collection(COLLECTION)
 
     # -- Repository interface --------------------------------------------------
 
     def sync_snapshot(self, user_id: str) -> list[dict[str, Any]]:
-        user = self._db.collection("users").document(user_id)
+        user = self._db.collection("users").document(_safe_firestore_id(user_id, "user_id"))
 
         @firestore.transactional
         def read(transaction):
@@ -952,7 +971,11 @@ class FirestoreWatchlistRepository(WatchlistRepository):
         return {"total": total, "logs": paginated, "limit": limit, "offset": offset}
 
     def get_decision_log(self, log_id: str) -> dict[str, Any] | None:
-        doc = self._db.collection("agent_decision_logs").document(log_id).get()
+        try:
+            safe_log_id = _safe_firestore_id(log_id, "log_id")
+        except ValueError:
+            return None
+        doc = self._db.collection("agent_decision_logs").document(safe_log_id).get()
         if doc.exists:
             return self._format_decision_log_doc(doc.to_dict())
         return None

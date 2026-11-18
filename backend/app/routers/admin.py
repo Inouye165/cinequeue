@@ -4,7 +4,7 @@ import logging
 from datetime import datetime, timezone, timedelta
 from typing import Any, Optional
 from fastapi import APIRouter, HTTPException, Query, Request, Response, Depends
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 import app.config as config
 from app.config import (
@@ -40,20 +40,20 @@ def _normalize_valid_email(raw_email: str) -> str:
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
 class AdminLoginRequest(BaseModel):
-    username: str
-    password: str
-    csrf_token: str
+    username: str = Field(..., max_length=254)
+    password: str = Field(..., max_length=1024)
+    csrf_token: str = Field(..., max_length=256)
 
 class InviteRequest(BaseModel):
-    email: str
-    csrf_token: str
+    email: str = Field(..., max_length=254)
+    csrf_token: str = Field(..., max_length=256)
 
 class ApprovalActionRequest(BaseModel):
-    email: str
-    csrf_token: str
+    email: str = Field(..., max_length=254)
+    csrf_token: str = Field(..., max_length=256)
 
 class AdminLogoutRequest(BaseModel):
-    csrf_token: str
+    csrf_token: str = Field(..., max_length=256)
 
 @router.post("/login")
 async def admin_login(
@@ -323,23 +323,23 @@ async def get_login_logs(
 
 class SaveDecisionConfigRequest(BaseModel):
     config: dict[str, Any]
-    change_note: str = "Updated decision configuration"
+    change_note: str = Field(default="Updated decision configuration", max_length=500)
 
 
 class SavePromptVersionRequest(BaseModel):
-    system_instruction_template: str
-    wording_instruction: str
-    change_note: str = "Updated wording instruction"
+    system_instruction_template: str = Field(..., max_length=16000)
+    wording_instruction: str = Field(..., max_length=4000)
+    change_note: str = Field(default="Updated wording instruction", max_length=500)
 
 
 class PreviewDecisionRequest(BaseModel):
-    user_id: str = "preview_user"
-    weather_condition: Optional[str] = "Rain"
-    significant_alert: Optional[str] = None
-    monitored_title_update: Optional[str] = "Spider-Man"
+    user_id: str = Field(default="preview_user", max_length=128)
+    weather_condition: Optional[str] = Field(default="Rain", max_length=128)
+    significant_alert: Optional[str] = Field(default=None, max_length=500)
+    monitored_title_update: Optional[str] = Field(default="Spider-Man", max_length=300)
     is_streaming_arrival: bool = True
-    trivia_fact: Optional[str] = None
-    major_news_title: Optional[str] = None
+    trivia_fact: Optional[str] = Field(default=None, max_length=1000)
+    major_news_title: Optional[str] = Field(default=None, max_length=300)
     user_interest_score: float = 0.85
     random_seed: Optional[int] = 42
 
@@ -348,10 +348,13 @@ def _validate_cookie_csrf(request: Request) -> None:
     """Validate Origin and X-CSRF-Token header when state-changing admin routes use cookie authentication."""
     headers = getattr(request, "headers", None) or {}
     cookies = getattr(request, "cookies", None) or {}
-    auth_header = headers.get("Authorization") or headers.get("authorization") or ""
-    if auth_header.startswith("Bearer "):
+    used_cookie = getattr(getattr(request, "state", None), "used_admin_cookie_auth", None)
+    if used_cookie is False:
         return
-    if cookies.get(ADMIN_SESSION_COOKIE_NAME):
+    auth_header = headers.get("Authorization") or headers.get("authorization") or ""
+    has_non_empty_bearer = auth_header.startswith("Bearer ") and bool(auth_header[7:].strip())
+    has_admin_cookie = bool(cookies.get(config.ADMIN_SESSION_COOKIE_NAME) or cookies.get(ADMIN_SESSION_COOKIE_NAME))
+    if used_cookie is True or (not has_non_empty_bearer and has_admin_cookie):
         validate_origin(request)
         csrf_header = headers.get("X-CSRF-Token") or headers.get("x-csrf-token") or ""
         validate_csrf(request, csrf_header)
@@ -389,6 +392,8 @@ async def get_agent_decision_log_detail(
     request: Request,
     current_admin: str = Depends(get_current_admin),
 ) -> dict[str, Any]:
+    if not log_id or len(log_id) > 256 or "/" in log_id or "\\" in log_id or ".." in log_id:
+        raise HTTPException(status_code=400, detail="Invalid decision log ID")
     repo = request.app.state.watchlist_repo
     log = repo.get_decision_log(log_id)
     if not log:

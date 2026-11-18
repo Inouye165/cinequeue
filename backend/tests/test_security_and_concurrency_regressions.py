@@ -258,3 +258,118 @@ async def test_briefing_step4_race_waits_for_winner_and_clears_context(tmp_path,
     assert result["briefing"] == "Winner generated briefing ready."
     assert result["cached"] is True
     assert get_current_run_context() is None
+
+
+def test_cookie_csrf_cannot_be_bypassed_by_invalid_bearer_header(client_with_auth):
+    csrf_token = _login_cookie_user(client_with_auth)
+    valid_origin = "https://cinequeue-7tvty3vmvq-uw.a.run.app"
+    claims = {"uid": "sec_user_1", "email": "inouye165@gmail.com", "email_verified": True}
+
+    with patch("firebase_admin.auth.verify_id_token", side_effect=ValueError("invalid bearer")), \
+         patch("firebase_admin.auth.verify_session_cookie", return_value=claims):
+        # Fallback to session cookie must still enforce X-CSRF-Token and Origin
+        bypass_attempt = client_with_auth.post(
+            "/api/watchlist",
+            json={"media_type": "movie", "tmdb_id": 550, "title": "Fight Club"},
+            headers={"Authorization": "Bearer unverified_tok", "Origin": valid_origin},
+        )
+        assert bypass_attempt.status_code == 401
+
+        bad_origin = client_with_auth.post(
+            "/api/watchlist",
+            json={"media_type": "movie", "tmdb_id": 550, "title": "Fight Club"},
+            headers={
+                "Authorization": "Bearer unverified_tok",
+                "Origin": "https://untrusted.example",
+                "X-CSRF-Token": csrf_token,
+            },
+        )
+        assert bad_origin.status_code == 401
+
+
+def test_production_config_fails_closed_when_auth_disabled_or_weak_admin_password():
+    import importlib
+    from conftest import reload_all_app_modules
+    import app.config
+
+    try:
+        with patch.dict("os.environ", {"ENVIRONMENT": "production", "AUTH_ENABLED": "false"}):
+            with pytest.raises(ValueError, match="AUTH_ENABLED must be True"):
+                importlib.reload(app.config)
+
+        with patch.dict(
+            "os.environ",
+            {
+                "ENVIRONMENT": "production",
+                "AUTH_ENABLED": "true",
+                "AUTH_ALLOWED_EMAILS": "inouye165@gmail.com",
+                "AUTH_ALLOWED_ORIGINS": "https://cinequeue.example",
+                "FIREBASE_API_KEY": "mock_key",
+                "ENABLE_FALLBACK_ADMIN_AUTH": "true",
+                "ADMIN_USERNAME": "admin",
+                "ADMIN_PASSWORD": "short",
+            },
+        ):
+            with pytest.raises(ValueError, match="at least 12 characters"):
+                importlib.reload(app.config)
+    finally:
+        reload_all_app_modules()
+
+
+def test_input_validation_path_traversal_actor_cap_and_no_store_headers(client):
+    from app.firestore_repo import _doc_id, _safe_firestore_id
+
+    # Firestore ID helpers reject path traversal and non-integer IDs
+    for bad_doc_id in ("", ".", "..", "a/b", "a\\b", "../admin"):
+        with pytest.raises(ValueError):
+            _safe_firestore_id(bad_doc_id)
+    for bad_tmdb in ("../x", True, 0, -10):
+        with pytest.raises(ValueError):
+            _doc_id("movie", bad_tmdb)  # type: ignore[arg-type]
+
+    # Watchlist rejects string/boolean/negative tmdb_id and oversized titles with 400
+    for bad_payload in (
+        {"media_type": "movie", "tmdb_id": "not_an_int", "title": "Test"},
+        {"media_type": "movie", "tmdb_id": True, "title": "Test"},
+        {"media_type": "movie", "tmdb_id": -1, "title": "Test"},
+        {"media_type": "movie", "tmdb_id": 100, "title": "x" * 501},
+    ):
+        res = client.post("/api/watchlist", json=bad_payload)
+        assert res.status_code == 400
+
+    # Sensitive endpoints emit Cache-Control: no-store
+    wl_res = client.get("/api/watchlist")
+    assert wl_res.status_code == 200
+    assert "no-store" in (wl_res.headers.get("cache-control") or "")
+
+    # Search actor filter fan-out is bounded to <= 10 actors
+    client.app.state.tmdb = AsyncMock()
+    too_many_actors = [("actor", f"Actor {i}") for i in range(11)]
+    search_res = client.get("/api/search", params=too_many_actors)
+    assert search_res.status_code == 400
+
+
+def test_session_endpoint_rate_limits_repeated_failures_and_bounds_admin_password(client_with_auth):
+    csrf_resp = client_with_auth.get("/api/auth/csrf")
+    csrf_token = csrf_resp.json()["csrf_token"]
+    valid_origin = "https://cinequeue-7tvty3vmvq-uw.a.run.app"
+
+    # Oversized admin password rejected by schema before PBKDF2 hashing
+    huge_pwd = client_with_auth.post(
+        "/api/admin/login",
+        json={"username": "admin", "password": "A" * 2000, "csrf_token": csrf_token},
+        headers={"Origin": valid_origin},
+    )
+    assert huge_pwd.status_code == 422
+
+    # Repeated invalid session attempts trigger 429 rate limit
+    with patch("firebase_admin.auth.verify_id_token", side_effect=ValueError("bad token")):
+        statuses = []
+        for _ in range(21):
+            r = client_with_auth.post(
+                "/api/auth/session",
+                json={"id_token": "bad.jwt.token", "csrf_token": csrf_token},
+                headers={"Origin": valid_origin},
+            )
+            statuses.append(r.status_code)
+        assert statuses[-1] == 429

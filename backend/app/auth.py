@@ -8,6 +8,8 @@ import hmac
 import re
 import time
 import asyncio
+import threading
+from collections import deque
 from typing import Optional
 from fastapi import HTTPException, Depends, Request
 from fastapi.security import APIKeyCookie
@@ -185,6 +187,51 @@ class CurrentUser(BaseModel):
 session_cookie_scheme = APIKeyCookie(name=SESSION_COOKIE_NAME, auto_error=False)
 
 
+USER_LOGIN_MAX_FAILURES = 20
+USER_LOGIN_WINDOW_SECONDS = 300.0
+_user_login_failures: dict[str, deque[float]] = {}
+_user_login_lock = threading.Lock()
+
+
+def reset_user_login_rate_limits() -> None:
+    """Reset the in-memory user session creation failure tracker."""
+    with _user_login_lock:
+        _user_login_failures.clear()
+
+
+def _prune_user_failures_locked(dq: deque[float], cutoff: float) -> None:
+    while dq and dq[0] < cutoff:
+        dq.popleft()
+
+
+def is_user_login_rate_limited(client_ip: str) -> bool:
+    now = time.monotonic()
+    cutoff = now - USER_LOGIN_WINDOW_SECONDS
+    with _user_login_lock:
+        dq = _user_login_failures.get(client_ip)
+        if not dq:
+            return False
+        _prune_user_failures_locked(dq, cutoff)
+        if not dq:
+            _user_login_failures.pop(client_ip, None)
+            return False
+        return len(dq) >= USER_LOGIN_MAX_FAILURES
+
+
+def record_user_login_failure(client_ip: str) -> None:
+    now = time.monotonic()
+    cutoff = now - USER_LOGIN_WINDOW_SECONDS
+    with _user_login_lock:
+        dq = _user_login_failures.setdefault(client_ip, deque())
+        _prune_user_failures_locked(dq, cutoff)
+        dq.append(now)
+
+
+def clear_user_login_failures(client_ip: str) -> None:
+    with _user_login_lock:
+        _user_login_failures.pop(client_ip, None)
+
+
 def generate_csrf_token() -> str:
     """Generate a cryptographically secure CSRF token."""
     return secrets.token_hex(32)
@@ -269,7 +316,26 @@ async def get_current_user(
 
     try:
         decoded_claims = None
-        if session_cookie:
+        used_cookie_auth = False
+
+        if bearer_token:
+            try:
+                decoded_claims = await asyncio.to_thread(
+                    auth.verify_id_token, bearer_token, clock_skew_seconds=60
+                )
+                if not decoded_claims.get("email_verified"):
+                    logger.warning("Bearer token email is not verified")
+                    raise HTTPException(status_code=401, detail="Email is not verified")
+            except HTTPException:
+                raise
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                if session_cookie:
+                    logger.debug("Bearer token verification failed (%s); falling back to session cookie", e)
+                else:
+                    raise
+
+        if decoded_claims is None and session_cookie:
+            used_cookie_auth = True
             try:
                 # Verify the session cookie, checking for revoked or disabled sessions.
                 # Local verification is used (check_revoked=False) to avoid network overhead.
@@ -282,14 +348,14 @@ async def get_current_user(
             except Exception as e:  # pylint: disable=broad-exception-caught
                 if "Token used too early" in str(e):
                     match = re.search(r"Token used too early,\s*(\d+)\s*<\s*(\d+)", str(e))
-                    sleep_time = 5.0
+                    sleep_time = 2.0
                     drift_val = "unknown"
                     if match:
                         local_time_val = int(match.group(1))
                         token_time_val = int(match.group(2))
                         drift_seconds = token_time_val - local_time_val
                         drift_val = str(drift_seconds)
-                        sleep_time = min(max(float(drift_seconds) + 1.0, 0.0), 10.0)
+                        sleep_time = min(max(float(drift_seconds) + 0.5, 0.0), 2.0)
 
                     logger.warning(
                         "Session cookie used too early due to clock skew (%s seconds drift). "
@@ -300,18 +366,16 @@ async def get_current_user(
                     decoded_claims = await asyncio.to_thread(
                         auth.verify_session_cookie, session_cookie, check_revoked=False
                     )
-                elif bearer_token:
-                    logger.debug("Session cookie verification failed (%s); falling back to Bearer token", e)
                 else:
                     raise
 
-        if decoded_claims is None and bearer_token:
-            decoded_claims = await asyncio.to_thread(
-                auth.verify_id_token, bearer_token, clock_skew_seconds=60
-            )
-            if not decoded_claims.get("email_verified"):
-                logger.warning("Bearer token email is not verified")
-                raise HTTPException(status_code=401, detail="Email is not verified")
+        if hasattr(request, "state"):
+            request.state.used_cookie_auth = used_cookie_auth
+
+        if used_cookie_auth and request.method not in {"GET", "HEAD", "OPTIONS"}:
+            validate_origin(request)
+            csrf_header = request.headers.get("X-CSRF-Token") or request.headers.get("x-csrf-token") or ""
+            validate_csrf(request, csrf_header)
 
         email = decoded_claims.get("email")
         if not email:

@@ -138,8 +138,18 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=AUTH_ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=[
+        "Authorization",
+        "Content-Type",
+        "X-CSRF-Token",
+        "X-Session-Restore",
+        "X-Admin-Role-Check",
+        "X-Sync-Owner",
+        "X-Auth-Trace-Id",
+        "X-Correlation-Id",
+        "X-Request-Id",
+    ],
     expose_headers=["X-Auth-Trace-Id", "X-Auth-Perf-Token-Verification-Ms", "X-Auth-Perf-Admin-Lookup-Ms"],
 )
 
@@ -181,7 +191,20 @@ async def add_security_headers(request, call_next):
     if ENVIRONMENT == "production":
         if not is_auth_proxy or "Strict-Transport-Security" not in response.headers:
             response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains; preload"
-        
+
+    req_path = request.url.path
+    is_sensitive_api = (
+        req_path.startswith("/api/auth/")
+        or req_path.startswith("/api/admin/")
+        or req_path.startswith("/api/watchlist")
+        or req_path.startswith("/api/ratings")
+        or req_path.startswith("/api/sync/")
+        or req_path.startswith("/api/agent/")
+        or req_path.startswith("/api/sports/preferences")
+    )
+    if is_sensitive_api and req_path != "/api/auth/config" and "Cache-Control" not in response.headers:
+        response.headers["Cache-Control"] = "no-store"
+
     return response
 
 
@@ -387,6 +410,8 @@ if FRONTEND_DIST.exists():
         if full_path == "api" or full_path.startswith("api/"):
             from fastapi.responses import JSONResponse
             return JSONResponse(status_code=404, content={"detail": "Not found"})
+        if any(part.startswith(".") for part in Path(full_path).parts):
+            return Response(status_code=404)
         file_path = (FRONTEND_DIST / full_path).resolve()
         dist_root = FRONTEND_DIST.resolve()
         if file_path.is_relative_to(dist_root) and file_path.is_file():

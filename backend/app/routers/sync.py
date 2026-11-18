@@ -17,13 +17,19 @@ router = APIRouter(
 
 
 class SyncOperationPayload(BaseModel):
-  operationId: str
-  entityType: str = "movie"
-  entityId: str
-  operationType: str  # "upsert", "delete", "patch"
+
+
+
+
   payload: Dict[str, Any]
-  createdAt: Optional[str] = None
-  baseRevision: Optional[StrictStr] = None
+
+  operationId: str = Field(..., max_length=256)
+  entityType: str = Field(default="movie", max_length=32)
+  entityId: str = Field(..., max_length=128)
+  operationType: str = Field(..., max_length=32)  # "upsert", "delete", "patch"
+  payload: Dict[str, Any]
+  createdAt: Optional[str] = Field(default=None, max_length=64)
+  baseRevision: Optional[StrictStr] = Field(default=None, max_length=256)
 
 
 class PushSyncRequest(BaseModel):
@@ -130,7 +136,16 @@ def push_movie_sync(
         status = p.get("status", "queue")
         is_owned = bool(p.get("isOwned") or p.get("is_owned") or False)
         rating = p.get("rating")
-        user_rating = int(rating) if rating and rating > 0 else 0
+        user_rating = int(rating) if rating and not isinstance(rating, bool) and int(rating) > 0 else 0
+        if user_rating < 0 or user_rating > 5:
+          raise ValueError("rating must be between 0 and 5")
+        if status not in {"queue", "following", "library", "watched"}:
+          raise ValueError("Invalid status")
+        owned_fmt = p.get("ownedFormat")
+        if owned_fmt is not None and owned_fmt not in {"electronic", "cloud", "hard_copy"}:
+          raise ValueError("Invalid ownedFormat")
+        if not isinstance(title, str) or len(title) > 500:
+          raise ValueError("Invalid title")
 
         try:
           repo.add_item(

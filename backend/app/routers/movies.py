@@ -26,10 +26,10 @@ router = APIRouter(
 @router.get("/search")
 async def search(
     request: Request,
-    q: str | None = Query(None, min_length=1),
+    q: str | None = Query(None, min_length=1, max_length=200),
     actor: list[str] | None = Query(None),
     actors: list[str] | None = Query(None),
-    director: str | None = Query(None),
+    director: str | None = Query(None, max_length=120),
     year: int | None = Query(None),
     year_before: int | None = Query(None),
     year_after: int | None = Query(None),
@@ -41,8 +41,12 @@ async def search(
     all_actors: list[str] = []
     if actor:
         all_actors.extend(actor)
+
+
     if actors:
         all_actors.extend(actors)
+    if len(all_actors) > 10 or any(len(a) > 120 for a in all_actors):
+        raise HTTPException(status_code=400, detail="At most 10 actor filters (<= 120 chars each) are supported")
 
     has_filters = bool(
         all_actors
@@ -163,7 +167,7 @@ async def media_details(
     current_user: Any = Depends(get_current_user),
 ) -> dict[str, Any]:
     logger.info(f"Media details request: {media_type}/{tmdb_id}")
-    if media_type not in {"movie", "tv"}:
+    if media_type not in {"movie", "tv"} or tmdb_id <= 0 or tmdb_id > 2_147_483_647:
         logger.warning(f"Invalid media_type: {media_type}")
         raise HTTPException(status_code=400, detail="media_type must be movie or tv")
     tmdb: TmdbClient = request.app.state.tmdb

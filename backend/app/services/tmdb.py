@@ -262,7 +262,7 @@ class TmdbClient:
 
             # 1. Fetch credits for each actor
             if actor_names:
-                for a_name in actor_names:
+                for a_name in actor_names[:10]:
                     a_credits = await self.get_person_credits(a_name)
                     if not a_credits:
                         return []  # Actor specified but has no matching credits
@@ -810,7 +810,7 @@ async def fetch_news(title: str, limit: int = 6) -> list[dict[str, Any]]:
             articles.append(
                 {
                     "title": entry.get("title", ""),
-                    "url": entry.get("link", ""),
+                    "url": entry.get("link", "") if str(entry.get("link", "")).strip().lower().startswith(("http://", "https://")) else "",
                     "source": entry.get("source", {}).get("title", ""),
                     "published_at": entry.get("published", ""),
                 }

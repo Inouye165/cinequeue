@@ -871,8 +871,9 @@ class SqliteWatchlistRepository(WatchlistRepository):
         query = "SELECT * FROM login_logs WHERE 1=1"
         params: list[Any] = []
         if email:
-            query += " AND lower(email) LIKE ?"
-            params.append(f"%{email.strip().lower()}%")
+            escaped_email = email.strip().lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            query += " AND lower(email) LIKE ? ESCAPE '\\'"
+            params.append(f"%{escaped_email}%")
         if status:
             query += " AND status = ?"
             params.append(status.strip().lower())
@@ -1534,8 +1535,11 @@ class SqliteWatchlistRepository(WatchlistRepository):
             params.append(end_date)
 
         if candidate_type:
-            conditions.append("(selected_candidates_json LIKE ? OR optional_candidates_json LIKE ? OR required_candidates_json LIKE ?)")
-            pat = f"%{candidate_type}%"
+            escaped_ct = candidate_type.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            conditions.append(
+                "(selected_candidates_json LIKE ? ESCAPE '\\' OR optional_candidates_json LIKE ? ESCAPE '\\' OR required_candidates_json LIKE ? ESCAPE '\\')"
+            )
+            pat = f"%{escaped_ct}%"
             params.extend([pat, pat, pat])
 
         where_clause = " WHERE " + " AND ".join(conditions) if conditions else ""

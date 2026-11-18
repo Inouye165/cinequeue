@@ -11,6 +11,7 @@ from typing import Optional
 from fastapi import Depends, HTTPException, Request
 from fastapi.security import APIKeyCookie
 
+import app.config as config
 from app.config import ADMIN_SESSION_COOKIE_NAME, ADMIN_USERNAME, ENABLE_FALLBACK_ADMIN_AUTH
 
 logger = logging.getLogger(__name__)
@@ -163,12 +164,14 @@ async def get_current_admin(
                     logger.debug("User %s is a standard user (not admin) during passive role check", email_normalized)
                     return ""
                 cookies = getattr(request, "cookies", None) or {}
-                has_admin_cookie = bool(cookies.get(ADMIN_SESSION_COOKIE_NAME) or session_cookie)
+                has_admin_cookie = bool(cookies.get(config.ADMIN_SESSION_COOKIE_NAME) or cookies.get(ADMIN_SESSION_COOKIE_NAME) or session_cookie)
                 if not has_admin_cookie:
                     logger.warning("User %s is not an authorized administrator", email_normalized)
                     raise HTTPException(status_code=403, detail="Not authorized as an administrator")
                 logger.info("Bearer user %s is not admin; falling through to admin session cookie check", email_normalized)
             else:
+                if hasattr(request, "state"):
+                    request.state.used_admin_cookie_auth = False
                 return email_normalized
         except HTTPException:
             raise
@@ -178,7 +181,7 @@ async def get_current_admin(
 
     # 2. Traditional Cookie fallback path
     cookies = getattr(request, "cookies", None) or {}
-    session_cookie = cookies.get(ADMIN_SESSION_COOKIE_NAME) or session_cookie
+    session_cookie = cookies.get(config.ADMIN_SESSION_COOKIE_NAME) or cookies.get(ADMIN_SESSION_COOKIE_NAME) or session_cookie
     if not session_cookie:
         logger.warning("Admin session cookie is missing")
         raise HTTPException(status_code=401, detail="Admin session required")
@@ -234,5 +237,7 @@ async def get_current_admin(
         await asyncio.to_thread(repo.delete_admin_session, matched_session_key)
         raise HTTPException(status_code=401, detail="Administrator privileges revoked")
 
+    if hasattr(request, "state"):
+        request.state.used_admin_cookie_auth = True
     logger.info("Admin session validated for user: %s", username)
     return username

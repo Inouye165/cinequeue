@@ -16,10 +16,10 @@ router = APIRouter(
 
 class RateMoviePayload(BaseModel):
     media_type: Literal["movie", "tv"] = "movie"
-    tmdb_id: int = Field(gt=0)
-    title: str
-    poster_path: str | None = None
-    release_date: str | None = None
+    tmdb_id: int = Field(gt=0, le=2_147_483_647)
+    title: str = Field(..., min_length=1, max_length=500)
+    poster_path: str | None = Field(default=None, max_length=500)
+    release_date: str | None = Field(default=None, max_length=32)
     rating: int = Field(ge=1, le=5)
 
 

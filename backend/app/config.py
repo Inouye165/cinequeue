@@ -94,7 +94,7 @@ ENABLE_FALLBACK_ADMIN_AUTH = os.getenv("ENABLE_FALLBACK_ADMIN_AUTH", "false").st
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "").strip()
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "").strip()
 
-ADMIN_SESSION_COOKIE_NAME = "cinequeue_admin_session"
+ADMIN_SESSION_COOKIE_NAME = "__Host-cinequeue_admin_session" if SESSION_COOKIE_SECURE else "cinequeue_admin_session"
 
 # SMTP & Email Configurations
 SMTP_HOST = os.getenv("SMTP_HOST", "").strip()
@@ -113,6 +113,19 @@ if ENABLE_FALLBACK_ADMIN_AUTH:
     if not ADMIN_PASSWORD:
         raise ValueError("ADMIN_PASSWORD must be configured non-empty when ENABLE_FALLBACK_ADMIN_AUTH is True")
 # Fail-closed validation for production
+_DISALLOWED_ADMIN_PASSWORDS = {
+    "change_me_immediately",
+    "changeme",
+    "admin",
+    "password",
+    "your_admin_password",
+}
+if ENABLE_FALLBACK_ADMIN_AUTH and ENVIRONMENT == "production":
+    if len(ADMIN_PASSWORD) < 12 or ADMIN_PASSWORD.strip().lower() in _DISALLOWED_ADMIN_PASSWORDS:
+        raise ValueError("ADMIN_PASSWORD must be at least 12 characters and non-placeholder in production when ENABLE_FALLBACK_ADMIN_AUTH is True")
+
+if ENVIRONMENT == "production" and not AUTH_ENABLED:
+    raise ValueError("AUTH_ENABLED must be True when ENVIRONMENT is 'production'")
 if AUTH_ENABLED:
     if not FIREBASE_PROJECT_ID:
         raise ValueError("FIREBASE_PROJECT_ID must be set when AUTH_ENABLED is True")
