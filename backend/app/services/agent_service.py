@@ -183,11 +183,15 @@ class AgentResult:
 
 def sanitize_log_data(data: Any) -> Any:
     """Sanitize log data to prevent secrets, tokens, emails, or cookies from leaking."""
+    from app.decision_models import is_secret_field_name, redact_secret_strings
+
+    if isinstance(data, str):
+        return redact_secret_strings(data)
     if isinstance(data, dict):
         sanitized = {}
         for k, v in data.items():
-            lk = k.lower()
-            if any(secret_key in lk for secret_key in ["api_key", "token", "cookie", "email", "authorization", "password", "secret"]):
+            lk = str(k).lower()
+            if is_secret_field_name(lk, include_email=True):
                 sanitized[k] = "[REDACTED]"
             elif lk == "message" and not AGENT_DEBUG:
                 sanitized[k] = "[REDACTED_TEXT]"
@@ -1771,10 +1775,11 @@ class AiAgentService:
                     except Exception as log_err:
                         logger.warning(f"Error logging gemini_http_attempt_started: {log_err}")
 
-                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
+                headers = {"x-goog-api-key": GEMINI_API_KEY}
                 start_time = time.perf_counter()
                 try:
-                    resp = await client.post(url, json=payload)
+                    resp = await client.post(url, json=payload, headers=headers)
                     duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
                     end_time_iso = datetime.now(timezone.utc).isoformat()
                     last_http_status = resp.status_code

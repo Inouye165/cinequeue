@@ -3,7 +3,7 @@
 This document tracks all **22 verified findings** across Security, Infrastructure, Race Conditions & Concurrency, Modularity, and Regression Test Coverage, fixed incrementally one item at a time.
 
 **Branch:** `fix/comprehensive-app-audit`  
-**Status:** `6 / 22` completed
+**Status:** `7 / 22` completed
 
 ---
 
@@ -18,7 +18,7 @@ This document tracks all **22 verified findings** across Security, Infrastructur
 - [x] **Item 4 (`[SEC-03]`)** — Production CORS/Origin Hardening, Fail-Closed Config Checks, & Root-Anchored `DATA_DIR`
 - [x] **Item 5 (`[SEC-04]`)** — Bearer Token `email_verified` Enforcement, Approval Fail-Closed, Admin Dual-Auth Fallback, & `X-Session-Restore` Hardening
 - [x] **Item 6 (`[SEC-05]`)** — Admin Auth Hardening: Timing-Safe Login, Brute-Force Rate Limiter, Hashed Session IDs, Startup Seeding Guard, & Proxy Cookie Stripping
-- [ ] **Item 7 (`[SEC-06]`)** — Fix `scrub_secrets` Telemetry Corruption & Eliminate `TMDB_API_KEY` / `GEMINI_API_KEY` / `auth_perf` Log Leaks
+- [x] **Item 7 (`[SEC-06]`)** — Fix `scrub_secrets` Telemetry Corruption & Eliminate `TMDB_API_KEY` / `GEMINI_API_KEY` / `auth_perf` Log Leaks
 - [ ] **Item 8 (`[SEC-07]`)** — Proxy Streaming/Traversal Hardening, CSP Clickjacking Headers, Verified SMTP TLS, Strict Input Schemas, & Frontend XSS/CSP Fixes
 - [ ] **Item 9 (`[SEC-08]`)** — Frontend Logout & Shared-Device Privacy Hygiene (`clearLocalData`, Scoped Caches, & Debug Log Cleanup)
 

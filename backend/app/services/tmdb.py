@@ -18,6 +18,19 @@ logger = logging.getLogger(__name__)
 
 import time
 
+
+class TmdbUpstreamError(Exception):
+    """Sanitized TMDB upstream HTTP or network failure without API keys in URLs."""
+
+    def __init__(self, status_code: int, detail: str) -> None:
+        super().__init__(detail)
+        self.status_code = status_code
+        self.detail = detail
+
+
+def _sanitize_tmdb_error(message: str) -> str:
+    return re.sub(r'([?&])api_key=[^&\s"\']+', r'\1api_key=[REDACTED]', message)
+
 class TmdbClient:
     def __init__(self) -> None:
         api_key = os.getenv("TMDB_API_KEY") or TMDB_API_KEY
@@ -54,9 +67,18 @@ class TmdbClient:
                 ctx.record_external_attempt("tmdb_watch_providers")
             else:
                 ctx.record_external_attempt("tmdb_details")
-        response = await self._client.get(path, params=params)
-        response.raise_for_status()
-        return response.json()
+        try:
+            response = await self._client.get(path, params=params)
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as exc:
+            sanitized = _sanitize_tmdb_error(str(exc))
+            logger.warning("TMDB HTTP %s error on %s: %s", exc.response.status_code, path, sanitized)
+            raise TmdbUpstreamError(exc.response.status_code, sanitized) from None
+        except httpx.RequestError as exc:
+            sanitized = _sanitize_tmdb_error(str(exc))
+            logger.warning("TMDB request error on %s: %s", path, sanitized)
+            raise TmdbUpstreamError(502, sanitized) from None
 
     async def get_person_credits(self, name: str) -> list[dict[str, Any]]:
         person = await self.search_person(name)

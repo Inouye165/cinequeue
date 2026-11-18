@@ -263,23 +263,70 @@ DEFAULT_PROMPT_VERSION = PromptVersion()
 
 
 SECRET_PATTERNS = [
-    (r'\?key=[^&\s"\']+', '?key=[REDACTED_API_KEY]'),
+    (r'([?&])(api_key|key)=[^&\s"\']+', r'\1\2=[REDACTED_API_KEY]'),
+    (r'x-goog-api-key["\']?\s*[:=]\s*["\']?[A-Za-z0-9_\-]+', 'x-goog-api-key=[REDACTED_API_KEY]'),
     (r'AIzaSy[a-zA-Z0-9_\-]{33}', '[REDACTED_GEMINI_KEY]'),
+    (r'([a-zA-Z0-9_-]{20,}:APA91b[a-zA-Z0-9_-]+)', '[REDACTED_TOKEN]'),
     (r'Bearer\s+[a-zA-Z0-9_\-\.]+', 'Bearer [REDACTED_TOKEN]'),
     (r'__Host-[a-zA-Z0-9_\-]+=[^;\s]+', '__Host-[REDACTED_COOKIE]'),
 ]
+
+_EXACT_SECRET_KEYS = {
+    "api_key",
+    "apikey",
+    "key",
+    "token",
+    "id_token",
+    "csrf_token",
+    "access_token",
+    "refresh_token",
+    "secret",
+    "password",
+    "passwd",
+    "cookie",
+    "set-cookie",
+    "set_cookie",
+    "session_cookie",
+    "authorization",
+    "x-goog-api-key",
+}
+_SECRET_KEY_SUFFIXES = (
+    "_api_key",
+    "_apikey",
+    "_secret",
+    "_password",
+    "_passwd",
+    "_cookie",
+    "_token",
+)
+
+
+def is_secret_field_name(key: str, *, include_email: bool = False) -> bool:
+    """Return True if a dict key denotes a credential, token, cookie, or (optionally) email."""
+    lk = (key or "").strip().lower()
+    if include_email and (lk == "email" or lk.endswith("_email")):
+        return True
+    if lk in _EXACT_SECRET_KEYS:
+        return True
+    return lk.endswith(_SECRET_KEY_SUFFIXES)
+
+
+def redact_secret_strings(text: str) -> str:
+    """Apply SECRET_PATTERNS to redact embedded credentials/URLs from log strings."""
+    result = text
+    for pattern, repl in SECRET_PATTERNS:
+        result = re.sub(pattern, repl, result)
+    return result
 
 
 def scrub_secrets(val: Any) -> Any:
     """Recursively redact secrets in dicts, lists, or strings."""
     if isinstance(val, str):
-        val = re.sub(r'(AIzaSy[A-Za-z0-9_-]{33})', '[REDACTED_API_KEY]', val)
-        val = re.sub(r'([a-zA-Z0-9_-]{20,}:APA91b[a-zA-Z0-9_-]+)', '[REDACTED_TOKEN]', val)
-        return val
+        return redact_secret_strings(val)
     elif isinstance(val, dict):
         new_d = {}
         for k, v in val.items():
-            if any(secret_key in k.lower() for secret_key in ["key", "token", "password", "secret"]):
+            if is_secret_field_name(str(k), include_email=False):
                 new_d[k] = "[REDACTED]"
             else:
                 new_d[k] = scrub_secrets(v)
