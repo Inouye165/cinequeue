@@ -43,30 +43,37 @@ export const BatchRateModal: React.FC<BatchRateModalProps> = ({
       clearTimeout(searchTimeoutRef.current);
     }
 
-    if (!searchQuery.trim()) {
+    if (!isOpen || !searchQuery.trim()) {
       setSearchResults([]);
       setIsSearching(false);
       return;
     }
 
+    const controller = new AbortController();
     setIsSearching(true);
     searchTimeoutRef.current = setTimeout(async () => {
       try {
-        const results = await api.search(searchQuery.trim());
-        setSearchResults(results || []);
+        const results = await api.search(searchQuery.trim(), { signal: controller.signal });
+        if (!controller.signal.aborted) {
+          setSearchResults(results || []);
+        }
       } catch (err) {
+        if (controller.signal.aborted || (err instanceof Error && err.name === "AbortError")) return;
         console.error("Failed to search movies for rating batch:", err);
       } finally {
-        setIsSearching(false);
+        if (!controller.signal.aborted) {
+          setIsSearching(false);
+        }
       }
     }, 300);
 
     return () => {
+      controller.abort();
       if (searchTimeoutRef.current) {
         clearTimeout(searchTimeoutRef.current);
       }
     };
-  }, [searchQuery]);
+  }, [searchQuery, isOpen]);
 
   // Reset state when modal opens/closes
   useEffect(() => {

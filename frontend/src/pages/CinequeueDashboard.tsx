@@ -71,9 +71,12 @@ export function CinequeueDashboard({ onSignIn }: { onSignIn?: () => void }) {
   const [sportsLoading, setSportsLoading] = useState(false);
   const enrichedShows = useRef(new Set<number>());
   const detailRequestIdRef = useRef(0);
+  const detailAbortRef = useRef<AbortController | null>(null);
 
   const closeDetails = useCallback(() => {
     detailRequestIdRef.current++;
+    detailAbortRef.current?.abort();
+    detailAbortRef.current = null;
     setSelected(null);
   }, []);
   const queueKeys = useMemo(
@@ -126,14 +129,20 @@ export function CinequeueDashboard({ onSignIn }: { onSignIn?: () => void }) {
     void loadSportsData(false);
   }, [loadSportsData]);
 
-  const handleSaveSportsPrefs = useCallback(async (patch: Partial<SportsPreferences>) => {
-    const saved = await sportsService.savePreferences(ownerId, patch, Boolean(user));
-    setSportsPrefs(saved);
-    if (patch.tracked_teams && user) {
-      const sched = await sportsService.getSchedule(undefined, false, true);
-      setSportsGames(sched);
-    }
-  }, [ownerId, user]);
+  const handleSaveSportsPrefs = useCallback(
+    async (
+      patch: Partial<SportsPreferences> | ((current: SportsPreferences) => Partial<SportsPreferences>)
+    ) => {
+      const prevTracked = sportsPrefs.tracked_teams.join(",");
+      const saved = await sportsService.savePreferences(ownerId, patch, Boolean(user));
+      setSportsPrefs(saved);
+      if (user && saved.tracked_teams.join(",") !== prevTracked) {
+        const sched = await sportsService.getSchedule(undefined, false, true);
+        setSportsGames(sched);
+      }
+    },
+    [ownerId, user, sportsPrefs.tracked_teams]
+  );
 
   useEffect(() => {
     syncService.setWorkspaceOwner(ownerId);
@@ -245,6 +254,12 @@ export function CinequeueDashboard({ onSignIn }: { onSignIn?: () => void }) {
     if (!isRemoteTab) return;
 
     let active = true;
+    const controller = new AbortController();
+    let searchTimer: number | undefined;
+    const isAbort = (err: unknown) =>
+      controller.signal.aborted ||
+      Boolean(err && typeof err === "object" && (err as { name?: string }).name === "AbortError");
+
     const fetchRemoteData = async () => {
       if (isDiscoveryTab) {
         const cached = await movieService.getCachedDiscoveryFeed<MediaItem>(tab);
@@ -266,56 +281,74 @@ export function CinequeueDashboard({ onSignIn }: { onSignIn?: () => void }) {
         return;
       }
 
+      const hasSearchContent =
+        tab !== "search" ||
+        Boolean(
+          query.trim() ||
+          searchFilters.actors.length > 0 ||
+          searchFilters.director.trim() ||
+          searchFilters.yearType !== "any" ||
+          searchFilters.mediaType !== "all"
+        );
+      if (!hasSearchContent) {
+        setRemoteItems([]);
+        setError(null);
+        setLoading(false);
+        return;
+      }
+
       setLoading(true);
       setError(null);
       try {
         let data: MediaItem[] = [];
         if (tab === "upcoming") {
-          data = await api.upcoming();
+          data = await api.upcoming({ signal: controller.signal });
         } else if (tab === "theatres") {
-          data = await api.nowPlaying();
+          data = await api.nowPlaying({ signal: controller.signal });
         } else if (tab === "trending") {
-          data = await api.trending();
+          data = await api.trending({ signal: controller.signal });
         } else if (tab === "on-air") {
-          data = await api.onAir();
+          data = await api.onAir({ signal: controller.signal });
         } else if (tab === "search") {
-          const hasContent = Boolean(
-            query.trim() ||
-            searchFilters.actors.length > 0 ||
-            searchFilters.director.trim() ||
-            searchFilters.yearType !== "any" ||
-            searchFilters.mediaType !== "all"
-          );
-          if (hasContent) {
-            data = await api.search({
+          data = await api.search(
+            {
               ...searchFilters,
               query: query.trim(),
-            });
-          } else {
-            data = [];
-          }
+            },
+            { signal: controller.signal }
+          );
         }
-        if (active) {
+        if (active && !controller.signal.aborted) {
           setRemoteItems(data);
           if (isDiscoveryTab && data.length > 0) {
             void movieService.cacheDiscoveryFeed(tab, data);
           }
         }
       } catch (err) {
-        if (active) {
+        if (!isAbort(err) && active) {
           setError(err instanceof Error ? err.message : "Something went wrong");
         }
       } finally {
-        if (active) {
+        if (active && !controller.signal.aborted) {
           setLoading(false);
         }
       }
     };
 
-    void fetchRemoteData();
+    if (tab === "search") {
+      searchTimer = window.setTimeout(() => {
+        void fetchRemoteData();
+      }, 280);
+    } else {
+      void fetchRemoteData();
+    }
 
     return () => {
       active = false;
+      controller.abort();
+      if (searchTimer !== undefined) {
+        window.clearTimeout(searchTimer);
+      }
     };
   }, [tab, user, query, searchFilters]);
 
@@ -336,21 +369,26 @@ export function CinequeueDashboard({ onSignIn }: { onSignIn?: () => void }) {
   const openDetails = async (item: MediaItem) => {
     setError(null);
     const reqId = ++detailRequestIdRef.current;
+    detailAbortRef.current?.abort();
+    const controller = new AbortController();
+    detailAbortRef.current = controller;
     const tmdbId = "tmdb_id" in item ? (item as WatchlistItem).tmdb_id : item.id;
     try {
       const cached = await movieService.getCachedDetails(ownerId, item.media_type, tmdbId);
-      if (detailRequestIdRef.current !== reqId) return;
+      if (detailRequestIdRef.current !== reqId || controller.signal.aborted) return;
       if (cached) setSelected(cached);
       if (!user || !navigator.onLine) {
         if (!cached) setError("Details have not been saved on this device.");
         return;
       }
-      const details = await api.details(item.media_type, tmdbId);
+      const details = await api.details(item.media_type, tmdbId, { signal: controller.signal });
+      if (detailRequestIdRef.current !== reqId || controller.signal.aborted) return;
       await movieService.cacheDetails(ownerId, details);
-      if (detailRequestIdRef.current === reqId) {
+      if (detailRequestIdRef.current === reqId && !controller.signal.aborted) {
         setSelected(details);
       }
     } catch (err) {
+      if (controller.signal.aborted || (err instanceof Error && err.name === "AbortError")) return;
       if (detailRequestIdRef.current === reqId) {
         setError(`Could not refresh details; saved details remain available. ${err instanceof Error ? err.message : ""}`);
       }
@@ -643,15 +681,17 @@ export function CinequeueDashboard({ onSignIn }: { onSignIn?: () => void }) {
 
   const handleToggleStreamingService = useCallback(
     async (serviceId: string) => {
-      const next = new Set(sportsPrefs.streaming_services);
-      if (next.has(serviceId)) next.delete(serviceId);
-      else next.add(serviceId);
-      await handleSaveSportsPrefs({
-        streaming_services: Array.from(next),
-        setup_completed: true,
+      await handleSaveSportsPrefs((curr) => {
+        const next = new Set(curr.streaming_services);
+        if (next.has(serviceId)) next.delete(serviceId);
+        else next.add(serviceId);
+        return {
+          streaming_services: Array.from(next),
+          setup_completed: true,
+        };
       });
     },
-    [sportsPrefs.streaming_services, handleSaveSportsPrefs]
+    [handleSaveSportsPrefs]
   );
 
   const queueSportsGames = useMemo(() => {
@@ -962,12 +1002,14 @@ export function CinequeueDashboard({ onSignIn }: { onSignIn?: () => void }) {
                 onOpenSetupModal={() => setIsSportsSetupModalOpen(true)}
                 onToggleService={(serviceId) => void handleToggleStreamingService(serviceId)}
                 onToggleTrackTeam={(teamId) => {
-                  const next = new Set(sportsPrefs.tracked_teams);
-                  if (next.has(teamId)) next.delete(teamId);
-                  else next.add(teamId);
-                  void handleSaveSportsPrefs({
-                    tracked_teams: Array.from(next),
-                    setup_completed: true,
+                  void handleSaveSportsPrefs((curr) => {
+                    const next = new Set(curr.tracked_teams);
+                    if (next.has(teamId)) next.delete(teamId);
+                    else next.add(teamId);
+                    return {
+                      tracked_teams: Array.from(next),
+                      setup_completed: true,
+                    };
                   });
                 }}
               />

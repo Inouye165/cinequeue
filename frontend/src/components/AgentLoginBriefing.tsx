@@ -85,6 +85,7 @@ export function AgentLoginBriefing({ ownerId, onOpenChat }: AgentLoginBriefingPr
 
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hasRequestedBriefingRef = useRef(false);
+  const briefingAbortRef = useRef<AbortController | null>(null);
 
   const speakText = (text: string) => {
     if (!("speechSynthesis" in window)) return;
@@ -104,8 +105,15 @@ export function AgentLoginBriefing({ ownerId, onOpenChat }: AgentLoginBriefingPr
     window.speechSynthesis.speak(utterance);
   };
 
-  const loadBriefing = async (forceRefresh: boolean = false) => {
+  const loadBriefing = async (forceRefresh: boolean = false, signal?: AbortSignal) => {
     if (loading && forceRefresh) return;
+    briefingAbortRef.current?.abort();
+    const controller = new AbortController();
+    briefingAbortRef.current = controller;
+    if (signal) {
+      if (signal.aborted) controller.abort();
+      else signal.addEventListener("abort", () => controller.abort(), { once: true });
+    }
     setLoading(true);
     try {
       const sessionKey = `cinequeue_briefing_session_id:${storageScope}`;
@@ -115,24 +123,31 @@ export function AgentLoginBriefing({ ownerId, onOpenChat }: AgentLoginBriefingPr
         sessionStorage.setItem(sessionKey, sessionId);
       }
 
-      const data = await api.agentBriefing(sessionId, forceRefresh);
-      if (data && data.enabled && data.briefing) {
+      const data = await api.agentBriefing(sessionId, forceRefresh, { signal: controller.signal });
+      if (!controller.signal.aborted && data && data.enabled && data.briefing) {
         setBriefing(data);
       }
     } catch (err) {
+      if (controller.signal.aborted || (err instanceof Error && err.name === "AbortError")) return;
       console.error("Failed to load agent briefing:", err);
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted) {
+        setLoading(false);
+      }
     }
   };
 
   useEffect(() => {
+    const controller = new AbortController();
     if (!hasRequestedBriefingRef.current) {
       hasRequestedBriefingRef.current = true;
-      void loadBriefing(false);
+      void loadBriefing(false, controller.signal);
     }
 
     return () => {
+      controller.abort();
+      briefingAbortRef.current?.abort();
+      hasRequestedBriefingRef.current = false;
       if (timerRef.current) clearTimeout(timerRef.current);
       if ("speechSynthesis" in window) {
         window.speechSynthesis.cancel();

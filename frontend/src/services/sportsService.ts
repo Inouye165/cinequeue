@@ -174,6 +174,9 @@ export function filterGamesForActiveWindow(games: SportsGame[], now: Date = new 
     .map(enrichGameStreamingServices);
 }
 
+const saveQueues = new Map<string, Promise<SportsPreferences>>();
+const latestSaveGen = new Map<string, number>();
+
 export const sportsService = {
   getInstantPreferences(ownerId: string): SportsPreferences {
     try {
@@ -228,56 +231,76 @@ export const sportsService = {
     return prefs;
   },
 
-  async savePreferences(
+  savePreferences(
     ownerId: string,
-    patch: Partial<SportsPreferences>,
+    patch: Partial<SportsPreferences> | ((current: SportsPreferences) => Partial<SportsPreferences>),
     isCloudAuthenticated = false
   ): Promise<SportsPreferences> {
-    const current = await this.getLocalPreferences(ownerId);
-    const nowIso = new Date().toISOString();
-    const updated: SportsPreferences = {
-      streaming_services: patch.streaming_services ?? current.streaming_services,
-      tracked_teams: patch.tracked_teams ?? current.tracked_teams,
-      show_in_queue: patch.show_in_queue !== undefined ? patch.show_in_queue : current.show_in_queue,
-      setup_completed: patch.setup_completed !== undefined ? patch.setup_completed : true,
-      updated_at: nowIso,
-    };
+    const prev = saveQueues.get(ownerId) ?? Promise.resolve({ ...DEFAULT_PREFS });
+    const run = prev
+      .catch(() => ({ ...DEFAULT_PREFS }))
+      .then(async () => {
+        const current = await this.getLocalPreferences(ownerId);
+        const resolvedPatch = typeof patch === "function" ? patch(current) : patch;
+        const nowIso = new Date().toISOString();
+        const seq = (latestSaveGen.get(ownerId) ?? 0) + 1;
+        latestSaveGen.set(ownerId, seq);
 
-    await db.localMetadata.put({
-      key: prefsKey(ownerId),
-      value: updated,
-      updatedAt: nowIso,
-    });
-    try {
-      if (typeof localStorage !== "undefined") {
-        localStorage.setItem(prefsKey(ownerId), JSON.stringify(updated));
-      }
-    } catch {
-      // Ignore storage errors
-    }
+        const updated: SportsPreferences = {
+          streaming_services: resolvedPatch.streaming_services ?? current.streaming_services,
+          tracked_teams: resolvedPatch.tracked_teams ?? current.tracked_teams,
+          show_in_queue:
+            resolvedPatch.show_in_queue !== undefined ? resolvedPatch.show_in_queue : current.show_in_queue,
+          setup_completed:
+            resolvedPatch.setup_completed !== undefined ? resolvedPatch.setup_completed : true,
+          updated_at: nowIso,
+        };
 
-    if (isCloudAuthenticated && ownerId !== "guest_local" && navigator.onLine) {
-      try {
-        const serverSaved = await api.saveSportsPreferences(updated);
         await db.localMetadata.put({
           key: prefsKey(ownerId),
-          value: serverSaved,
-          updatedAt: serverSaved.updated_at || nowIso,
+          value: updated,
+          updatedAt: nowIso,
         });
         try {
           if (typeof localStorage !== "undefined") {
-            localStorage.setItem(prefsKey(ownerId), JSON.stringify(serverSaved));
+            localStorage.setItem(prefsKey(ownerId), JSON.stringify(updated));
           }
         } catch {
           // Ignore storage errors
         }
-        return serverSaved;
-      } catch (err) {
-        console.warn("Could not sync sports preferences to cloud, kept locally:", err);
-      }
-    }
 
-    return updated;
+        if (isCloudAuthenticated && ownerId !== "guest_local" && navigator.onLine) {
+          try {
+            const serverSaved = await api.saveSportsPreferences(updated);
+            if (latestSaveGen.get(ownerId) === seq) {
+              await db.localMetadata.put({
+                key: prefsKey(ownerId),
+                value: serverSaved,
+                updatedAt: serverSaved.updated_at || nowIso,
+              });
+              try {
+                if (typeof localStorage !== "undefined") {
+                  localStorage.setItem(prefsKey(ownerId), JSON.stringify(serverSaved));
+                }
+              } catch {
+                // Ignore storage errors
+              }
+              return serverSaved;
+            }
+          } catch (err) {
+            console.warn("Could not sync sports preferences to cloud, kept locally:", err);
+          }
+        }
+
+        return updated;
+      });
+    const settled = run.finally(() => {
+      if (saveQueues.get(ownerId) === settled) {
+        saveQueues.delete(ownerId);
+      }
+    });
+    saveQueues.set(ownerId, settled);
+    return settled;
   },
 
   async syncPreferencesFromServer(ownerId: string): Promise<SportsPreferences> {
@@ -287,7 +310,32 @@ export const sportsService = {
     }
     try {
       const remote = await api.sportsPreferences();
-      if (remote.setup_completed && (!local.setup_completed || (remote.updated_at && (!local.updated_at || remote.updated_at >= local.updated_at)))) {
+      const localNewerThanRemote = Boolean(
+        local.setup_completed &&
+          local.updated_at &&
+          (!remote.updated_at || local.updated_at > remote.updated_at)
+      );
+      if (local.setup_completed && (!remote.setup_completed || localNewerThanRemote)) {
+        const pushed = await api.saveSportsPreferences(local);
+        await db.localMetadata.put({
+          key: prefsKey(ownerId),
+          value: pushed,
+          updatedAt: pushed.updated_at || new Date().toISOString(),
+        });
+        try {
+          if (typeof localStorage !== "undefined") {
+            localStorage.setItem(prefsKey(ownerId), JSON.stringify(pushed));
+          }
+        } catch {
+          // Ignore storage errors
+        }
+        return pushed;
+      }
+      if (
+        remote.setup_completed &&
+        (!local.setup_completed ||
+          (remote.updated_at && (!local.updated_at || remote.updated_at >= local.updated_at)))
+      ) {
         await db.localMetadata.put({
           key: prefsKey(ownerId),
           value: remote,
@@ -301,9 +349,6 @@ export const sportsService = {
           // Ignore storage errors
         }
         return remote;
-      } else if (local.setup_completed && !remote.setup_completed) {
-        const pushed = await api.saveSportsPreferences(local);
-        return pushed;
       }
       return remote.setup_completed ? remote : local;
     } catch {
