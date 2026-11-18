@@ -312,7 +312,7 @@ export class SyncService {
     const cleared = await withSyncLock(ownerId, controller, async () => {
       await movieService.clearLocalData(ownerId);
       return true;
-    });
+    }, { ifAvailable: true });
     if (!cleared) throw new Error("Another tab is syncing. Try clearing again after it finishes.");
     await this.refreshStatus();
   }

@@ -175,7 +175,7 @@ export const movieService = {
   async saveMovie(
     movieData: Partial<LocalMovie> & { title: string; tmdbId: number },
     ownerId: string,
-    operationType: "upsert" | "delete" | "patch" = "upsert"
+    operationType: "upsert" | "delete" = "upsert"
   ): Promise<LocalMovie> {
     const id = `${movieData.mediaType || "movie"}_${movieData.tmdbId}`;
     const nowIso = new Date().toISOString();

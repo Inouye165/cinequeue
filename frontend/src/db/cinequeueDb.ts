@@ -12,7 +12,7 @@ export interface LocalMovie {
   backdropPath?: string | null;
   releaseDate?: string | null;
   firstAirDate?: string | null;
-  status: "queue" | "following" | "library" | "watched" | "archived" | string;
+  status: "queue" | "following" | "library" | "watched";
   watchStatus: "unwatched" | "watching" | "watched" | string;
   rating?: number | null;
   notes?: string | null;
@@ -52,7 +52,7 @@ export interface SyncRecord {
   title: string;
   posterPath: string | null;
   releaseDate: string | null;
-  status: string;
+  status: "queue" | "following" | "library" | "watched";
   isOwned: boolean;
   ownedFormat: "electronic" | "cloud" | "hard_copy" | null;
   watchFreeStreaming: boolean;
@@ -67,7 +67,7 @@ export interface SyncOperation {
   ownerId: string;
   entityType: "movie";
   entityId: string;
-  operationType: "upsert" | "delete" | "patch";
+  operationType: "upsert" | "delete";
   payload: Partial<LocalMovie>;
   createdAt: string;
   attemptCount: number;

@@ -68,7 +68,7 @@ export function DeviceDataPanel({ ownerId }: { ownerId: string }) {
             const restored = await withSyncLock(ownerId, new AbortController(), async () => {
               count = await deviceStorage.importBackup(text, ownerId);
               return true;
-            });
+            }, { ifAvailable: true });
             if (!restored) throw new Error("Another tab is syncing. Try restoring after it finishes.");
             setMessage(`Restored ${count} titles. Cloud changes will be checked before upload.`);
             setInfo(await deviceStorage.info());
