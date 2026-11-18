@@ -3,7 +3,7 @@ import re
 import time
 import uuid
 from contextvars import ContextVar
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import date, datetime, timezone
 from enum import Enum
 from typing import Any, Optional
@@ -217,6 +217,14 @@ class DecisionConfig:
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> "DecisionConfig":
+        """Build a DecisionConfig from persisted dict data, ignoring unknown keys."""
+        if not data:
+            return cls()
+        known = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in data.items() if k in known})
+
 
 DEFAULT_DECISION_CONFIG = DecisionConfig()
 
@@ -257,6 +265,14 @@ class PromptVersion:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> "PromptVersion":
+        """Build a PromptVersion from persisted dict data, ignoring unknown keys."""
+        if not data:
+            return cls()
+        known = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in data.items() if k in known})
 
 
 DEFAULT_PROMPT_VERSION = PromptVersion()

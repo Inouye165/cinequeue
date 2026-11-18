@@ -10,6 +10,12 @@ from contextlib import contextmanager
 from typing import Any, Optional
 
 from app.config import DATA_DIR, DB_PATH
+from app.repo_helpers import (
+    default_agent_settings,
+    default_sports_preferences,
+    format_rated_ago,
+    normalize_agent_settings,
+)
 from app.repository import DuplicateItemError, WatchlistRepository
 from app.sync_protocol import (
     check_receipt, operation_fingerprint, operation_result, sync_record, sync_records,
@@ -920,19 +926,7 @@ class SqliteWatchlistRepository(WatchlistRepository):
                 "SELECT * FROM agent_settings WHERE user_id = ?", (user_id,)
             ).fetchone()
         if not row:
-            return {
-                "user_id": user_id,
-                "personality_preset": "cinephile",
-                "custom_prompt": "",
-                "location": "",
-                "timezone": "America/Los_Angeles",
-                "user_timezone": "America/Los_Angeles",
-                "notify_on_login": True,
-                "auto_add_mentioned": True,
-                "track_price_drops": True,
-                "auto_speak_briefing": False,
-                "updated_at": self.utc_now_iso(),
-            }
+            return default_agent_settings(user_id, self.utc_now_iso())
         keys = row.keys()
         tz = (row["timezone"] if ("timezone" in keys and row["timezone"] is not None) else (row["user_timezone"] if ("user_timezone" in keys and row["user_timezone"] is not None) else "America/Los_Angeles"))
         return {
@@ -951,19 +945,15 @@ class SqliteWatchlistRepository(WatchlistRepository):
 
     def save_agent_settings(self, user_id: str, settings: dict[str, Any]) -> dict[str, Any]:
         now = self.utc_now_iso()
-        preset = settings.get("personality_preset", "cinephile")
-        custom_prompt = settings.get("custom_prompt", "")
-        location = settings.get("location", "").strip()
-        if "timezone" in settings:
-            tz = (settings["timezone"] or "").strip()
-        elif "user_timezone" in settings:
-            tz = (settings["user_timezone"] or "").strip()
-        else:
-            tz = "America/Los_Angeles"
-        notify_on_login = 1 if settings.get("notify_on_login", True) else 0
-        auto_add_mentioned = 1 if settings.get("auto_add_mentioned", True) else 0
-        track_price_drops = 1 if settings.get("track_price_drops", True) else 0
-        auto_speak_briefing = 1 if settings.get("auto_speak_briefing", False) else 0
+        normalized = normalize_agent_settings(user_id, settings, now)
+        preset = normalized["personality_preset"]
+        custom_prompt = normalized["custom_prompt"]
+        location = normalized["location"]
+        tz = normalized["timezone"]
+        notify_on_login = 1 if normalized["notify_on_login"] else 0
+        auto_add_mentioned = 1 if normalized["auto_add_mentioned"] else 0
+        track_price_drops = 1 if normalized["track_price_drops"] else 0
+        auto_speak_briefing = 1 if normalized["auto_speak_briefing"] else 0
 
         with self._connection() as conn:
             conn.execute(
@@ -1324,35 +1314,7 @@ class SqliteWatchlistRepository(WatchlistRepository):
             d = dict(r)
             p_path = d.get("poster_path")
             d["poster_url"] = poster_url(p_path) if p_path else None
-            # Calculate time ago
-            rated_at_str = d.get("updated_at") or d.get("rated_at")
-            rated_ago = "recently"
-            if rated_at_str:
-                try:
-                    dt = datetime.fromisoformat(rated_at_str)
-                    if dt.tzinfo is None:
-                        dt = dt.replace(tzinfo=timezone.utc)
-                    seconds = int((now - dt).total_seconds())
-                    if seconds < 60:
-                        rated_ago = "just now"
-                    elif seconds < 3600:
-                        mins = seconds // 60
-                        rated_ago = f"{mins} min{'s' if mins > 1 else ''} ago"
-                    elif seconds < 86400:
-                        hrs = seconds // 3600
-                        rated_ago = f"{hrs} hour{'s' if hrs > 1 else ''} ago"
-                    elif seconds < 2592000:
-                        days = seconds // 86400
-                        rated_ago = f"{days} day{'s' if days > 1 else ''} ago"
-                    elif seconds < 31536000:
-                        months = seconds // 2592000
-                        rated_ago = f"{months} month{'s' if months > 1 else ''} ago"
-                    else:
-                        yrs = seconds // 31536000
-                        rated_ago = f"{yrs} year{'s' if yrs > 1 else ''} ago"
-                except Exception:
-                    rated_ago = "recently"
-            d["rated_ago"] = rated_ago
+            d["rated_ago"] = format_rated_ago(d.get("updated_at") or d.get("rated_at"), now=now)
             results.append(d)
         return results
 
@@ -1827,14 +1789,7 @@ class SqliteWatchlistRepository(WatchlistRepository):
                 "SELECT * FROM sports_preferences WHERE user_id = ?", (user_id,)
             ).fetchone()
         if not row:
-            return {
-                "user_id": user_id,
-                "streaming_services": [],
-                "tracked_teams": [],
-                "show_in_queue": True,
-                "setup_completed": False,
-                "updated_at": None,
-            }
+            return default_sports_preferences(user_id)
         try:
             services = json.loads(row["streaming_services_json"] or "[]")
         except Exception:

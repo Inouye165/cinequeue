@@ -417,7 +417,7 @@ async def save_agent_decision_config(
 
     # Validate config
     try:
-        cfg = DecisionConfig(**body.config)
+        cfg = DecisionConfig.from_dict(body.config)
         errs = cfg.validate()
         if errs:
             raise HTTPException(status_code=400, detail="; ".join(errs))
@@ -513,8 +513,8 @@ async def preview_agent_decision(
     from app.services.agent_service import AiAgentService
 
     repo = request.app.state.watchlist_repo
-    cfg = DecisionConfig(**repo.get_active_decision_config())
-    prompt_ver = PromptVersion(**repo.get_active_prompt_version())
+    cfg = DecisionConfig.from_dict(repo.get_active_decision_config())
+    prompt_ver = PromptVersion.from_dict(repo.get_active_prompt_version())
 
     raw_candidates: list[Candidate] = []
 

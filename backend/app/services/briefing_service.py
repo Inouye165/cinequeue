@@ -495,8 +495,8 @@ class BriefingService:
                 ))
 
             # Run Decision Engine
-            decision_config = DecisionConfig(**repo.get_active_decision_config())
-            prompt_version = PromptVersion(**repo.get_active_prompt_version())
+            decision_config = DecisionConfig.from_dict(repo.get_active_decision_config())
+            prompt_version = PromptVersion.from_dict(repo.get_active_prompt_version())
 
             decision_log, selected_engine_candidates = DecisionEngine.evaluate(
                 user_id=user_id,

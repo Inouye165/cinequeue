@@ -9,6 +9,12 @@ from typing import Any, Optional
 
 from google.cloud import firestore  # type: ignore[import-untyped]
 
+from app.repo_helpers import (
+    default_agent_settings,
+    default_sports_preferences,
+    format_rated_ago,
+    normalize_agent_settings,
+)
 from app.repository import DuplicateItemError, WatchlistRepository
 from app.sync_protocol import (
     check_receipt, operation_fingerprint, operation_result, sync_record, sync_records,
@@ -479,50 +485,17 @@ class FirestoreWatchlistRepository(WatchlistRepository):
         doc_ref = self._db.collection("users").document(user_id).collection("agent").document("settings")
         doc = doc_ref.get()
         if not doc.exists:
-            return {
-                "user_id": user_id,
-                "personality_preset": "cinephile",
-                "custom_prompt": "",
-                "location": "",
-                "timezone": "America/Los_Angeles",
-                "user_timezone": "America/Los_Angeles",
-                "notify_on_login": True,
-                "auto_add_mentioned": True,
-                "track_price_drops": True,
-                "auto_speak_briefing": False,
-                "updated_at": self.utc_now_iso(),
-            }
+            return default_agent_settings(user_id, self.utc_now_iso())
         d = doc.to_dict() or {}
-        d.setdefault("user_id", user_id)
-        d.setdefault("personality_preset", "cinephile")
-        d.setdefault("custom_prompt", "")
-        d.setdefault("location", "")
-        tz = d.get("timezone") or d.get("user_timezone") or "America/Los_Angeles"
-        d["timezone"] = tz
-        d["user_timezone"] = tz
-        d.setdefault("notify_on_login", True)
-        d.setdefault("auto_add_mentioned", True)
-        d.setdefault("track_price_drops", True)
-        d.setdefault("auto_speak_briefing", False)
-        return d
+        return normalize_agent_settings(
+            user_id,
+            d,
+            d.get("updated_at") or self.utc_now_iso(),
+        )
 
     def save_agent_settings(self, user_id: str, settings: dict[str, Any]) -> dict[str, Any]:
         doc_ref = self._db.collection("users").document(user_id).collection("agent").document("settings")
-        now = self.utc_now_iso()
-        tz = (settings.get("timezone") or settings.get("user_timezone") or "America/Los_Angeles").strip()
-        data = {
-            "user_id": user_id,
-            "personality_preset": settings.get("personality_preset", "cinephile"),
-            "custom_prompt": settings.get("custom_prompt", ""),
-            "location": settings.get("location", "").strip(),
-            "timezone": tz,
-            "user_timezone": tz,
-            "notify_on_login": bool(settings.get("notify_on_login", True)),
-            "auto_add_mentioned": bool(settings.get("auto_add_mentioned", True)),
-            "track_price_drops": bool(settings.get("track_price_drops", True)),
-            "auto_speak_briefing": bool(settings.get("auto_speak_briefing", False)),
-            "updated_at": now,
-        }
+        data = normalize_agent_settings(user_id, settings, self.utc_now_iso())
         doc_ref.set(data, merge=True)
         return data
 
@@ -812,34 +785,7 @@ class FirestoreWatchlistRepository(WatchlistRepository):
                     d["id"] = doc.id
                     p_path = d.get("poster_path")
                     d["poster_url"] = poster_url(p_path) if p_path else None
-                    rated_at_str = d.get("updated_at") or d.get("rated_at")
-                    rated_ago = "recently"
-                    if rated_at_str:
-                        try:
-                            dt = datetime.fromisoformat(rated_at_str)
-                            if dt.tzinfo is None:
-                                dt = dt.replace(tzinfo=timezone.utc)
-                            seconds = int((now - dt).total_seconds())
-                            if seconds < 60:
-                                rated_ago = "just now"
-                            elif seconds < 3600:
-                                mins = seconds // 60
-                                rated_ago = f"{mins} min{'s' if mins > 1 else ''} ago"
-                            elif seconds < 86400:
-                                hrs = seconds // 3600
-                                rated_ago = f"{hrs} hour{'s' if hrs > 1 else ''} ago"
-                            elif seconds < 2592000:
-                                days = seconds // 86400
-                                rated_ago = f"{days} day{'s' if days > 1 else ''} ago"
-                            elif seconds < 31536000:
-                                months = seconds // 2592000
-                                rated_ago = f"{months} month{'s' if months > 1 else ''} ago"
-                            else:
-                                yrs = seconds // 31536000
-                                rated_ago = f"{yrs} year{'s' if yrs > 1 else ''} ago"
-                        except Exception:
-                            rated_ago = "recently"
-                    d["rated_ago"] = rated_ago
+                    d["rated_ago"] = format_rated_ago(d.get("updated_at") or d.get("rated_at"), now=now)
                     res.append(d)
             return res
         except Exception as e:
@@ -1237,14 +1183,7 @@ class FirestoreWatchlistRepository(WatchlistRepository):
             .get()
         )
         if not doc.exists:
-            return {
-                "user_id": user_id,
-                "streaming_services": [],
-                "tracked_teams": [],
-                "show_in_queue": True,
-                "setup_completed": False,
-                "updated_at": None,
-            }
+            return default_sports_preferences(user_id)
         data = doc.to_dict() or {}
         return {
             "user_id": user_id,
