@@ -20,7 +20,7 @@ def client_with_admin_auth():
             "ENABLE_FALLBACK_ADMIN_AUTH": "true",
             "ADMIN_USERNAME": "admin",
             "ADMIN_PASSWORD": "admin_secure_pass_2026"
-        }):
+        }), patch("app.auth.warmup_firebase_auth", return_value=None):
             reload_all_app_modules()
             import app.config
             app.config.ENABLE_FALLBACK_ADMIN_AUTH = True

@@ -3,7 +3,7 @@
 This document tracks all **22 verified findings** across Security, Infrastructure, Race Conditions & Concurrency, Modularity, and Regression Test Coverage, fixed incrementally one item at a time.
 
 **Branch:** `fix/comprehensive-app-audit`  
-**Status:** `1 / 22` completed
+**Status:** `2 / 22` completed
 
 ---
 
@@ -13,7 +13,7 @@ This document tracks all **22 verified findings** across Security, Infrastructur
 - [x] **Item 1 (`[TEST-01]`)** — Fix Test Harness Module-Reload Isolation, Shadowed Duplicate Tests, & Live Network Calls in Unit Tests
 
 ### Security
-- [ ] **Item 2 (`[SEC-01]`)** — Authenticate `/api/sports`, Fix Cloud Run UTC Evening Game Drop & Fake Fallback Games, & Fix Empty Schedule Client Fallback
+- [x] **Item 2 (`[SEC-01]`)** — Authenticate `/api/sports`, Fix Cloud Run UTC Evening Game Drop & Fake Fallback Games, & Fix Empty Schedule Client Fallback
 - [ ] **Item 3 (`[SEC-02]`)** — Enforce Cookie CSRF & Origin Validation Across All Mutating Routers + Attach `X-CSRF-Token` in `syncService.ts`
 - [ ] **Item 4 (`[SEC-03]`)** — Production CORS/Origin Hardening, Fail-Closed Config Checks, & Root-Anchored `DATA_DIR`
 - [ ] **Item 5 (`[SEC-04]`)** — Bearer Token `email_verified` Enforcement, Approval Fail-Closed, Admin Dual-Auth Fallback, & `X-Session-Restore` Hardening

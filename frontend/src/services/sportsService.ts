@@ -303,8 +303,8 @@ export const sportsService = {
     }
   },
 
-  async getCatalog(): Promise<SportsCatalog> {
-    if (navigator.onLine) {
+  async getCatalog(allowNetwork = true): Promise<SportsCatalog> {
+    if (allowNetwork && navigator.onLine) {
       try {
         const cat = mergeCatalogWithDefaults(await api.sportsCatalog());
         await db.localMetadata.put({
@@ -324,11 +324,11 @@ export const sportsService = {
     return DEFAULT_CATALOG;
   },
 
-  async getSchedule(trackedTeams: string[] = [], forceRefresh = false): Promise<SportsGame[]> {
-    if (navigator.onLine) {
+  async getSchedule(trackedTeams: string[] = [], forceRefresh = false, allowNetwork = true): Promise<SportsGame[]> {
+    if (allowNetwork && navigator.onLine) {
       try {
         const res = await api.sportsSchedule(trackedTeams, forceRefresh);
-        if (res.games && res.games.length > 0) {
+        if (Array.isArray(res.games)) {
           const windowed = filterGamesForActiveWindow(res.games);
           await db.localMetadata.put({
             key: "sports_schedule",

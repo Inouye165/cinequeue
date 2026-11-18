@@ -104,13 +104,14 @@ export function CinequeueDashboard({ onSignIn }: { onSignIn?: () => void }) {
   const loadSportsData = useCallback(async (forceRefresh = false) => {
     setSportsLoading(true);
     try {
-      const prefs = user
+      const isCloudAuth = Boolean(user);
+      const prefs = isCloudAuth
         ? await sportsService.syncPreferencesFromServer(ownerId)
         : await sportsService.getLocalPreferences(ownerId);
       setSportsPrefs(prefs);
       const [cat, sched] = await Promise.all([
-        sportsService.getCatalog(),
-        sportsService.getSchedule(prefs.tracked_teams, forceRefresh),
+        sportsService.getCatalog(isCloudAuth),
+        sportsService.getSchedule(undefined, forceRefresh, isCloudAuth),
       ]);
       setSportsCatalog(cat);
       setSportsGames(sched);
@@ -128,8 +129,8 @@ export function CinequeueDashboard({ onSignIn }: { onSignIn?: () => void }) {
   const handleSaveSportsPrefs = useCallback(async (patch: Partial<SportsPreferences>) => {
     const saved = await sportsService.savePreferences(ownerId, patch, Boolean(user));
     setSportsPrefs(saved);
-    if (patch.tracked_teams) {
-      const sched = await sportsService.getSchedule(saved.tracked_teams, false);
+    if (patch.tracked_teams && user) {
+      const sched = await sportsService.getSchedule(undefined, false, true);
       setSportsGames(sched);
     }
   }, [ownerId, user]);

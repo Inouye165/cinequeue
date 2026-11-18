@@ -11,7 +11,11 @@ from app.services.sports_service import sports_service
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/sports", tags=["sports"])
+router = APIRouter(
+    prefix="/api/sports",
+    tags=["sports"],
+    dependencies=[Depends(get_current_user)],
+)
 
 
 class SportsPreferencesPayload(BaseModel):
@@ -46,13 +50,7 @@ async def get_sports_preferences(
         return repo.get_sports_preferences(current_user.uid)
     except Exception as exc:
         logger.error("Error getting sports preferences for %s: %s", current_user.uid, exc, exc_info=True)
-        return {
-            "user_id": current_user.uid,
-            "streaming_services": [],
-            "tracked_teams": [],
-            "show_in_queue": True,
-            "setup_completed": False,
-        }
+        raise HTTPException(status_code=503, detail="Sports preferences temporarily unavailable")
 
 
 @router.put("/preferences")

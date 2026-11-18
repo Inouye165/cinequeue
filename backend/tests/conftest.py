@@ -91,7 +91,7 @@ def client_with_auth():
             "SESSION_COOKIE_SECURE": "true",
             "FIREBASE_API_KEY": "mock_firebase_api_key",
             "ADMIN_PASSWORD": "mock_admin_password_2026"
-        }):
+        }), patch("app.auth.warmup_firebase_auth", return_value=None):
             reload_all_app_modules()
             import app.main
 

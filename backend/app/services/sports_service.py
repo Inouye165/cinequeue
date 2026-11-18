@@ -7,10 +7,12 @@ import logging
 import time
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 
 logger = logging.getLogger(__name__)
+SPORTS_TZ = ZoneInfo("America/New_York")
 
 # Catalog of major sports streaming services
 STREAMING_SERVICES: list[dict[str, str]] = [
@@ -293,8 +295,13 @@ def map_broadcasts_to_services(league: str, broadcasts: list[str]) -> tuple[list
 
 def get_active_schedule_dates(now: datetime | None = None) -> list[date]:
     """Return active schedule dates: Today only, or Friday + Saturday + Sunday when today is Friday."""
-    now_local = (now or datetime.now(timezone.utc)).astimezone()
-    today = now_local.date()
+    if now is None:
+        now_sports = datetime.now(SPORTS_TZ)
+    elif now.tzinfo is None:
+        now_sports = now.replace(tzinfo=SPORTS_TZ)
+    else:
+        now_sports = now.astimezone(SPORTS_TZ)
+    today = now_sports.date()
     if today.weekday() == 4:  # Friday (0=Mon .. 4=Fri, 5=Sat, 6=Sun)
         return [today, today + timedelta(days=1), today + timedelta(days=2)]
     return [today]
@@ -302,7 +309,12 @@ def get_active_schedule_dates(now: datetime | None = None) -> list[date]:
 
 def _build_fallback_games(now: datetime | None = None) -> list[dict[str, Any]]:
     """Build realistic upcoming NFL and NBA games within the active date window if live API is unreachable."""
-    now_local = (now or datetime.now(timezone.utc)).astimezone()
+    if now is None:
+        now_local = datetime.now(SPORTS_TZ)
+    elif now.tzinfo is None:
+        now_local = now.replace(tzinfo=SPORTS_TZ)
+    else:
+        now_local = now.astimezone(SPORTS_TZ)
     active_dates = get_active_schedule_dates(now_local)
     is_friday_weekend = len(active_dates) > 1
 
@@ -481,8 +493,9 @@ def _parse_espn_events(league: str, data: dict[str, Any]) -> list[dict[str, Any]
 class SportsService:
     """Fetches and caches live NFL & NBA schedules with streaming service mappings."""
 
-    def __init__(self, cache_ttl_seconds: int = 600) -> None:
+    def __init__(self, cache_ttl_seconds: int = 600, refresh_cooldown_seconds: int = 30) -> None:
         self._cache_ttl = cache_ttl_seconds
+        self._refresh_cooldown = refresh_cooldown_seconds
         self._cached_games_by_key: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 
     def get_catalog(self) -> dict[str, Any]:
@@ -492,21 +505,39 @@ class SportsService:
             "teams": TEAMS_CATALOG,
         }
 
+    @staticmethod
+    def _filter_by_tracked_teams(
+        games: list[dict[str, Any]],
+        tracked_teams: list[str] | None,
+    ) -> list[dict[str, Any]]:
+        if not tracked_teams:
+            return list(games)
+        tracked_set = {t.strip() for t in tracked_teams if t and t.strip()}
+        if not tracked_set:
+            return list(games)
+        return [
+            g for g in games
+            if g.get("home_team", {}).get("id") in tracked_set
+            or g.get("away_team", {}).get("id") in tracked_set
+        ]
+
     async def get_schedule(
         self,
         tracked_teams: list[str] | None = None,
         force_refresh: bool = False,
     ) -> list[dict[str, Any]]:
-        now_local = datetime.now(timezone.utc).astimezone()
-        active_dates = get_active_schedule_dates(now_local)
+        now_sports = datetime.now(SPORTS_TZ)
+        active_dates = get_active_schedule_dates(now_sports)
         active_date_strs = [d.strftime("%Y%m%d") for d in active_dates]
         cache_key = ",".join(active_date_strs)
         now_ts = time.time()
 
-        if not force_refresh and cache_key in self._cached_games_by_key:
+        if cache_key in self._cached_games_by_key:
             cached_ts, cached_list = self._cached_games_by_key[cache_key]
-            if cached_list and (now_ts - cached_ts < self._cache_ttl):
-                return cached_list
+            within_ttl = (not force_refresh) and (now_ts - cached_ts < self._cache_ttl)
+            within_cooldown = force_refresh and (now_ts - cached_ts < self._refresh_cooldown)
+            if within_ttl or within_cooldown:
+                return self._filter_by_tracked_teams(cached_list, tracked_teams)
 
         games_by_id: dict[str, dict[str, Any]] = {}
         urls: list[tuple[str, str]] = []
@@ -514,19 +545,22 @@ class SportsService:
             urls.append(("NFL", f"https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard?dates={date_str}"))
             urls.append(("NBA", f"https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates={date_str}"))
 
-        async def _fetch_one(client: httpx.AsyncClient, league: str, url: str) -> list[dict[str, Any]]:
+        async def _fetch_one(client: httpx.AsyncClient, league: str, url: str) -> tuple[bool, list[dict[str, Any]]]:
             try:
                 resp = await client.get(url)
                 if resp.status_code == 200:
-                    return _parse_espn_events(league, resp.json())
+                    return True, _parse_espn_events(league, resp.json())
             except Exception as exc:
                 logger.warning("Failed to fetch %s schedule from %s: %s", league, url, exc)
-            return []
+            return False, []
 
+        upstream_succeeded = False
         try:
             async with httpx.AsyncClient(timeout=8.0) as client:
                 results = await asyncio.gather(*(_fetch_one(client, lg, u) for lg, u in urls))
-                for league_games in results:
+                for ok, league_games in results:
+                    if ok:
+                        upstream_succeeded = True
                     for g in league_games:
                         games_by_id[g["id"]] = g
         except Exception as exc:
@@ -535,16 +569,19 @@ class SportsService:
         active_dates_set = set(active_dates)
         filtered_games: list[dict[str, Any]] = []
         for g in games_by_id.values():
+            if g.get("is_live"):
+                filtered_games.append(g)
+                continue
             try:
-                dt = datetime.fromisoformat(str(g["start_time"]).replace("Z", "+00:00")).astimezone(now_local.tzinfo)
+                dt = datetime.fromisoformat(str(g["start_time"]).replace("Z", "+00:00")).astimezone(SPORTS_TZ)
                 if dt.date() in active_dates_set:
                     filtered_games.append(g)
             except Exception:
                 filtered_games.append(g)
 
         games = filtered_games
-        if not games:
-            games = _build_fallback_games(now_local)
+        if not games and not upstream_succeeded:
+            games = _build_fallback_games(now_sports)
 
         # Sort live games first, then upcoming by start_time, then completed last
         def _sort_key(g: dict[str, Any]) -> tuple[int, str]:
@@ -553,7 +590,7 @@ class SportsService:
 
         games.sort(key=_sort_key)
         self._cached_games_by_key[cache_key] = (now_ts, games)
-        return games
+        return self._filter_by_tracked_teams(games, tracked_teams)
 
 
 sports_service = SportsService()

@@ -25,7 +25,7 @@ def client_with_auth():
             "SESSION_COOKIE_SECURE": "true",
             "FIREBASE_API_KEY": "mock_firebase_api_key",
             "ADMIN_PASSWORD": "mock_admin_password_2026"
-        }):
+        }), patch("app.auth.warmup_firebase_auth", return_value=None):
             reload_all_app_modules()
             import app.main
 
@@ -601,7 +601,7 @@ def test_origin_validation_policy(mock_create_cookie, mock_verify_token):
             "AUTH_ALLOWED_ORIGINS": "https://cinequeue-568212960791.us-west1.run.app,http://localhost:5180,http://127.0.0.1:5180",
             "FIREBASE_API_KEY": "mock_firebase_api_key",
             "ADMIN_PASSWORD": "mock_admin_password_2026",
-        }):
+        }), patch("app.auth.warmup_firebase_auth", return_value=None):
             reload_all_app_modules()
 
             from fastapi.testclient import TestClient
