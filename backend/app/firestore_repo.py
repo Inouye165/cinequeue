@@ -938,7 +938,8 @@ class FirestoreWatchlistRepository(WatchlistRepository):
                 query = query.where("user_id", "==", user_id)
             if fallback_only:
                 query = query.where("fallback_used", "==", True)
-            docs = list(query.stream())
+            query_limit = min(max(limit + offset, 500), 2000)
+            docs = list(query.limit(query_limit).stream())
         except Exception as query_err:
             logger.warning("Firestore composite query on agent_decision_logs failed (%s), falling back to client-side filter", query_err)
             docs = list(col.order_by("timestamp", direction=firestore.Query.DESCENDING).limit(500).stream())

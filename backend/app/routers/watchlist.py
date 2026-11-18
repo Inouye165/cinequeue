@@ -51,6 +51,7 @@ async def list_watchlist(
         rows = repo.list_items(current_user.uid)
 
         tmdb: TmdbClient | None = getattr(request.app.state, "tmdb", None)
+        enrich_semaphore = asyncio.Semaphore(8)
 
         async def enrich_item(item: dict[str, Any]) -> dict[str, Any]:
             enriched = dict(item)
@@ -100,19 +101,20 @@ async def list_watchlist(
                             tmdb,
                         )
                 elif tmdb:
-                    # No cache available, fetch synchronously if tmdb is available
+                    # No cache available, fetch synchronously if tmdb is available (bounded concurrency)
                     try:
-                        details = await tmdb.get_details(enriched["media_type"], enriched["tmdb_id"])
-                        try:
-                            providers = await tmdb.get_watch_providers(enriched["media_type"], enriched["tmdb_id"])
-                            details["watch_providers"] = providers
-                        except Exception:
-                            pass
-                        try:
-                            rel_info = await tmdb.get_release_info(enriched["media_type"], enriched["tmdb_id"])
-                            details["release_info"] = rel_info
-                        except Exception:
-                            pass
+                        async with enrich_semaphore:
+                            details = await tmdb.get_details(enriched["media_type"], enriched["tmdb_id"])
+                            try:
+                                providers = await tmdb.get_watch_providers(enriched["media_type"], enriched["tmdb_id"])
+                                details["watch_providers"] = providers
+                            except Exception:
+                                pass
+                            try:
+                                rel_info = await tmdb.get_release_info(enriched["media_type"], enriched["tmdb_id"])
+                                details["release_info"] = rel_info
+                            except Exception:
+                                pass
                         repo.update_item_cache(
                             current_user.uid,
                             enriched["media_type"],
@@ -150,7 +152,8 @@ async def list_watchlist(
                     next_season = details["next_season"]
                 elif tmdb:
                     try:
-                        full_details = await tmdb.get_details(enriched["media_type"], enriched["tmdb_id"])
+                        async with enrich_semaphore:
+                            full_details = await tmdb.get_details(enriched["media_type"], enriched["tmdb_id"])
                         if full_details.get("seasons"):
                             next_season = tmdb.get_next_season(full_details["seasons"])
                     except Exception as exc:

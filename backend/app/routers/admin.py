@@ -3,7 +3,7 @@ import secrets
 import logging
 from datetime import datetime, timezone, timedelta
 from typing import Any, Optional
-from fastapi import APIRouter, HTTPException, Request, Response, Depends
+from fastapi import APIRouter, HTTPException, Query, Request, Response, Depends
 from pydantic import BaseModel
 
 import app.config as config
@@ -308,7 +308,7 @@ async def invite_user(
 @router.get("/login-logs")
 async def get_login_logs(
     request: Request,
-    limit: int = 100,
+    limit: int = Query(100, ge=1, le=500),
     email: Optional[str] = None,
     status: Optional[str] = None,
     reason: Optional[str] = None,
@@ -360,8 +360,8 @@ def _validate_cookie_csrf(request: Request) -> None:
 @router.get("/agent/decision-logs")
 async def get_agent_decision_logs(
     request: Request,
-    limit: int = 50,
-    offset: int = 0,
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0, le=10_000),
     user_id: Optional[str] = None,
     candidate_type: Optional[str] = None,
     fallback_only: bool = False,

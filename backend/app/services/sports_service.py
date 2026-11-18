@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import OrderedDict
 import logging
 import time
 from datetime import date, datetime, timedelta, timezone
@@ -493,10 +494,11 @@ def _parse_espn_events(league: str, data: dict[str, Any]) -> list[dict[str, Any]
 class SportsService:
     """Fetches and caches live NFL & NBA schedules with streaming service mappings."""
 
-    def __init__(self, cache_ttl_seconds: int = 600, refresh_cooldown_seconds: int = 30) -> None:
+    def __init__(self, cache_ttl_seconds: int = 600, refresh_cooldown_seconds: int = 30, max_cache_entries: int = 64) -> None:
         self._cache_ttl = cache_ttl_seconds
         self._refresh_cooldown = refresh_cooldown_seconds
-        self._cached_games_by_key: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+        self._max_cache_entries = max_cache_entries
+        self._cached_games_by_key: OrderedDict[str, tuple[float, list[dict[str, Any]]]] = OrderedDict()
 
     def get_catalog(self) -> dict[str, Any]:
         return {
@@ -537,6 +539,7 @@ class SportsService:
             within_ttl = (not force_refresh) and (now_ts - cached_ts < self._cache_ttl)
             within_cooldown = force_refresh and (now_ts - cached_ts < self._refresh_cooldown)
             if within_ttl or within_cooldown:
+                self._cached_games_by_key.move_to_end(cache_key)
                 return self._filter_by_tracked_teams(cached_list, tracked_teams)
 
         games_by_id: dict[str, dict[str, Any]] = {}
@@ -590,6 +593,9 @@ class SportsService:
 
         games.sort(key=_sort_key)
         self._cached_games_by_key[cache_key] = (now_ts, games)
+        self._cached_games_by_key.move_to_end(cache_key)
+        while len(self._cached_games_by_key) > self._max_cache_entries:
+            self._cached_games_by_key.popitem(last=False)
         return self._filter_by_tracked_teams(games, tracked_teams)
 
 

@@ -1,3 +1,5 @@
+from collections import OrderedDict
+import copy
 from datetime import date
 import asyncio
 import logging
@@ -41,18 +43,23 @@ class TmdbClient:
             params={"api_key": api_key},
             timeout=20.0,
         )
-        self._cache: dict[str, tuple[float, Any]] = {}
+        self._max_cache_size = 512
+        self._cache: OrderedDict[str, tuple[float, Any]] = OrderedDict()
 
     def _get_cached(self, key: str, ttl_seconds: float) -> Any | None:
         if key in self._cache:
             ts, val = self._cache[key]
             if time.time() - ts < ttl_seconds:
-                return val
+                self._cache.move_to_end(key)
+                return copy.deepcopy(val)
             del self._cache[key]
         return None
 
     def _set_cached(self, key: str, val: Any) -> None:
-        self._cache[key] = (time.time(), val)
+        self._cache[key] = (time.time(), copy.deepcopy(val))
+        self._cache.move_to_end(key)
+        while len(self._cache) > self._max_cache_size:
+            self._cache.popitem(last=False)
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -720,7 +727,7 @@ class TmdbClient:
                 "theatrical_days_away": days_until(theatrical),
                 "digital_days_away": days_until(digital),
             }
-        data = await self._get(f"/tv/{tmdb_id}")
+        data = await self.get_details("tv", tmdb_id)
         next_episode = data.get("next_episode_to_air")
         last_episode = data.get("last_episode_to_air")
         next_ep_info = None
@@ -770,10 +777,24 @@ def _format_providers(providers: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return formatted
 
 
+_NEWS_CACHE: OrderedDict[str, tuple[float, list[dict[str, Any]]]] = OrderedDict()
+_NEWS_CACHE_MAX_SIZE = 128
+_NEWS_CACHE_TTL_SECONDS = 900.0
+
+
 async def fetch_news(title: str, limit: int = 6) -> list[dict[str, Any]]:
     from urllib.parse import quote_plus
     from app.decision_models import get_current_run_context
     ctx = get_current_run_context()
+    cache_key = f"{title.strip().lower()}:{limit}"
+    now_ts = time.time()
+    if cache_key in _NEWS_CACHE:
+        cached_ts, cached_articles = _NEWS_CACHE[cache_key]
+        if now_ts - cached_ts < _NEWS_CACHE_TTL_SECONDS:
+            _NEWS_CACHE.move_to_end(cache_key)
+            return copy.deepcopy(cached_articles)
+        del _NEWS_CACHE[cache_key]
+
     if ctx:
         ctx.record_external_attempt("news")
 
@@ -794,6 +815,10 @@ async def fetch_news(title: str, limit: int = 6) -> list[dict[str, Any]]:
                     "published_at": entry.get("published", ""),
                 }
             )
+        _NEWS_CACHE[cache_key] = (now_ts, copy.deepcopy(articles))
+        _NEWS_CACHE.move_to_end(cache_key)
+        while len(_NEWS_CACHE) > _NEWS_CACHE_MAX_SIZE:
+            _NEWS_CACHE.popitem(last=False)
         return articles
     except Exception as e:
         logger.warning(f"Error fetching news for '{title}': {e}")

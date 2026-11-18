@@ -28,7 +28,7 @@ class SyncOperationPayload(BaseModel):
 
 class PushSyncRequest(BaseModel):
   protocolVersion: StrictInt = Field(default=1, ge=1, le=2)
-  operations: List[SyncOperationPayload]
+  operations: List[SyncOperationPayload] = Field(default_factory=list, max_length=250)
 
 
 class PushSyncResponse(BaseModel):
@@ -81,9 +81,12 @@ async def push_movie_sync(
         else:
           processed_ids.append(operation["operationId"])
           applied.append(result["applied"])
-      except Exception as exc:
-        logger.exception("Failed to sync operation %s", operation["operationId"])
+      except ValueError as exc:
+        logger.warning("Invalid sync v2 operation %s: %s", operation["operationId"], exc)
         failed_ops.append({"operationId": operation["operationId"], "reason": str(exc)})
+      except Exception:
+        logger.exception("Failed to sync operation %s", operation["operationId"])
+        failed_ops.append({"operationId": operation["operationId"], "reason": "Internal sync error"})
     return PushSyncResponse(
         processed_operations=processed_ids, failed_operations=failed_ops,
         applied_operations=applied, conflicts=conflicts, server_timestamp=now_iso,
@@ -169,9 +172,12 @@ async def push_movie_sync(
           repo.delete_rated_movie(user_id, media_type, int(tmdb_id))
 
         processed_ids.append(op.operationId)
-    except Exception as e:
-      logger.exception(f"Failed to sync operation {op.operationId}: {e}")
+    except ValueError as e:
+      logger.warning("Invalid sync v1 operation %s: %s", op.operationId, e)
       failed_ops.append({"operationId": op.operationId, "reason": str(e)})
+    except Exception:
+      logger.exception("Failed to sync operation %s", op.operationId)
+      failed_ops.append({"operationId": op.operationId, "reason": "Internal sync error"})
 
   return PushSyncResponse(
       status="ok",
