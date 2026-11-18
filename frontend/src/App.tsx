@@ -176,17 +176,15 @@ function CinequeueApp() {
     }
 
     return (
-      <>
-        <UserLogin
-          authError={authError}
-          onLoginWithGoogle={loginWithGoogle}
-          onAdminToggle={() => {
-            setShowAdminLogin(true);
-            setAdminError(null);
-          }}
-        />
-        <button type="button" onClick={() => setShowUserLogin(false)}>Continue on this device</button>
-      </>
+      <UserLogin
+        authError={authError}
+        onLoginWithGoogle={loginWithGoogle}
+        onAdminToggle={() => {
+          setShowAdminLogin(true);
+          setAdminError(null);
+        }}
+        onContinueLocal={() => setShowUserLogin(false)}
+      />
     );
   }
 

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import { syncService, type SyncStatusInfo } from "../services/syncService";
 import { DEFAULT_STREAMING_SERVICES } from "../services/sportsService";
 import { DeviceDataPanel } from "./DeviceDataPanel";
@@ -92,7 +93,7 @@ export function AccountSheet({
 
   const badge = getSyncBadgeStyle();
 
-  return (
+  const content = (
     <div
       className="account-sheet-overlay"
       onClick={onClose}
@@ -331,4 +332,6 @@ export function AccountSheet({
       )}
     </div>
   );
+
+  return typeof document !== "undefined" ? createPortal(content, document.body) : content;
 }

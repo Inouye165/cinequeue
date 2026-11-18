@@ -4,9 +4,10 @@ interface UserLoginProps {
   authError: string | null;
   onLoginWithGoogle: () => void;
   onAdminToggle: () => void;
+  onContinueLocal?: () => void;
 }
 
-export function UserLogin({ authError, onLoginWithGoogle, onAdminToggle }: UserLoginProps) {
+export function UserLogin({ authError, onLoginWithGoogle, onAdminToggle, onContinueLocal }: UserLoginProps) {
   const isPending = authError && (
     authError.toLowerCase().includes("pending") || 
     authError.toLowerCase().includes("approve")
@@ -79,6 +80,17 @@ export function UserLogin({ authError, onLoginWithGoogle, onAdminToggle }: UserL
           </svg>
           Sign in with Google
         </button>
+
+        {onContinueLocal && (
+          <button
+            type="button"
+            className="pill-button secondary full-width"
+            style={{ marginTop: "12px" }}
+            onClick={onContinueLocal}
+          >
+            Continue on this device
+          </button>
+        )}
 
         <span
           className="admin-login-toggle-link"
