@@ -132,6 +132,13 @@ from app.auth_perf import AuthPerfMiddleware
 
 app = FastAPI(title="Cinequeue", lifespan=lifespan)
 
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    from fastapi.responses import JSONResponse
+    logger.exception("Unhandled exception on %s %s", request.method, request.url.path)
+    return JSONResponse(status_code=500, content={"detail": "Internal server error"})
+
 app.add_middleware(AuthPerfMiddleware)
 
 app.add_middleware(

@@ -373,3 +373,16 @@ def test_session_endpoint_rate_limits_repeated_failures_and_bounds_admin_passwor
             )
             statuses.append(r.status_code)
         assert statuses[-1] == 429
+
+
+def test_global_exception_handler_hides_stack_traces():
+    from fastapi.testclient import TestClient
+    import app.main
+
+    with TestClient(app.main.app, raise_server_exceptions=False) as tc:
+        with patch.object(app.main.app.state.watchlist_repo, "list_items", side_effect=RuntimeError("db_secret_path=/var/lib/secret.db")):
+            res = tc.get("/api/watchlist")
+            assert res.status_code == 500
+            assert res.json() == {"detail": "Internal server error"}
+            assert "db_secret_path" not in res.text
+            assert "Traceback" not in res.text

@@ -275,7 +275,7 @@ class DecisionEngine:
         # Candidate signature calculation
         import hashlib, json
         all_titles = sorted([c.title for c in raw_candidates if c.title])
-        cand_sig = hashlib.md5(json.dumps(all_titles).encode("utf-8")).hexdigest()[:8]
+        cand_sig = hashlib.sha256(json.dumps(all_titles).encode("utf-8")).hexdigest()[:8]
 
         # 4. Construct DecisionLog record
         duration_ms = round((datetime.datetime.now(datetime.timezone.utc) - start_time).total_seconds() * 1000.0, 2)
