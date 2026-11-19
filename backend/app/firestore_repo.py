@@ -2,12 +2,19 @@
 
 import logging
 import hashlib
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Any, Optional
 
 from google.cloud import firestore  # type: ignore[import-untyped]
 
+from app.repo_helpers import (
+    default_agent_settings,
+    default_sports_preferences,
+    format_rated_ago,
+    normalize_agent_settings,
+)
 from app.repository import DuplicateItemError, WatchlistRepository
 from app.sync_protocol import (
     check_receipt, operation_fingerprint, operation_result, sync_record, sync_records,
@@ -19,8 +26,27 @@ logger = logging.getLogger(__name__)
 COLLECTION = "watchlist"
 
 
+def _safe_firestore_id(raw_id: str, label: str = "document_id") -> str:
+    """Validate that a Firestore document ID cannot traverse collection paths."""
+    if (
+        not isinstance(raw_id, str)
+        or not raw_id
+        or len(raw_id) > 512
+        or raw_id in {".", ".."}
+        or "/" in raw_id
+        or "\\" in raw_id
+        or "\x00" in raw_id
+    ):
+        raise ValueError(f"Invalid Firestore {label}")
+    return raw_id
+
+
 def _doc_id(media_type: str, tmdb_id: int) -> str:
     """Build a deterministic document ID like 'movie_12345'."""
+    if media_type not in {"movie", "tv"}:
+        raise ValueError(f"Invalid media_type: {media_type}")
+    if not isinstance(tmdb_id, int) or isinstance(tmdb_id, bool) or tmdb_id <= 0:
+        raise ValueError(f"Invalid tmdb_id: {tmdb_id}")
     return f"{media_type}_{tmdb_id}"
 
 
@@ -33,15 +59,17 @@ class FirestoreWatchlistRepository(WatchlistRepository):
 
     def __init__(self, project: str | None = None) -> None:
         self._db = firestore.Client(project=project)
+        self._restoration_lock = threading.Lock()
+        self._restoration_cache: dict[str, float] = {}
         logger.info("Firestore watchlist repository initialised (project=%s)", project)
 
     def _user_watchlist_col(self, user_id: str):
-        return self._db.collection("users").document(user_id).collection(COLLECTION)
+        return self._db.collection("users").document(_safe_firestore_id(user_id, "user_id")).collection(COLLECTION)
 
     # -- Repository interface --------------------------------------------------
 
     def sync_snapshot(self, user_id: str) -> list[dict[str, Any]]:
-        user = self._db.collection("users").document(user_id)
+        user = self._db.collection("users").document(_safe_firestore_id(user_id, "user_id"))
 
         @firestore.transactional
         def read(transaction):
@@ -158,10 +186,6 @@ class FirestoreWatchlistRepository(WatchlistRepository):
         col = self._user_watchlist_col(user_id)
         doc_ref = col.document(doc_id)
 
-        # Check for duplicate
-        if doc_ref.get().exists:
-            raise DuplicateItemError(f"Item {media_type}/{tmdb_id} already exists")
-
         added_at = self.utc_now_iso()
         data: dict[str, Any] = {
             "media_type": media_type,
@@ -178,7 +202,14 @@ class FirestoreWatchlistRepository(WatchlistRepository):
             "target_rental_price": target_rental_price,
             "user_rating": user_rating,
         }
-        doc_ref.set(data)
+
+        @firestore.transactional
+        def _create_in_tx(transaction, ref):
+            if ref.get(transaction=transaction).exists:
+                raise DuplicateItemError(f"Item {media_type}/{tmdb_id} already exists")
+            transaction.set(ref, data)
+
+        _create_in_tx(self._db.transaction(), doc_ref)
         return data
 
     def update_item(
@@ -197,10 +228,7 @@ class FirestoreWatchlistRepository(WatchlistRepository):
         doc_id = _doc_id(media_type, tmdb_id)
         col = self._user_watchlist_col(user_id)
         doc_ref = col.document(doc_id)
-        snapshot = doc_ref.get()
-        if not snapshot.exists:
-            return None
-        
+
         data: dict[str, Any] = {}
         if is_owned is not None:
             data["is_owned"] = is_owned
@@ -219,9 +247,19 @@ class FirestoreWatchlistRepository(WatchlistRepository):
         if user_rating is not None:
             data["user_rating"] = user_rating
 
-        doc_ref.update(data)
-        updated = snapshot.to_dict()
-        updated.update(data)
+        @firestore.transactional
+        def _update_in_tx(transaction, ref):
+            snapshot = ref.get(transaction=transaction)
+            if not snapshot.exists:
+                return None
+            transaction.update(ref, data)
+            updated = dict(snapshot.to_dict() or {})
+            updated.update(data)
+            return updated
+
+        updated = _update_in_tx(self._db.transaction(), doc_ref)
+        if updated is None:
+            return None
         if "is_owned" in updated:
             updated["is_owned"] = bool(updated["is_owned"])
         updated.setdefault("status", "queue")
@@ -308,10 +346,11 @@ class FirestoreWatchlistRepository(WatchlistRepository):
         return True
 
     def create_admin_session(self, session_id: str, username: str, expires_at: str) -> None:
+        username_normalized = (username or "").strip().lower()
         created_at = self.utc_now_iso()
         doc_ref = self._db.collection("admin_sessions").document(session_id)
         doc_ref.set({
-            "username": username,
+            "username": username_normalized,
             "created_at": created_at,
             "expires_at": expires_at
         })
@@ -329,6 +368,14 @@ class FirestoreWatchlistRepository(WatchlistRepository):
     def delete_admin_session(self, session_id: str) -> None:
         doc_ref = self._db.collection("admin_sessions").document(session_id)
         doc_ref.delete()
+
+    def delete_admin_sessions_for_user(self, username: str) -> None:
+        username_normalized = (username or "").strip().lower()
+        if not username_normalized:
+            return
+        sessions = self._db.collection("admin_sessions").where("username", "==", username_normalized).stream()
+        for sess in sessions:
+            sess.reference.delete()
 
     def get_user_approval(self, email: str) -> dict[str, Any] | None:
         doc_ref = self._db.collection("user_approvals").document(email)
@@ -430,22 +477,25 @@ class FirestoreWatchlistRepository(WatchlistRepository):
             cache_key = hashlib.sha256(key_raw.encode("utf-8")).hexdigest()
             now = time.time()
 
-            if not hasattr(self, "_restoration_cache"):
-                self._restoration_cache = {}
+            if not hasattr(self, "_restoration_lock"):
+                self._restoration_lock = threading.Lock()
+            with self._restoration_lock:
+                if not hasattr(self, "_restoration_cache"):
+                    self._restoration_cache = {}
 
-            # Periodic cleanup of expired items if cache grows large
-            if len(self._restoration_cache) > 500:
-                self._restoration_cache = {
-                    k: t for k, t in self._restoration_cache.items()
-                    if (now - t) < window_seconds
-                }
+                # Periodic cleanup of expired items if cache grows large
+                if len(self._restoration_cache) > 500:
+                    self._restoration_cache = {
+                        k: t for k, t in self._restoration_cache.items()
+                        if (now - t) < window_seconds
+                    }
 
-            last_time = self._restoration_cache.get(cache_key)
-            if last_time is not None and (now - last_time) < window_seconds:
-                return True
+                last_time = self._restoration_cache.get(cache_key)
+                if last_time is not None and (now - last_time) < window_seconds:
+                    return True
 
-            self._restoration_cache[cache_key] = now
-            return False
+                self._restoration_cache[cache_key] = now
+                return False
         except Exception as e:
             logger.error("Error evaluating session restoration deduplication: %s", e)
             return False
@@ -454,50 +504,17 @@ class FirestoreWatchlistRepository(WatchlistRepository):
         doc_ref = self._db.collection("users").document(user_id).collection("agent").document("settings")
         doc = doc_ref.get()
         if not doc.exists:
-            return {
-                "user_id": user_id,
-                "personality_preset": "cinephile",
-                "custom_prompt": "",
-                "location": "",
-                "timezone": "America/Los_Angeles",
-                "user_timezone": "America/Los_Angeles",
-                "notify_on_login": True,
-                "auto_add_mentioned": True,
-                "track_price_drops": True,
-                "auto_speak_briefing": False,
-                "updated_at": self.utc_now_iso(),
-            }
+            return default_agent_settings(user_id, self.utc_now_iso())
         d = doc.to_dict() or {}
-        d.setdefault("user_id", user_id)
-        d.setdefault("personality_preset", "cinephile")
-        d.setdefault("custom_prompt", "")
-        d.setdefault("location", "")
-        tz = d.get("timezone") or d.get("user_timezone") or "America/Los_Angeles"
-        d["timezone"] = tz
-        d["user_timezone"] = tz
-        d.setdefault("notify_on_login", True)
-        d.setdefault("auto_add_mentioned", True)
-        d.setdefault("track_price_drops", True)
-        d.setdefault("auto_speak_briefing", False)
-        return d
+        return normalize_agent_settings(
+            user_id,
+            d,
+            d.get("updated_at") or self.utc_now_iso(),
+        )
 
     def save_agent_settings(self, user_id: str, settings: dict[str, Any]) -> dict[str, Any]:
         doc_ref = self._db.collection("users").document(user_id).collection("agent").document("settings")
-        now = self.utc_now_iso()
-        tz = (settings.get("timezone") or settings.get("user_timezone") or "America/Los_Angeles").strip()
-        data = {
-            "user_id": user_id,
-            "personality_preset": settings.get("personality_preset", "cinephile"),
-            "custom_prompt": settings.get("custom_prompt", ""),
-            "location": settings.get("location", "").strip(),
-            "timezone": tz,
-            "user_timezone": tz,
-            "notify_on_login": bool(settings.get("notify_on_login", True)),
-            "auto_add_mentioned": bool(settings.get("auto_add_mentioned", True)),
-            "track_price_drops": bool(settings.get("track_price_drops", True)),
-            "auto_speak_briefing": bool(settings.get("auto_speak_briefing", False)),
-            "updated_at": now,
-        }
+        data = normalize_agent_settings(user_id, settings, self.utc_now_iso())
         doc_ref.set(data, merge=True)
         return data
 
@@ -509,7 +526,7 @@ class FirestoreWatchlistRepository(WatchlistRepository):
         col = self._db.collection("users").document(user_id).collection("agent_conversations")
         docs = (
             col
-            .order_by("created_at", direction=firestore.Query.ASCENDING)
+            .order_by("created_at", direction=firestore.Query.DESCENDING)
             .limit(limit)
             .stream()
         )
@@ -520,6 +537,7 @@ class FirestoreWatchlistRepository(WatchlistRepository):
                 d["id"] = doc.id
                 d.setdefault("actions", [])
                 res.append(d)
+        res.reverse()
         return res
 
     def add_chat_message(
@@ -557,7 +575,7 @@ class FirestoreWatchlistRepository(WatchlistRepository):
         title: str | None = None,
     ) -> dict[str, Any]:
         item_title = title or query_text
-        doc_id = item_title.lower().replace(" ", "_")
+        doc_id = hashlib.sha256(item_title.strip().lower().encode("utf-8")).hexdigest()[:32]
         col = self._db.collection("users").document(user_id).collection("agent_query_memories")
         now = self.utc_now_iso()
         data = {
@@ -597,9 +615,9 @@ class FirestoreWatchlistRepository(WatchlistRepository):
         now = self.utc_now_iso()
         for item in items:
             item_key = item.get("item_key") or item.get("story_cluster_id") or f"item_{item.get('title_id', 'gen')}"
-            doc_ref = col.document(item_key)
-            existing = doc_ref.get()
-            data = {
+            safe_doc_id = hashlib.sha256(str(item_key).encode("utf-8")).hexdigest()[:32]
+            doc_ref = col.document(safe_doc_id)
+            base_data = {
                 "user_id": user_id,
                 "item_key": item_key,
                 "story_cluster_id": str(item.get("story_cluster_id") or item_key),
@@ -618,16 +636,23 @@ class FirestoreWatchlistRepository(WatchlistRepository):
                 "acknowledged": False,
                 "dismissed": False,
             }
-            if existing.exists:
-                prev = existing.to_dict() or {}
-                data["first_discovered_at"] = prev.get("first_discovered_at", now)
-                data["first_presented_at"] = prev.get("first_presented_at", now)
-                data["presentation_count"] = prev.get("presentation_count", 1) + 1
-            else:
-                data["first_discovered_at"] = now
-                data["first_presented_at"] = now
-                data["presentation_count"] = 1
-            doc_ref.set(data, merge=True)
+
+            @firestore.transactional
+            def _record_in_tx(transaction, ref):
+                existing = ref.get(transaction=transaction)
+                payload = dict(base_data)
+                if existing.exists:
+                    prev = existing.to_dict() or {}
+                    payload["first_discovered_at"] = prev.get("first_discovered_at", now)
+                    payload["first_presented_at"] = prev.get("first_presented_at", now)
+                    payload["presentation_count"] = int(prev.get("presentation_count", 1)) + 1
+                else:
+                    payload["first_discovered_at"] = now
+                    payload["first_presented_at"] = now
+                    payload["presentation_count"] = 1
+                transaction.set(ref, payload, merge=True)
+
+            _record_in_tx(self._db.transaction(), doc_ref)
 
     def get_presented_briefing_keys(self, user_id: str) -> dict[str, dict[str, Any]]:
         col = self._db.collection("users").document(user_id).collection("briefing_presentations")
@@ -636,7 +661,7 @@ class FirestoreWatchlistRepository(WatchlistRepository):
         for d in docs:
             dict_val = d.to_dict()
             if dict_val:
-                res[d.id] = dict_val
+                res[dict_val.get("item_key") or d.id] = dict_val
         return res
 
     def get_user_briefing_state(self, user_id: str) -> dict[str, Any]:
@@ -722,6 +747,8 @@ class FirestoreWatchlistRepository(WatchlistRepository):
                     if status == "generating" and exp_str:
                         try:
                             exp_dt = datetime.fromisoformat(exp_str)
+                            if exp_dt.tzinfo is None:
+                                exp_dt = exp_dt.replace(tzinfo=timezone.utc)
                             if exp_dt > now_dt:
                                 return False, b_data
                         except Exception:
@@ -741,7 +768,7 @@ class FirestoreWatchlistRepository(WatchlistRepository):
             return _in_transaction(transaction, doc_ref)
         except Exception as e:
             logger.warning(f"Firestore claim_daily_greeting_generation error: {e}")
-            return True, None
+            return False, None
 
     def save_daily_greeting(self, user_id: str, date_str: str, briefing_data: dict[str, Any]) -> dict[str, Any]:
         now = self.utc_now_iso()
@@ -777,39 +804,12 @@ class FirestoreWatchlistRepository(WatchlistRepository):
                     d["id"] = doc.id
                     p_path = d.get("poster_path")
                     d["poster_url"] = poster_url(p_path) if p_path else None
-                    rated_at_str = d.get("updated_at") or d.get("rated_at")
-                    rated_ago = "recently"
-                    if rated_at_str:
-                        try:
-                            dt = datetime.fromisoformat(rated_at_str)
-                            if dt.tzinfo is None:
-                                dt = dt.replace(tzinfo=timezone.utc)
-                            seconds = int((now - dt).total_seconds())
-                            if seconds < 60:
-                                rated_ago = "just now"
-                            elif seconds < 3600:
-                                mins = seconds // 60
-                                rated_ago = f"{mins} min{'s' if mins > 1 else ''} ago"
-                            elif seconds < 86400:
-                                hrs = seconds // 3600
-                                rated_ago = f"{hrs} hour{'s' if hrs > 1 else ''} ago"
-                            elif seconds < 2592000:
-                                days = seconds // 86400
-                                rated_ago = f"{days} day{'s' if days > 1 else ''} ago"
-                            elif seconds < 31536000:
-                                months = seconds // 2592000
-                                rated_ago = f"{months} month{'s' if months > 1 else ''} ago"
-                            else:
-                                yrs = seconds // 31536000
-                                rated_ago = f"{yrs} year{'s' if yrs > 1 else ''} ago"
-                        except Exception:
-                            rated_ago = "recently"
-                    d["rated_ago"] = rated_ago
+                    d["rated_ago"] = format_rated_ago(d.get("updated_at") or d.get("rated_at"), now=now)
                     res.append(d)
             return res
         except Exception as e:
             logger.error("Error listing rated movies in Firestore: %s", e, exc_info=True)
-            return []
+            raise
 
     def rate_movie(
         self,
@@ -855,7 +855,14 @@ class FirestoreWatchlistRepository(WatchlistRepository):
             data["poster_url"] = poster_url(data["poster_path"])
         return data
 
-    def delete_rated_movie(self, user_id: str, media_type: str, tmdb_id: int) -> bool:
+    def delete_rated_movie(
+        self,
+        user_id: str,
+        media_type: str,
+        tmdb_id: int,
+        *,
+        remove_unowned_watched: bool = True,
+    ) -> bool:
         try:
             doc_id = f"{media_type}_{tmdb_id}"
             user_ref = self._db.collection("users").document(user_id)
@@ -871,7 +878,7 @@ class FirestoreWatchlistRepository(WatchlistRepository):
             modified_watch = False
             if watch_snap.exists:
                 w_data = watch_snap.to_dict() or {}
-                if not bool(w_data.get("is_owned")) and (w_data.get("status") == "watched" or not w_data.get("status")):
+                if remove_unowned_watched and not bool(w_data.get("is_owned")) and (w_data.get("status") == "watched" or not w_data.get("status")):
                     watch_ref.delete()
                 else:
                     watch_ref.update({"user_rating": 0})
@@ -929,7 +936,8 @@ class FirestoreWatchlistRepository(WatchlistRepository):
                 query = query.where("user_id", "==", user_id)
             if fallback_only:
                 query = query.where("fallback_used", "==", True)
-            docs = list(query.stream())
+            query_limit = min(max(limit + offset, 500), 2000)
+            docs = list(query.limit(query_limit).stream())
         except Exception as query_err:
             logger.warning("Firestore composite query on agent_decision_logs failed (%s), falling back to client-side filter", query_err)
             docs = list(col.order_by("timestamp", direction=firestore.Query.DESCENDING).limit(500).stream())
@@ -963,7 +971,11 @@ class FirestoreWatchlistRepository(WatchlistRepository):
         return {"total": total, "logs": paginated, "limit": limit, "offset": offset}
 
     def get_decision_log(self, log_id: str) -> dict[str, Any] | None:
-        doc = self._db.collection("agent_decision_logs").document(log_id).get()
+        try:
+            safe_log_id = _safe_firestore_id(log_id, "log_id")
+        except ValueError:
+            return None
+        doc = self._db.collection("agent_decision_logs").document(safe_log_id).get()
         if doc.exists:
             return self._format_decision_log_doc(doc.to_dict())
         return None
@@ -987,19 +999,24 @@ class FirestoreWatchlistRepository(WatchlistRepository):
 
     def save_decision_config(self, config_dict: dict[str, Any], updated_by: str, change_note: str) -> dict[str, Any]:
         col = self._db.collection("agent_decision_configs")
-        try:
-            docs = list(col.order_by("version", direction=firestore.Query.DESCENDING).limit(1).stream())
-            max_ver = (docs[0].to_dict() or {}).get("version", 0) if docs else 0
-        except Exception:
-            max_ver = 0
-        new_ver = int(max_ver or 0) + 1
-        saved = dict(config_dict)
-        saved["version"] = new_ver
-        saved["updated_at"] = self.utc_now_iso()
-        saved["updated_by"] = updated_by
-        saved["change_note"] = change_note
-        col.document(f"v_{new_ver}").set(saved)
-        return saved
+
+        @firestore.transactional
+        def _save_tx(transaction):
+            try:
+                docs = list(col.order_by("version", direction=firestore.Query.DESCENDING).limit(1).stream(transaction=transaction))
+                max_ver = (docs[0].to_dict() or {}).get("version", 0) if docs else 0
+            except Exception:
+                max_ver = 0
+            new_ver = int(max_ver or 0) + 1
+            saved = dict(config_dict)
+            saved["version"] = new_ver
+            saved["updated_at"] = self.utc_now_iso()
+            saved["updated_by"] = updated_by
+            saved["change_note"] = change_note
+            transaction.set(col.document(f"v_{new_ver}"), saved)
+            return saved
+
+        return _save_tx(self._db.transaction())
 
     def get_active_prompt_version(self) -> dict[str, Any]:
         try:
@@ -1039,19 +1056,24 @@ class FirestoreWatchlistRepository(WatchlistRepository):
 
     def save_prompt_version(self, prompt_dict: dict[str, Any], updated_by: str, change_note: str) -> dict[str, Any]:
         col = self._db.collection("agent_prompt_versions")
-        try:
-            docs = list(col.order_by("version", direction=firestore.Query.DESCENDING).limit(1).stream())
-            max_ver = (docs[0].to_dict() or {}).get("version", 0) if docs else 0
-        except Exception:
-            max_ver = 0
-        new_ver = int(max_ver or 0) + 1
-        saved = dict(prompt_dict)
-        saved["version"] = new_ver
-        saved["updated_at"] = self.utc_now_iso()
-        saved["updated_by"] = updated_by
-        saved["change_note"] = change_note
-        col.document(f"v_{new_ver}").set(saved)
-        return saved
+
+        @firestore.transactional
+        def _save_tx(transaction):
+            try:
+                docs = list(col.order_by("version", direction=firestore.Query.DESCENDING).limit(1).stream(transaction=transaction))
+                max_ver = (docs[0].to_dict() or {}).get("version", 0) if docs else 0
+            except Exception:
+                max_ver = 0
+            new_ver = int(max_ver or 0) + 1
+            saved = dict(prompt_dict)
+            saved["version"] = new_ver
+            saved["updated_at"] = self.utc_now_iso()
+            saved["updated_by"] = updated_by
+            saved["change_note"] = change_note
+            transaction.set(col.document(f"v_{new_ver}"), saved)
+            return saved
+
+        return _save_tx(self._db.transaction())
 
     def is_trivia_presented(self, user_id: str, fact_id: str) -> bool:
         safe_id = hashlib.sha256(fact_id.encode("utf-8")).hexdigest()
@@ -1125,7 +1147,8 @@ class FirestoreWatchlistRepository(WatchlistRepository):
 
     def add_verified_trivia(self, fact_dict: dict[str, Any]) -> dict[str, Any]:
         now = self.utc_now_iso()
-        fact_id = fact_dict.get("fact_id") or f"trivia:{fact_dict.get('tmdb_id', 'gen')}:{hash(fact_dict.get('fact_text'))}"
+        fact_text_digest = hashlib.sha256(str(fact_dict.get("fact_text") or "").encode("utf-8")).hexdigest()[:16]
+        fact_id = fact_dict.get("fact_id") or f"trivia:{fact_dict.get('tmdb_id', 'gen')}:{fact_text_digest}"
         safe_id = hashlib.sha256(fact_id.encode("utf-8")).hexdigest()
         data = {
             "fact_id": fact_id,
@@ -1154,7 +1177,8 @@ class FirestoreWatchlistRepository(WatchlistRepository):
 
     def add_major_news(self, news_dict: dict[str, Any]) -> dict[str, Any]:
         now = self.utc_now_iso()
-        story_id = news_dict.get("story_id") or f"news:{news_dict.get('story_cluster_id', 'c')}:{hash(news_dict.get('title'))}"
+        title_digest = hashlib.sha256(str(news_dict.get("title") or "").encode("utf-8")).hexdigest()[:16]
+        story_id = news_dict.get("story_id") or f"news:{news_dict.get('story_cluster_id', 'c')}:{title_digest}"
         safe_id = hashlib.sha256(story_id.encode("utf-8")).hexdigest()
         data = {
             "story_id": story_id,
@@ -1182,14 +1206,7 @@ class FirestoreWatchlistRepository(WatchlistRepository):
             .get()
         )
         if not doc.exists:
-            return {
-                "user_id": user_id,
-                "streaming_services": [],
-                "tracked_teams": [],
-                "show_in_queue": True,
-                "setup_completed": False,
-                "updated_at": None,
-            }
+            return default_sports_preferences(user_id)
         data = doc.to_dict() or {}
         return {
             "user_id": user_id,
@@ -1201,21 +1218,27 @@ class FirestoreWatchlistRepository(WatchlistRepository):
         }
 
     def save_sports_preferences(self, user_id: str, prefs: dict[str, Any]) -> dict[str, Any]:
-        current = self.get_sports_preferences(user_id)
-        now = self.utc_now_iso()
-        updated = {
-            "user_id": user_id,
-            "streaming_services": prefs.get("streaming_services", current["streaming_services"]),
-            "tracked_teams": prefs.get("tracked_teams", current["tracked_teams"]),
-            "show_in_queue": bool(prefs.get("show_in_queue", current["show_in_queue"])),
-            "setup_completed": bool(prefs.get("setup_completed", True)),
-            "updated_at": now,
-        }
-        (
+        doc_ref = (
             self._db.collection("users")
             .document(user_id)
             .collection("settings")
             .document("sports")
-            .set(updated, merge=True)
         )
-        return updated
+
+        @firestore.transactional
+        def _save_tx(transaction, ref):
+            snap = ref.get(transaction=transaction)
+            existing = snap.to_dict() or {} if snap.exists else {}
+            now = self.utc_now_iso()
+            updated = {
+                "user_id": user_id,
+                "streaming_services": prefs.get("streaming_services", existing.get("streaming_services") or []),
+                "tracked_teams": prefs.get("tracked_teams", existing.get("tracked_teams") or []),
+                "show_in_queue": bool(prefs.get("show_in_queue", existing.get("show_in_queue", True))),
+                "setup_completed": bool(prefs.get("setup_completed", True)),
+                "updated_at": now,
+            }
+            transaction.set(ref, updated, merge=True)
+            return updated
+
+        return _save_tx(self._db.transaction(), doc_ref)

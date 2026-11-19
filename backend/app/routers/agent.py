@@ -1,30 +1,35 @@
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from pydantic import BaseModel, Field
 
-from app.auth import CurrentUser, get_current_user
+from app.auth import CurrentUser, get_current_user, require_cookie_csrf_and_origin
 from app.services.agent_service import AiAgentService
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/agent", tags=["agent"], dependencies=[Depends(get_current_user)])
+router = APIRouter(
+    prefix="/api/agent",
+    tags=["agent"],
+    dependencies=[Depends(get_current_user), Depends(require_cookie_csrf_and_origin)],
+)
 
 
 class AgentSettingsPayload(BaseModel):
-    personality_preset: str = "cinephile"
-    custom_prompt: str = ""
-    location: str = ""
-    timezone: str | None = None
-    user_timezone: str | None = None
+    personality_preset: str = Field(default="cinephile", max_length=64)
+    custom_prompt: str = Field(default="", max_length=4000)
+    location: str = Field(default="", max_length=200)
+    timezone: str | None = Field(default=None, max_length=64)
+    user_timezone: str | None = Field(default=None, max_length=64)
     notify_on_login: bool = True
     auto_add_mentioned: bool = True
     track_price_drops: bool = True
+    auto_speak_briefing: bool = False
 
 
 class ChatMessagePayload(BaseModel):
-    message: str
+    message: str = Field(..., min_length=1, max_length=4000)
 
 
 from app.services.briefing_service import BriefingService
@@ -33,7 +38,7 @@ from app.services.briefing_service import BriefingService
 @router.get("/briefing")
 async def get_agent_briefing(
     request: Request,
-    session_id: str | None = None,
+    session_id: str | None = Query(default=None, max_length=128),
     force_refresh: bool = False,
     current_user: CurrentUser = Depends(get_current_user),
 ) -> dict[str, Any]:
@@ -49,7 +54,7 @@ async def get_agent_briefing(
 
 
 @router.get("/settings")
-async def get_agent_settings(
+def get_agent_settings(
     request: Request,
     current_user: CurrentUser = Depends(get_current_user),
 ) -> dict[str, Any]:
@@ -64,7 +69,7 @@ async def get_agent_settings(
 
 
 @router.post("/settings")
-async def save_agent_settings(
+def save_agent_settings(
     payload: AgentSettingsPayload,
     request: Request,
     current_user: CurrentUser = Depends(get_current_user),
@@ -74,7 +79,7 @@ async def save_agent_settings(
 
 
 @router.get("/chat")
-async def list_chat_messages(
+def list_chat_messages(
     request: Request,
     current_user: CurrentUser = Depends(get_current_user),
 ) -> list[dict[str, Any]]:
@@ -96,7 +101,7 @@ async def send_chat_message(
 
 
 @router.delete("/chat")
-async def clear_chat_history(
+def clear_chat_history(
     request: Request,
     current_user: CurrentUser = Depends(get_current_user),
 ) -> dict[str, str]:
@@ -106,9 +111,9 @@ async def clear_chat_history(
 
 
 @router.get("/logs")
-async def get_agent_logs(
+def get_agent_logs(
     request: Request,
-    limit: int = 50,
+    limit: int = Query(50, ge=1, le=500),
     current_user: CurrentUser = Depends(get_current_user),
 ) -> dict[str, Any]:
     repo = request.app.state.watchlist_repo

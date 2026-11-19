@@ -50,28 +50,52 @@ function notifyListeners() {
   }, 0);
 }
 
+function isSensitiveDebugKey(key: string): boolean {
+  const lower = key.toLowerCase();
+  return (
+    lower.includes("token") ||
+    lower.includes("key") ||
+    lower.includes("password") ||
+    lower.includes("cookie") ||
+    lower.includes("secret") ||
+    lower.includes("credential") ||
+    lower.includes("authorization") ||
+    lower === "email" ||
+    lower.endsWith("_email")
+  );
+}
+
+function scrubDebugString(val: string): string {
+  return val
+    .replace(/eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}/g, "[REDACTED_JWT]")
+    .replace(/([?&])(api_key|key)=[^&\s"']+/gi, "$1$2=[REDACTED]")
+    .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, "Bearer [REDACTED]");
+}
+
+function sanitizeValue(val: unknown, depth = 0): unknown {
+  if (depth > 8) return "[TRUNCATED]";
+  if (typeof val === "string") return scrubDebugString(val);
+  if (Array.isArray(val)) return val.map((item) => sanitizeValue(item, depth + 1));
+  if (val && typeof val === "object") {
+    const clean: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(val as Record<string, unknown>)) {
+      if (isSensitiveDebugKey(k)) {
+        clean[k] = typeof v === "string" ? `[REDACTED len=${v.length}]` : "[REDACTED]";
+      } else {
+        clean[k] = sanitizeValue(v, depth + 1);
+      }
+    }
+    return clean;
+  }
+  return val;
+}
+
 /**
- * Sanitize details — strip anything that looks like a token/key/password.
+ * Sanitize details — recursively strip tokens/keys/passwords/emails/JWTs.
  */
 function sanitize(detail?: Record<string, unknown>): Record<string, unknown> | undefined {
   if (!detail) return undefined;
-  const clean: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(detail)) {
-    const lower = k.toLowerCase();
-    if (
-      lower.includes("token") ||
-      lower.includes("key") ||
-      lower.includes("password") ||
-      lower.includes("cookie") ||
-      lower.includes("secret") ||
-      lower.includes("credential")
-    ) {
-      clean[k] = typeof v === "string" ? `[REDACTED len=${v.length}]` : "[REDACTED]";
-    } else {
-      clean[k] = v;
-    }
-  }
-  return clean;
+  return sanitizeValue(detail, 0) as Record<string, unknown>;
 }
 
 function isConsoleDebugEnabled(): boolean {

@@ -67,33 +67,52 @@ export function generateTraceId(): string {
   return `auth-${timestamp}-${randomChars}`;
 }
 
+function isSensitivePerfKey(key: string): boolean {
+  const lowerKey = key.toLowerCase();
+  return (
+    lowerKey.includes("token") ||
+    lowerKey.includes("key") ||
+    lowerKey.includes("password") ||
+    lowerKey.includes("auth") ||
+    lowerKey.includes("cookie") ||
+    lowerKey.includes("credential") ||
+    lowerKey.includes("secret") ||
+    lowerKey === "email" ||
+    lowerKey.endsWith("_email")
+  );
+}
+
+function scrubPerfValue(value: any, depth = 0): any {
+  if (depth > 8) return "[TRUNCATED]";
+  if (typeof value === "string") {
+    return value
+      .replace(/eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}/g, "[REDACTED_JWT]")
+      .replace(/([?&])(api_key|key)=[^&\s"']+/gi, "$1$2=[REDACTED]")
+      .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, "Bearer [REDACTED]");
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => scrubPerfValue(item, depth + 1));
+  }
+  if (value && typeof value === "object") {
+    const sanitized: Record<string, any> = {};
+    for (const [key, val] of Object.entries(value)) {
+      if (isSensitivePerfKey(key)) {
+        sanitized[key] = typeof val === "string" ? `[REDACTED (length: ${val.length})]` : "[REDACTED]";
+      } else {
+        sanitized[key] = scrubPerfValue(val, depth + 1);
+      }
+    }
+    return sanitized;
+  }
+  return value;
+}
+
 /**
- * Sanitizes sensitive fields from details object (tokens, keys, passwords, cookies, authorization headers)
+ * Sanitizes sensitive fields recursively (tokens, keys, passwords, cookies, authorization headers, emails)
  */
 export function sanitizeDetails(details?: Record<string, any>): Record<string, any> | undefined {
   if (!details) return undefined;
-  const sanitized: Record<string, any> = {};
-  for (const [key, value] of Object.entries(details)) {
-    const lowerKey = key.toLowerCase();
-    if (
-      lowerKey.includes("token") ||
-      lowerKey.includes("key") ||
-      lowerKey.includes("password") ||
-      lowerKey.includes("auth") ||
-      lowerKey.includes("cookie") ||
-      lowerKey.includes("credential") ||
-      lowerKey.includes("secret")
-    ) {
-      if (typeof value === "string") {
-        sanitized[key] = `[REDACTED (length: ${value.length})]`;
-      } else {
-        sanitized[key] = `[REDACTED]`;
-      }
-    } else {
-      sanitized[key] = value;
-    }
-  }
-  return sanitized;
+  return scrubPerfValue(details, 0) as Record<string, any>;
 }
 
 /**
@@ -142,6 +161,14 @@ export function getActiveTrace(): AuthTrace | null {
  */
 export function getTraceHistory(): AuthTrace[] {
   return traceHistory;
+}
+
+/**
+ * Clear stored active and historical auth traces (e.g. on logout)
+ */
+export function clearTraceHistory(): void {
+  activeTrace = null;
+  traceHistory = [];
 }
 
 /**

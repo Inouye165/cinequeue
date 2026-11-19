@@ -111,7 +111,9 @@ export function SearchHeader({
               title="Add or remove your streaming services and tracked sports teams"
             >
               <span aria-hidden="true">📺</span>
-              <span>My Services ({selectedStreamingServices.length})</span>
+              <span>
+                <span className="hide-on-xs">My </span>Services ({selectedStreamingServices.length})
+              </span>
             </button>
           )}
 
@@ -128,7 +130,7 @@ export function SearchHeader({
                 <path d="m7 10 5 5 5-5" />
                 <path d="M5 21h14" />
               </svg>
-              <span>Get App</span>
+              <span className="hide-on-xs">Get App</span>
             </button>
           )}
 

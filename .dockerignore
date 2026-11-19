@@ -1,7 +1,12 @@
-# Environment files
+# Environment & secrets
 .env
 .env.*
 .env.local
+cloudrun-env.yaml
+*.key
+*.pem
+*service-account*.json
+*credentials*.json
 
 # Git
 .git
@@ -31,8 +36,18 @@ dist
 
 # Database files
 *.db
+*.db-wal
+*.db-shm
+data/
 backend/data/*.db
 backend/data/
+
+# Test suites & scratch
+backend/tests/
+frontend/tests/
+frontend/e2e/
+scratch/
+*.md
 
 # Logs
 backend/logs/

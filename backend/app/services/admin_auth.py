@@ -1,13 +1,17 @@
+import asyncio
 import hashlib
 import hmac
 import logging
 import secrets
+import threading
 import time
+from collections import deque
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 from fastapi import Depends, HTTPException, Request
 from fastapi.security import APIKeyCookie
 
+import app.config as config
 from app.config import ADMIN_SESSION_COOKIE_NAME, ADMIN_USERNAME, ENABLE_FALLBACK_ADMIN_AUTH
 
 logger = logging.getLogger(__name__)
@@ -34,6 +38,59 @@ def verify_password(password: str, password_hash: str, salt: str) -> bool:
 def generate_session_token() -> str:
     """Generate a secure session token."""
     return secrets.token_hex(32)
+
+def hash_session_token(raw_token: str) -> str:
+    """Return a deterministic SHA-256 hex digest for persisting/looking up admin sessions."""
+    return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+
+_DUMMY_PASSWORD_SALT = "00000000000000000000000000000000"
+
+async def verify_password_async(password: str, password_hash: str, salt: str) -> bool:
+    """Offload PBKDF2 password verification onto a worker thread."""
+    return await asyncio.to_thread(verify_password, password, password_hash, salt)
+
+async def dummy_password_work(password: str) -> None:
+    """Run constant-cost dummy PBKDF2 work when no DB admin record exists."""
+    await asyncio.to_thread(hash_password, password, _DUMMY_PASSWORD_SALT)
+
+ADMIN_LOGIN_MAX_FAILURES = 5
+ADMIN_LOGIN_WINDOW_SECONDS = 300.0
+_admin_login_failures: dict[str, deque[float]] = {}
+_admin_login_lock = threading.Lock()
+
+def reset_admin_login_rate_limits() -> None:
+    """Reset the in-memory admin login brute-force tracker."""
+    with _admin_login_lock:
+        _admin_login_failures.clear()
+
+def _prune_failures_locked(dq: deque[float], cutoff: float) -> None:
+    while dq and dq[0] < cutoff:
+        dq.popleft()
+
+def is_admin_login_rate_limited(client_ip: str) -> bool:
+    now = time.monotonic()
+    cutoff = now - ADMIN_LOGIN_WINDOW_SECONDS
+    with _admin_login_lock:
+        dq = _admin_login_failures.get(client_ip)
+        if not dq:
+            return False
+        _prune_failures_locked(dq, cutoff)
+        if not dq:
+            _admin_login_failures.pop(client_ip, None)
+            return False
+        return len(dq) >= ADMIN_LOGIN_MAX_FAILURES
+
+def record_admin_login_failure(client_ip: str) -> None:
+    now = time.monotonic()
+    cutoff = now - ADMIN_LOGIN_WINDOW_SECONDS
+    with _admin_login_lock:
+        dq = _admin_login_failures.setdefault(client_ip, deque())
+        _prune_failures_locked(dq, cutoff)
+        dq.append(now)
+
+def clear_admin_login_failures(client_ip: str) -> None:
+    with _admin_login_lock:
+        _admin_login_failures.pop(client_ip, None)
 
 # Secure API Cookie Scheme for admin sessions
 admin_cookie_scheme = APIKeyCookie(name=ADMIN_SESSION_COOKIE_NAME, auto_error=False)
@@ -62,7 +119,9 @@ async def get_current_admin(
 
         try:
             from firebase_admin import auth as firebase_auth
-            decoded_token = firebase_auth.verify_id_token(token, clock_skew_seconds=60)
+            decoded_token = await asyncio.to_thread(
+                firebase_auth.verify_id_token, token, clock_skew_seconds=60
+            )
             
             tv_end = time.perf_counter()
             if perf:
@@ -72,6 +131,9 @@ async def get_current_admin(
             email = decoded_token.get("email")
             if not email:
                 raise HTTPException(status_code=401, detail="Invalid token claims: email missing")
+            if not decoded_token.get("email_verified"):
+                logger.warning("Admin Bearer token email is not verified")
+                raise HTTPException(status_code=401, detail="Email is not verified")
 
             email_normalized = email.strip().lower()
 
@@ -80,7 +142,7 @@ async def get_current_admin(
                 perf["timings"]["admin_lookup_started"] = db_start
 
             repo = request.app.state.watchlist_repo
-            db_admin = repo.get_admin_user(email_normalized)
+            db_admin = await asyncio.to_thread(repo.get_admin_user, email_normalized)
             is_fallback = bool(ENABLE_FALLBACK_ADMIN_AUTH and ADMIN_USERNAME and email_normalized == ADMIN_USERNAME.strip().lower())
             is_admin = bool(db_admin or is_fallback)
 
@@ -101,10 +163,16 @@ async def get_current_admin(
                 if request.headers.get("X-Admin-Role-Check") == "1" and request.url.path == "/api/admin/me":
                     logger.debug("User %s is a standard user (not admin) during passive role check", email_normalized)
                     return ""
-                logger.warning("User %s is not an authorized administrator", email_normalized)
-                raise HTTPException(status_code=403, detail="Not authorized as an administrator")
-
-            return email_normalized
+                cookies = getattr(request, "cookies", None) or {}
+                has_admin_cookie = bool(cookies.get(config.ADMIN_SESSION_COOKIE_NAME) or cookies.get(ADMIN_SESSION_COOKIE_NAME) or session_cookie)
+                if not has_admin_cookie:
+                    logger.warning("User %s is not an authorized administrator", email_normalized)
+                    raise HTTPException(status_code=403, detail="Not authorized as an administrator")
+                logger.info("Bearer user %s is not admin; falling through to admin session cookie check", email_normalized)
+            else:
+                if hasattr(request, "state"):
+                    request.state.used_admin_cookie_auth = False
+                return email_normalized
         except HTTPException:
             raise
         except Exception as e:
@@ -112,6 +180,8 @@ async def get_current_admin(
             raise HTTPException(status_code=401, detail="Invalid ID token")
 
     # 2. Traditional Cookie fallback path
+    cookies = getattr(request, "cookies", None) or {}
+    session_cookie = cookies.get(config.ADMIN_SESSION_COOKIE_NAME) or cookies.get(ADMIN_SESSION_COOKIE_NAME) or session_cookie
     if not session_cookie:
         logger.warning("Admin session cookie is missing")
         raise HTTPException(status_code=401, detail="Admin session required")
@@ -122,7 +192,13 @@ async def get_current_admin(
         perf["timings"]["admin_lookup_started"] = db_start
 
     repo = request.app.state.watchlist_repo
-    session = repo.get_admin_session(session_cookie)
+    hashed_session_id = hash_session_token(session_cookie)
+    session = await asyncio.to_thread(repo.get_admin_session, hashed_session_id)
+    matched_session_key = hashed_session_id
+    if not session:
+        # Backwards compatibility for directly seeded legacy raw session IDs in tests
+        session = await asyncio.to_thread(repo.get_admin_session, session_cookie)
+        matched_session_key = session_cookie
 
     db_end = time.perf_counter()
     if perf:
@@ -141,22 +217,27 @@ async def get_current_admin(
 
     try:
         expires_at = datetime.fromisoformat(expires_at_str)
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
         if datetime.now(timezone.utc) > expires_at:
             logger.warning("Admin session has expired")
             # Clean up expired session
-            repo.delete_admin_session(session_cookie)
+            await asyncio.to_thread(repo.delete_admin_session, matched_session_key)
             raise HTTPException(status_code=401, detail="Admin session expired")
     except ValueError as e:
         logger.error("Failed to parse expires_at ISO string: %s", e)
         raise HTTPException(status_code=401, detail="Invalid admin session")
 
-    username = session["username"]
-    is_fallback = bool(ENABLE_FALLBACK_ADMIN_AUTH and ADMIN_USERNAME and username.strip().lower() == ADMIN_USERNAME.strip().lower())
+    username = (session.get("username") or "").strip().lower()
+    is_fallback = bool(ENABLE_FALLBACK_ADMIN_AUTH and ADMIN_USERNAME and username == ADMIN_USERNAME.strip().lower())
     # Check that this admin user still exists in the database or matches ENABLE_FALLBACK_ADMIN_AUTH
-    if not (repo.get_admin_user(username) or is_fallback):
+    db_admin_user = await asyncio.to_thread(repo.get_admin_user, username) if username else None
+    if not username or not (db_admin_user or is_fallback):
         logger.warning("Admin session belongs to a deleted/revoked administrator: %s", username)
-        repo.delete_admin_session(session_cookie)
+        await asyncio.to_thread(repo.delete_admin_session, matched_session_key)
         raise HTTPException(status_code=401, detail="Administrator privileges revoked")
 
+    if hasattr(request, "state"):
+        request.state.used_admin_cookie_auth = True
     logger.info("Admin session validated for user: %s", username)
     return username

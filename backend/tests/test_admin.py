@@ -6,47 +6,34 @@ from fastapi.testclient import TestClient
 @pytest.fixture
 def client_with_admin_auth():
     """Fixture to provide a test client with auth enabled and reloaded modules."""
-    with patch.dict("os.environ", {
-        "AUTH_ENABLED": "true",
-        "AUTH_MODE": "allowlist",
-        "AUTH_ALLOWED_EMAILS": "inouye165@gmail.com,test@example.com",
-        "AUTH_ALLOWED_ORIGINS": "https://cinequeue-7tvty3vmvq-uw.a.run.app",
-        "ENVIRONMENT": "production",
-        "SESSION_COOKIE_SECURE": "false",
-        "FIREBASE_API_KEY": "mock_firebase_api_key",
-        "ENABLE_FALLBACK_ADMIN_AUTH": "true",
-        "ADMIN_USERNAME": "admin",
-        "ADMIN_PASSWORD": "admin_secure_pass_2026"
-    }):
-        import importlib
-        import app.config
-        importlib.reload(app.config)
-        app.config.ENABLE_FALLBACK_ADMIN_AUTH = True
-        app.config.ADMIN_USERNAME = "admin"
-        app.config.ADMIN_PASSWORD = "admin_secure_pass_2026"
-        import app.auth
-        importlib.reload(app.auth)
-        import app.services.admin_auth
-        importlib.reload(app.services.admin_auth)
-        import app.routers.auth
-        importlib.reload(app.routers.auth)
-        import app.routers.admin
-        importlib.reload(app.routers.admin)
-        import app.main
-        importlib.reload(app.main)
+    from conftest import reload_all_app_modules
 
-        with TestClient(app.main.app, base_url="https://testserver") as c:
-            app.main.app.state.tmdb = AsyncMock()
-            yield c
+    try:
+        with patch.dict("os.environ", {
+            "AUTH_ENABLED": "true",
+            "AUTH_MODE": "allowlist",
+            "AUTH_ALLOWED_EMAILS": "inouye165@gmail.com,test@example.com",
+            "AUTH_ALLOWED_ORIGINS": "https://cinequeue-7tvty3vmvq-uw.a.run.app",
+            "ENVIRONMENT": "production",
+            "SESSION_COOKIE_SECURE": "false",
+            "FIREBASE_API_KEY": "mock_firebase_api_key",
+            "ENABLE_FALLBACK_ADMIN_AUTH": "true",
+            "ADMIN_USERNAME": "admin",
+            "ADMIN_PASSWORD": "admin_secure_pass_2026"
+        }), patch("app.auth.warmup_firebase_auth", return_value=None):
+            reload_all_app_modules()
+            import app.config
+            app.config.ENABLE_FALLBACK_ADMIN_AUTH = True
+            app.config.ADMIN_USERNAME = "admin"
+            app.config.ADMIN_PASSWORD = "admin_secure_pass_2026"
+            import app.main
 
-    # Clean up and restore defaults
-    importlib.reload(app.config)
-    importlib.reload(app.auth)
-    import app.routers.auth
-    importlib.reload(app.routers.auth)
-    import app.routers.admin
-    importlib.reload(app.routers.admin)
-    importlib.reload(app.main)
+            with TestClient(app.main.app, base_url="https://testserver") as c:
+                app.main.app.state.tmdb = AsyncMock()
+                yield c
+    finally:
+        # Clean up and restore defaults
+        reload_all_app_modules()
 
 
 def test_admin_login_success(client_with_admin_auth):
@@ -317,6 +304,7 @@ def test_admin_bearer_token_success(mock_verify_token, client_with_admin_auth):
     mock_verify_token.return_value = {
         "uid": "admin_uid_123",
         "email": "admin@example.com",
+        "email_verified": True,
     }
     
     # We temporarily patch ADMIN_USERNAME in config to admin@example.com for matching
@@ -335,6 +323,7 @@ def test_admin_bearer_token_forbidden(mock_verify_token, client_with_admin_auth)
     mock_verify_token.return_value = {
         "uid": "nonadmin_uid_456",
         "email": "user@example.com",
+        "email_verified": True,
     }
     
     response = client_with_admin_auth.get(
@@ -367,6 +356,7 @@ def test_admin_bearer_token_normalization(mock_verify_token, client_with_admin_a
     mock_verify_token.return_value = {
         "uid": "admin_uid_123",
         "email": "  Admin@Example.Com  ",
+        "email_verified": True,
     }
     
     with patch("app.services.admin_auth.ADMIN_USERNAME", "admin@example.com"):
@@ -388,6 +378,7 @@ def test_admin_bearer_token_no_raw_token_logged(mock_verify_token, client_with_a
     mock_verify_token.return_value = {
         "uid": "admin_uid_123",
         "email": "admin@example.com",
+        "email_verified": True,
     }
     
     with patch("app.services.admin_auth.ADMIN_USERNAME", "admin@example.com"):
@@ -417,7 +408,8 @@ def test_admin_session_revocation(client_with_admin_auth):
     
     login_res = client_with_admin_auth.post(
         "/api/admin/login",
-        json={"username": "revokeme", "password": "secretpass123", "csrf_token": csrf_token}
+        json={"username": "revokeme", "password": "secretpass123", "csrf_token": csrf_token},
+        headers={"Origin": "https://cinequeue-7tvty3vmvq-uw.a.run.app"},
     )
     assert login_res.status_code == 200
     
@@ -567,20 +559,20 @@ def test_fallback_admin_auth_fails_closed_on_blank_credentials(client_with_admin
 def test_fallback_admin_config_startup_validation():
     """Config raises ValueError if ENABLE_FALLBACK_ADMIN_AUTH is True but credentials are missing."""
     import importlib
-    with patch("app.config.load_dotenv"):
-        with patch.dict("os.environ", {
-            "ENABLE_FALLBACK_ADMIN_AUTH": "true",
-            "ADMIN_USERNAME": "",
-            "ADMIN_PASSWORD": ""
-        }):
-            with pytest.raises(ValueError) as exc_info:
-                import app.config
-                importlib.reload(app.config)
-            assert "ENABLE_FALLBACK_ADMIN_AUTH" in str(exc_info.value)
-
-    # Restore config
-    import app.config
-    importlib.reload(app.config)
+    from conftest import reload_all_app_modules
+    try:
+        with patch("app.config.load_dotenv"):
+            with patch.dict("os.environ", {
+                "ENABLE_FALLBACK_ADMIN_AUTH": "true",
+                "ADMIN_USERNAME": "",
+                "ADMIN_PASSWORD": ""
+            }):
+                with pytest.raises(ValueError) as exc_info:
+                    import app.config
+                    importlib.reload(app.config)
+                assert "ENABLE_FALLBACK_ADMIN_AUTH" in str(exc_info.value)
+    finally:
+        reload_all_app_modules()
 
 
 @patch("firebase_admin.auth.verify_id_token")
@@ -589,6 +581,71 @@ def test_admin_bearer_token_passive_role_check_returns_200_for_non_admin(mock_ve
     mock_verify_token.return_value = {
         "uid": "nonadmin_uid_456",
         "email": "user@example.com",
+        "email_verified": True,
+    }
+
+    response = client_with_admin_auth.get(
+        "/api/admin/me",
+        headers={
+            "Authorization": "Bearer user-test-token",
+            "X-Admin-Role-Check": "1",
+        },
+    )
+    assert response.status_code == 200
+    assert response.json() == {"username": "", "is_admin": False}
+
+
+@patch("firebase_admin.auth.verify_id_token")
+def test_admin_bearer_token_unverified_email_rejected(mock_verify_token, client_with_admin_auth):
+    """Admin Bearer token without email_verified=True receives 401."""
+    mock_verify_token.return_value = {
+        "uid": "admin_uid_123",
+        "email": "admin@example.com",
+        "email_verified": False,
+    }
+
+    with patch("app.services.admin_auth.ADMIN_USERNAME", "admin@example.com"):
+        response = client_with_admin_auth.get(
+            "/api/admin/me",
+            headers={"Authorization": "Bearer unverified-token"},
+        )
+        assert response.status_code == 401
+        assert "not verified" in response.json()["detail"].lower()
+
+
+@patch("firebase_admin.auth.verify_id_token")
+def test_admin_dual_auth_falls_back_to_admin_cookie(mock_verify_token, client_with_admin_auth):
+    """Non-admin Bearer user with valid fallback admin session cookie authenticates via cookie."""
+    from datetime import datetime, timedelta, timezone
+    from app.services.admin_auth import ADMIN_SESSION_COOKIE_NAME
+
+    repo = client_with_admin_auth.app.state.watchlist_repo
+    expires_at = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    repo.create_admin_session("valid_fallback_admin_sid", "admin", expires_at)
+
+    mock_verify_token.return_value = {
+        "uid": "nonadmin_uid_456",
+        "email": "user@example.com",
+        "email_verified": True,
+    }
+    client_with_admin_auth.cookies.set(ADMIN_SESSION_COOKIE_NAME, "valid_fallback_admin_sid")
+
+    response = client_with_admin_auth.get(
+        "/api/admin/me",
+        headers={"Authorization": "Bearer user-test-token"},
+    )
+    assert response.status_code == 200
+    assert response.json() == {"username": "admin"}
+
+
+
+@patch("firebase_admin.auth.verify_id_token")
+def test_admin_bearer_token_passive_role_check_returns_200_for_non_admin(mock_verify_token, client_with_admin_auth):
+    """When X-Admin-Role-Check: 1 is passed on /api/admin/me, non-admin receives 200 with is_admin=False."""
+    mock_verify_token.return_value = {
+        "uid": "nonadmin_uid_456",
+        "email": "user@example.com",
+        "email_verified": True,
     }
 
     response = client_with_admin_auth.get(

@@ -20,8 +20,10 @@ ENABLE_AI_CALLS = os.getenv("ENABLE_AI_CALLS", "false").strip().lower() == "true
 AGENT_DEBUG = os.getenv("AGENT_DEBUG", "false").strip().lower() == "true"
 
 
-if os.getenv("DATA_DIR"):
-    DATA_DIR = Path(os.getenv("DATA_DIR"))
+_raw_data_dir = os.getenv("DATA_DIR", "").strip()
+if _raw_data_dir:
+    _candidate_data_dir = Path(_raw_data_dir)
+    DATA_DIR = _candidate_data_dir if _candidate_data_dir.is_absolute() else (ROOT_DIR / _candidate_data_dir).resolve()
 else:
     DATA_DIR = ROOT_DIR / "backend" / "data"
 
@@ -42,18 +44,28 @@ PORT = int(os.getenv("PORT", "8080"))
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development").strip().lower()
 AUTH_ENABLED = os.getenv("AUTH_ENABLED", "false").strip().lower() == "true"
 AUTH_MODE = os.getenv("AUTH_MODE", "allowlist").strip().lower()
+if AUTH_MODE not in {"allowlist", "approval"}:
+    raise ValueError("AUTH_MODE must be 'allowlist' or 'approval'")
 
 _raw_emails = os.getenv("AUTH_ALLOWED_EMAILS", "")
 AUTH_ALLOWED_EMAILS = [e.strip().lower() for e in _raw_emails.split(",") if e.strip()]
 
 _raw_origins = os.getenv("AUTH_ALLOWED_ORIGINS", "")
-AUTH_ALLOWED_ORIGINS = [o.strip().rstrip("/") for o in _raw_origins.split(",") if o.strip()] or [
-    "http://localhost:5180",
-    "http://127.0.0.1:5180",
-    "http://localhost:8080",
-    "http://127.0.0.1:8080",
-    "https://cinequeue-568212960791.us-west1.run.app",
-]
+_parsed_origins = [o.strip().rstrip("/") for o in _raw_origins.split(",") if o.strip()]
+if _parsed_origins:
+    AUTH_ALLOWED_ORIGINS = _parsed_origins
+elif ENVIRONMENT != "production":
+    AUTH_ALLOWED_ORIGINS = [
+        "http://localhost:5180",
+        "http://127.0.0.1:5180",
+        "http://localhost:8080",
+        "http://127.0.0.1:8080",
+        "http://localhost:8081",
+        "http://127.0.0.1:8081",
+        "https://cinequeue-568212960791.us-west1.run.app",
+    ]
+else:
+    AUTH_ALLOWED_ORIGINS = []
 
 FIREBASE_PROJECT_ID = os.getenv("FIREBASE_PROJECT_ID", GOOGLE_CLOUD_PROJECT or "cinequeue-inouye-2026").strip()
 
@@ -64,6 +76,8 @@ FIREBASE_APP_ID = os.getenv("FIREBASE_APP_ID", "1:568212960791:web:000e9657bed24
 FIREBASE_MESSAGING_SENDER_ID = os.getenv("FIREBASE_MESSAGING_SENDER_ID", "568212960791").strip()
 
 SESSION_COOKIE_DAYS = int(os.getenv("SESSION_COOKIE_DAYS", "14"))
+if not (1 <= SESSION_COOKIE_DAYS <= 14):
+    raise ValueError("SESSION_COOKIE_DAYS must be between 1 and 14")
 
 # Cookie security settings
 # Use Secure cookies in production by default
@@ -80,7 +94,7 @@ ENABLE_FALLBACK_ADMIN_AUTH = os.getenv("ENABLE_FALLBACK_ADMIN_AUTH", "false").st
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "").strip()
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "").strip()
 
-ADMIN_SESSION_COOKIE_NAME = "cinequeue_admin_session"
+ADMIN_SESSION_COOKIE_NAME = "__Host-cinequeue_admin_session" if SESSION_COOKIE_SECURE else "cinequeue_admin_session"
 
 # SMTP & Email Configurations
 SMTP_HOST = os.getenv("SMTP_HOST", "").strip()
@@ -99,6 +113,19 @@ if ENABLE_FALLBACK_ADMIN_AUTH:
     if not ADMIN_PASSWORD:
         raise ValueError("ADMIN_PASSWORD must be configured non-empty when ENABLE_FALLBACK_ADMIN_AUTH is True")
 # Fail-closed validation for production
+_DISALLOWED_ADMIN_PASSWORDS = {
+    "change_me_immediately",
+    "changeme",
+    "admin",
+    "password",
+    "your_admin_password",
+}
+if ENABLE_FALLBACK_ADMIN_AUTH and ENVIRONMENT == "production":
+    if len(ADMIN_PASSWORD) < 12 or ADMIN_PASSWORD.strip().lower() in _DISALLOWED_ADMIN_PASSWORDS:
+        raise ValueError("ADMIN_PASSWORD must be at least 12 characters and non-placeholder in production when ENABLE_FALLBACK_ADMIN_AUTH is True")
+
+if ENVIRONMENT == "production" and not AUTH_ENABLED:
+    raise ValueError("AUTH_ENABLED must be True when ENVIRONMENT is 'production'")
 if AUTH_ENABLED:
     if not FIREBASE_PROJECT_ID:
         raise ValueError("FIREBASE_PROJECT_ID must be set when AUTH_ENABLED is True")

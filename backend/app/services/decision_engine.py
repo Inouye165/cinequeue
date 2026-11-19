@@ -105,8 +105,8 @@ class DecisionEngine:
         session_id: Optional[str] = None,
     ) -> tuple[DecisionLog, list[Candidate]]:
         """Evaluate candidates, apply rules/cooldowns, and select final items using reproducible random selection."""
-        cfg = config or DecisionConfig(**repo.get_active_decision_config())
-        prompt_ver = prompt_version or PromptVersion(**repo.get_active_prompt_version())
+        cfg = config or DecisionConfig.from_dict(repo.get_active_decision_config())
+        prompt_ver = prompt_version or PromptVersion.from_dict(repo.get_active_prompt_version())
         rng = RandomSelectionService(seed=random_seed)
 
         start_time = datetime.datetime.now(datetime.timezone.utc)
@@ -275,7 +275,7 @@ class DecisionEngine:
         # Candidate signature calculation
         import hashlib, json
         all_titles = sorted([c.title for c in raw_candidates if c.title])
-        cand_sig = hashlib.md5(json.dumps(all_titles).encode("utf-8")).hexdigest()[:8]
+        cand_sig = hashlib.sha256(json.dumps(all_titles).encode("utf-8")).hexdigest()[:8]
 
         # 4. Construct DecisionLog record
         duration_ms = round((datetime.datetime.now(datetime.timezone.utc) - start_time).total_seconds() * 1000.0, 2)

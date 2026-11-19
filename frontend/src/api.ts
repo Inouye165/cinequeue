@@ -38,6 +38,10 @@ function getCookie(name: string): string | null {
   return null;
 }
 
+export function getCsrfCookie(): string | null {
+  return getCookie("cinequeue_csrf");
+}
+
 let adminMeRequestCount = 0;
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -187,12 +191,12 @@ export const api = {
   // Auth endpoints
   firebaseConfig: () => request<FirebaseConfig>("/api/auth/config"),
   csrf: () => request<CsrfResponse>("/api/auth/csrf"),
-  createSession: (idToken: string, csrfToken: string) =>
+  createSession: (idToken: string, csrfToken: string, isSessionRestore = false) =>
     request<{ status: string }>("/api/auth/session", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "X-Session-Restore": "1",
+        ...(isSessionRestore ? { "X-Session-Restore": "1" } : {}),
       },
       body: JSON.stringify({ id_token: idToken, csrf_token: csrfToken }),
     }),
@@ -381,9 +385,14 @@ export const api = {
 
 
   // Watchlist & movies endpoints
-  search: (params: string | import("./types").SearchFilterState) => {
+  search: (
+    params: string | import("./types").SearchFilterState,
+    options?: { signal?: AbortSignal }
+  ) => {
     if (typeof params === "string") {
-      return request<MediaItem[]>(`/api/search?q=${encodeURIComponent(params)}`);
+      return request<MediaItem[]>(`/api/search?q=${encodeURIComponent(params)}`, {
+        signal: options?.signal,
+      });
     }
     const searchParams = new URLSearchParams();
     if (params.query?.trim()) searchParams.set("q", params.query.trim());
@@ -406,14 +415,20 @@ export const api = {
     if (params.mediaType && params.mediaType !== "all") {
       searchParams.set("media_type", params.mediaType);
     }
-    return request<MediaItem[]>(`/api/search?${searchParams.toString()}`);
+    return request<MediaItem[]>(`/api/search?${searchParams.toString()}`, {
+      signal: options?.signal,
+    });
   },
-  upcoming: () => request<MediaItem[]>("/api/upcoming"),
-  nowPlaying: () => request<MediaItem[]>("/api/now-playing"),
-  trending: () => request<MediaItem[]>("/api/trending"),
-  onAir: () => request<MediaItem[]>("/api/on-air"),
-  details: (mediaType: string, id: number) =>
-    request<MediaDetails>(`/api/${mediaType}/${id}`),
+  upcoming: (options?: { signal?: AbortSignal }) =>
+    request<MediaItem[]>("/api/upcoming", { signal: options?.signal }),
+  nowPlaying: (options?: { signal?: AbortSignal }) =>
+    request<MediaItem[]>("/api/now-playing", { signal: options?.signal }),
+  trending: (options?: { signal?: AbortSignal }) =>
+    request<MediaItem[]>("/api/trending", { signal: options?.signal }),
+  onAir: (options?: { signal?: AbortSignal }) =>
+    request<MediaItem[]>("/api/on-air", { signal: options?.signal }),
+  details: (mediaType: string, id: number, options?: { signal?: AbortSignal }) =>
+    request<MediaDetails>(`/api/${mediaType}/${id}`, { signal: options?.signal }),
   watchlist: () => request<WatchlistItem[]>("/api/watchlist"),
   addToWatchlist: (item: Partial<WatchlistItem>) =>
     request<WatchlistItem>("/api/watchlist", {
@@ -457,12 +472,14 @@ export const api = {
     }),
 
   // AI Agent Endpoints
-  agentBriefing: (sessionId?: string, forceRefresh: boolean = false) => {
+  agentBriefing: (sessionId?: string, forceRefresh: boolean = false, options?: { signal?: AbortSignal }) => {
     const params = new URLSearchParams();
     if (sessionId) params.set("session_id", sessionId);
     if (forceRefresh) params.set("force_refresh", "true");
     const q = params.toString();
-    return request<import("./types").AgentBriefing>(`/api/agent/briefing${q ? `?${q}` : ""}`);
+    return request<import("./types").AgentBriefing>(`/api/agent/briefing${q ? `?${q}` : ""}`, {
+      signal: options?.signal,
+    });
   },
   agentSettings: () => request<import("./types").AgentSettings>("/api/agent/settings"),
   saveAgentSettings: (settings: Partial<import("./types").AgentSettings>) =>

@@ -11,7 +11,10 @@ export default defineConfig({
     trace: "retain-on-failure",
   },
   webServer: {
-    command: "npm run build && npm run preview -- --port 5180 --strictPort",
+    command:
+      process.env.PLAYWRIGHT_SKIP_REBUILD === "1"
+        ? "npm run preview -- --port 5180 --strictPort"
+        : "npm run build && npm run preview -- --port 5180 --strictPort",
     url: "http://localhost:5180",
     reuseExistingServer: false,
     timeout: 120000,

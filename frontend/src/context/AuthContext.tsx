@@ -12,8 +12,9 @@ import {
   startTrace,
   recordEvent,
   incrementCount,
+  clearTraceHistory,
 } from "../utils/authPerformanceMonitor";
-import { authLog } from "../utils/authDebugLog";
+import { authLog, clearAuthDebugLogs } from "../utils/authDebugLog";
 import { syncService } from "../services/syncService";
 import { setAuthToken } from "../utils/authTokenStore";
 
@@ -308,7 +309,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
                       authLog.info("performAuthSequence: calling createSession…");
                       recordEvent("session_creation_started", "start");
-                      await api.createSession(token, csrfData.csrf_token);
+                      if (restoringSession) {
+                        await api.createSession(token, csrfData.csrf_token, true);
+                      } else {
+                        await api.createSession(token, csrfData.csrf_token);
+                      }
                       authLog.info("performAuthSequence: createSession succeeded");
                       recordEvent("session_creation_completed", "success");
                       if (!isCurrent()) { authLog.debug("stale after createSession"); return; }
@@ -535,7 +540,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     const handleUnauthorized = () => {
+      setAuthToken(null);
       syncService.setAuthenticatedOwner(null);
+      setIdToken(null);
+      setFirebaseUser(null);
       setSessionReady(false);
       setUser(null);
       setIsAdmin(false);
@@ -621,7 +629,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     } catch (err) {
       console.error("Sign out action failed:", err);
     } finally {
-      recordEvent("auth_context_state_update_started", "start");
+      try {
+        if (typeof sessionStorage !== "undefined") {
+          for (let i = sessionStorage.length - 1; i >= 0; i--) {
+            const k = sessionStorage.key(i);
+            if (k && k.startsWith("cinequeue_briefing_")) {
+              sessionStorage.removeItem(k);
+            }
+          }
+        }
+      } catch {
+        // Ignore storage errors
+      }
+      clearAuthDebugLogs();
+      clearTraceHistory();
       setUser(null);
       setFirebaseUser(null);
       setIdToken(null);
@@ -633,10 +654,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setProfileLoading(false);
       setAuthorizationReady(true);
       setLoading(false);
-      recordEvent("auth_context_state_update_completed", "success");
-      recordEvent("auth_state_callback_completed", "success");
-      recordEvent("auth_loading_cleared", "success");
-      recordEvent("auth_trace_completed", "success");
     }
   };
 
@@ -654,6 +671,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       try {
         const token = await currentUser.getIdToken(true);
         if (!isCurrent()) return;
+        setAuthToken(token);
+        setIdToken(token);
         const csrfData = await api.csrf();
         if (!isCurrent()) return;
         await api.createSession(token, csrfData.csrf_token);

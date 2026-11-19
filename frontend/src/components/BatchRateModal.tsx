@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import { api } from "../api";
+import { movieService, normalizePosterPath } from "../services/movieService";
+import { syncService } from "../services/syncService";
 import { StarRating } from "./StarRating";
 import type { MediaItem } from "../types";
 
@@ -14,12 +16,14 @@ interface DraftRatingItem {
 }
 
 interface BatchRateModalProps {
+  ownerId: string;
   isOpen: boolean;
   onClose: () => void;
   onRatingsAdded: () => void;
 }
 
 export const BatchRateModal: React.FC<BatchRateModalProps> = ({
+  ownerId,
   isOpen,
   onClose,
   onRatingsAdded,
@@ -39,30 +43,37 @@ export const BatchRateModal: React.FC<BatchRateModalProps> = ({
       clearTimeout(searchTimeoutRef.current);
     }
 
-    if (!searchQuery.trim()) {
+    if (!isOpen || !searchQuery.trim()) {
       setSearchResults([]);
       setIsSearching(false);
       return;
     }
 
+    const controller = new AbortController();
     setIsSearching(true);
     searchTimeoutRef.current = setTimeout(async () => {
       try {
-        const results = await api.search(searchQuery.trim());
-        setSearchResults(results || []);
+        const results = await api.search(searchQuery.trim(), { signal: controller.signal });
+        if (!controller.signal.aborted) {
+          setSearchResults(results || []);
+        }
       } catch (err) {
+        if (controller.signal.aborted || (err instanceof Error && err.name === "AbortError")) return;
         console.error("Failed to search movies for rating batch:", err);
       } finally {
-        setIsSearching(false);
+        if (!controller.signal.aborted) {
+          setIsSearching(false);
+        }
       }
     }, 300);
 
     return () => {
+      controller.abort();
       if (searchTimeoutRef.current) {
         clearTimeout(searchTimeoutRef.current);
       }
     };
-  }, [searchQuery]);
+  }, [searchQuery, isOpen]);
 
   // Reset state when modal opens/closes
   useEffect(() => {
@@ -131,16 +142,26 @@ export const BatchRateModal: React.FC<BatchRateModalProps> = ({
     setError(null);
 
     try {
-      await api.rateMoviesBatch(
-        draftItems.map((item) => ({
-          media_type: item.media_type,
-          tmdb_id: item.tmdb_id,
-          title: item.title,
-          poster_path: item.poster_path,
-          release_date: item.release_date,
-          rating: item.rating,
-        }))
-      );
+      for (const item of draftItems) {
+        if (!item.tmdb_id || item.tmdb_id <= 0) continue;
+        const mediaType = item.media_type === "tv" ? "tv" : "movie";
+        await movieService.saveMovie(
+          {
+            tmdbId: item.tmdb_id,
+            mediaType,
+            title: item.title,
+            posterPath: normalizePosterPath(item.poster_path),
+            releaseDate: item.release_date ?? undefined,
+            status: "watched",
+            watchStatus: "watched",
+            rating: item.rating,
+          },
+          ownerId
+        );
+      }
+      if (ownerId !== "guest_local") {
+        void syncService.triggerSync(ownerId);
+      }
 
       onRatingsAdded();
       onClose();

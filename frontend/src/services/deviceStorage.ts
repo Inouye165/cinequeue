@@ -30,10 +30,12 @@ function parseMovie(value: unknown, ownerId: string): LocalMovie {
   if (value.priority !== undefined && value.priority !== null && typeof value.priority !== "number") throw error();
   const syncStatus = value.syncStatus;
   if (syncStatus !== "synced" && syncStatus !== "pending_push" && syncStatus !== "conflict") throw error();
+  const status = value.status;
+  if (status !== "queue" && status !== "following" && status !== "library" && status !== "watched") throw error();
   // Restore user data, not executable/untrusted API cache structures.
   return {
     id: String(value.id), ownerId, tmdbId: Number(value.tmdbId), mediaType: value.mediaType,
-    title: value.title, status: value.status, watchStatus: value.watchStatus,
+    title: value.title, status, watchStatus: value.watchStatus,
     version: Number(value.version), createdAt: value.createdAt, updatedAt: value.updatedAt,
     syncStatus, localOnly: value.localOnly,
     rating: value.rating === undefined || value.rating === null ? null : Number(value.rating),
@@ -52,7 +54,7 @@ function parseMovie(value: unknown, ownerId: string): LocalMovie {
 function parseOperation(value: unknown, ownerId: string): SyncOperation {
   if (!isObject(value) || value.ownerId !== ownerId || typeof value.operationId !== "string" || !value.operationId ||
     typeof value.entityId !== "string" || value.entityType !== "movie" ||
-    (value.operationType !== "upsert" && value.operationType !== "patch" && value.operationType !== "delete") ||
+    (value.operationType !== "upsert" && value.operationType !== "delete") ||
     !Number.isSafeInteger(value.attemptCount) || Number(value.attemptCount) < 0 ||
     typeof value.createdAt !== "string" || !Number.isFinite(Date.parse(value.createdAt)) ||
     (value.status !== "pending" && value.status !== "syncing" && value.status !== "synced" && value.status !== "failed" && value.status !== "conflict")) throw error();

@@ -1,20 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
+import { cancelSpeech, speakSpeechText } from "../utils/speech";
 import type { AgentBriefing, AgentBriefingUpdate } from "../types";
 
-interface AgentLoginBriefingProps {
-  onOpenChat: () => void;
-}
+export { cleanTextForSpeech } from "../utils/speech";
 
-export function cleanTextForSpeech(text: string): string {
-  return text
-    .replace(/\[System Note:[^\]]*\]/gi, "")
-    .replace(/[*_~`#]+/g, "")
-    .replace(/https?:\/\/\S+/g, "")
-    .replace(/\bMEMORY RECALL:\s*/gi, "")
-    .replace(/•\s*Random movie fact:[^\n]*/gi, "")
-    .replace(/\s+/g, " ")
-    .trim();
+interface AgentLoginBriefingProps {
+  ownerId?: string;
+  onOpenChat: () => void;
 }
 
 export function cleanBriefingForDisplay(text: string): string {
@@ -71,69 +64,76 @@ export function formatSummaryLines(
   return { headline, supportingText };
 }
 
-export function AgentLoginBriefing({ onOpenChat }: AgentLoginBriefingProps) {
+export function AgentLoginBriefing({ ownerId, onOpenChat }: AgentLoginBriefingProps) {
+  const storageScope = ownerId || "local";
   const [briefing, setBriefing] = useState<AgentBriefing | null>(null);
   const [loading, setLoading] = useState(true);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [showUpdatesModal, setShowUpdatesModal] = useState(false);
   const [isExpanded, setIsExpanded] = useState(false);
   const [isDismissed] = useState(() => {
-    return sessionStorage.getItem("cinequeue_briefing_dismissed") === "true";
+    return sessionStorage.getItem(`cinequeue_briefing_dismissed:${storageScope}`) === "true";
   });
 
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hasRequestedBriefingRef = useRef(false);
+  const briefingAbortRef = useRef<AbortController | null>(null);
 
   const speakText = (text: string) => {
-    if (!("speechSynthesis" in window)) return;
-    window.speechSynthesis.cancel();
-
-    const clean = cleanTextForSpeech(text);
-    if (!clean) return;
-
-    const utterance = new SpeechSynthesisUtterance(clean);
-    utterance.rate = 1.0;
-    utterance.pitch = 1.0;
-
-    utterance.onstart = () => setIsSpeaking(true);
-    utterance.onend = () => setIsSpeaking(false);
-    utterance.onerror = () => setIsSpeaking(false);
-
-    window.speechSynthesis.speak(utterance);
+    speakSpeechText(text, {
+      onStart: () => setIsSpeaking(true),
+      onEnd: () => setIsSpeaking(false),
+    });
   };
 
-  const loadBriefing = async (forceRefresh: boolean = false) => {
+  const loadBriefing = async (forceRefresh: boolean = false, signal?: AbortSignal) => {
     if (loading && forceRefresh) return;
+    briefingAbortRef.current?.abort();
+    const controller = new AbortController();
+    briefingAbortRef.current = controller;
+    if (signal) {
+      if (signal.aborted) controller.abort();
+      else signal.addEventListener("abort", () => controller.abort(), { once: true });
+    }
     setLoading(true);
     try {
-      let sessionId = sessionStorage.getItem("cinequeue_briefing_session_id");
+      const sessionKey = `cinequeue_briefing_session_id:${storageScope}`;
+      let sessionId = sessionStorage.getItem(sessionKey);
       if (!sessionId) {
         sessionId = "sess_" + Date.now() + "_" + Math.random().toString(36).substring(2, 9);
-        sessionStorage.setItem("cinequeue_briefing_session_id", sessionId);
+        sessionStorage.setItem(sessionKey, sessionId);
       }
 
-      const data = await api.agentBriefing(sessionId, forceRefresh);
-      if (data && data.enabled && data.briefing) {
+      const data = await api.agentBriefing(sessionId, forceRefresh, { signal: controller.signal });
+      if (!controller.signal.aborted && data && data.enabled && data.briefing) {
         setBriefing(data);
+        if (data.auto_speak_briefing === true && !isDismissed) {
+          speakText(data.briefing);
+        }
       }
     } catch (err) {
+      if (controller.signal.aborted || (err instanceof Error && err.name === "AbortError")) return;
       console.error("Failed to load agent briefing:", err);
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted) {
+        setLoading(false);
+      }
     }
   };
 
   useEffect(() => {
+    const controller = new AbortController();
     if (!hasRequestedBriefingRef.current) {
       hasRequestedBriefingRef.current = true;
-      void loadBriefing(false);
+      void loadBriefing(false, controller.signal);
     }
 
     return () => {
+      controller.abort();
+      briefingAbortRef.current?.abort();
+      hasRequestedBriefingRef.current = false;
       if (timerRef.current) clearTimeout(timerRef.current);
-      if ("speechSynthesis" in window) {
-        window.speechSynthesis.cancel();
-      }
+      cancelSpeech();
     };
   }, []);
 
@@ -209,7 +209,7 @@ export function AgentLoginBriefing({ onOpenChat }: AgentLoginBriefingProps) {
             className={`audio-toggle-btn ${isSpeaking ? "speaking" : ""}`}
             onClick={() => {
               if (isSpeaking) {
-                if ("speechSynthesis" in window) window.speechSynthesis.cancel();
+                cancelSpeech();
                 setIsSpeaking(false);
               } else if (briefing.briefing) {
                 speakText(briefing.briefing);

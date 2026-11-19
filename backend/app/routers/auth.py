@@ -8,7 +8,7 @@ import asyncio
 import uuid
 from typing import Optional
 from fastapi import APIRouter, HTTPException, Request, Response, Depends, BackgroundTasks
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from firebase_admin import auth as firebase_auth
 
 from app.config import (
@@ -31,6 +31,11 @@ from app.auth import (
     generate_csrf_token,
     verify_csrf_token,
     get_current_user,
+    validate_origin,
+    validate_csrf,
+    is_user_login_rate_limited,
+    record_user_login_failure,
+    clear_user_login_failures,
 )
 
 logger = logging.getLogger(__name__)
@@ -38,33 +43,11 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 class SessionRequest(BaseModel):
-    id_token: str
-    csrf_token: str
+    id_token: str = Field(..., min_length=1, max_length=16384)
+    csrf_token: str = Field(..., min_length=1, max_length=256)
 
 class LogoutRequest(BaseModel):
-    csrf_token: str
-
-def validate_origin(request: Request):
-    """Validate the Origin header against exact configured allowlist in production."""
-    if not AUTH_ENABLED:
-        return
-
-    origin = request.headers.get("origin")
-    if origin:
-        normalized_origin = origin.rstrip("/")
-        if normalized_origin not in AUTH_ALLOWED_ORIGINS:
-            logger.warning("Origin validation failed: %s not in %s", origin, AUTH_ALLOWED_ORIGINS)
-            raise HTTPException(status_code=401, detail="Origin not allowed")
-    else:
-        logger.warning("Origin header is missing for state-changing operation")
-        raise HTTPException(status_code=401, detail="Missing Origin header")
-
-def validate_csrf(request: Request, request_csrf: str):
-    """Validate CSRF token against the cookie value."""
-    cookie_csrf = request.cookies.get("cinequeue_csrf")
-    if not request_csrf or not cookie_csrf or not verify_csrf_token(request_csrf, cookie_csrf):
-        logger.warning("CSRF token mismatch or missing: request=%s, cookie=%s", request_csrf, cookie_csrf)
-        raise HTTPException(status_code=401, detail="CSRF validation failed")
+    csrf_token: str = Field(..., min_length=1, max_length=256)
 
 @router.get("/config")
 async def get_config():
@@ -98,12 +81,11 @@ async def get_csrf(response: Response):
 
 def extract_client_ip(request: Request) -> str:
     """Safely extract client IP address, handling Cloud Run X-Forwarded-For proxies."""
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        first_ip = forwarded.split(",")[0].strip()
-        if first_ip:
-            return first_ip
-    return request.client.host if request.client else "unknown"
+    try:
+        from app.auth import extract_client_ip as _extract_ip
+        return _extract_ip(request)
+    except Exception:
+        return request.client.host if request.client else "unknown"
 
 def log_auth_audit_event(
     request: Request,
@@ -161,12 +143,13 @@ async def create_session(
     user_agent = request.headers.get("user-agent", "unknown")
     timestamp = repo.utc_now_iso()
 
-    def log_failure(email_addr: str, fail_reason: str, http_status: int = 401):
+    async def log_failure(email_addr: str, fail_reason: str, http_status: int = 401):
         target_email = email_addr or "unknown"
         write_attempted = True
         write_result = "success"
         try:
-            repo.log_login_attempt(
+            await asyncio.to_thread(
+                repo.log_login_attempt,
                 email=target_email,
                 status="failed",
                 reason=fail_reason,
@@ -190,13 +173,18 @@ async def create_session(
             correlation_id=correlation_id,
         )
 
+    if is_user_login_rate_limited(ip_address):
+        await log_failure("unknown", "rate_limited", 429)
+        raise HTTPException(status_code=429, detail="Too many failed authentication attempts. Please try again later.")
+
     # Stage 2: CSRF Validation
     t_stage1 = time.perf_counter()
     try:
         validate_csrf(request, body.csrf_token)
     except Exception as e:
         logger.warning("Session Creation Stage 2: CSRF validation failed: %s", e)
-        log_failure("unknown", "csrf_validation_failed", 401)
+        record_user_login_failure(ip_address)
+        await log_failure("unknown", "csrf_validation_failed", 401)
         raise
 
     # Stage 3: Origin Validation
@@ -204,11 +192,12 @@ async def create_session(
         validate_origin(request)
     except Exception as e:
         logger.warning("Session Creation Stage 3: Origin validation failed: %s", e)
-        log_failure("unknown", "origin_validation_failed", 401)
+        record_user_login_failure(ip_address)
+        await log_failure("unknown", "origin_validation_failed", 401)
         raise
 
     is_session_restore = request.headers.get("X-Session-Restore") == "1"
-    max_auth_age_seconds = 365 * 24 * 60 * 60 if is_session_restore else 5 * 60
+    max_auth_age_seconds = 30 * 24 * 60 * 60 if is_session_restore else 5 * 60
 
     # Stage 3.5: Early auth_time pre-check (decode JWT payload without verification)
     try:
@@ -226,7 +215,8 @@ async def create_session(
                     "Session Creation Stage 3.5: auth_time is %.0f seconds old — rejecting immediately",
                     pre_age,
                 )
-                log_failure(pre_email, "auth_time_expired_precheck", 401)
+                record_user_login_failure(ip_address)
+                await log_failure(pre_email, "auth_time_expired_precheck", 401)
                 raise HTTPException(
                     status_code=401,
                     detail="Authentication time is too old. Please sign in again.",
@@ -240,18 +230,25 @@ async def create_session(
     t_stage3 = time.perf_counter()
     decoded_token = None
     try:
-        decoded_token = firebase_auth.verify_id_token(body.id_token, clock_skew_seconds=60)
+        if is_session_restore:
+            decoded_token = await asyncio.to_thread(
+                firebase_auth.verify_id_token, body.id_token, check_revoked=True, clock_skew_seconds=60
+            )
+        else:
+            decoded_token = await asyncio.to_thread(
+                firebase_auth.verify_id_token, body.id_token, clock_skew_seconds=60
+            )
     except Exception as e:
         if "Token used too early" in str(e):
             match = re.search(r"Token used too early,\s*(\d+)\s*<\s*(\d+)", str(e))
-            sleep_time = 5.0
+            sleep_time = 2.0
             drift_val = "unknown"
             if match:
                 local_time_val = int(match.group(1))
                 token_time_val = int(match.group(2))
                 drift_seconds = token_time_val - local_time_val
                 drift_val = str(drift_seconds)
-                sleep_time = min(max(float(drift_seconds) + 1.0, 0.0), 10.0)
+                sleep_time = min(max(float(drift_seconds) + 0.5, 0.0), 2.0)
             
             logger.warning(
                 "Session Creation Stage 4: Token used too early due to clock skew (%s seconds drift). Retrying in %s seconds...",
@@ -259,13 +256,22 @@ async def create_session(
             )
             await asyncio.sleep(sleep_time)
             try:
-                decoded_token = firebase_auth.verify_id_token(body.id_token, clock_skew_seconds=60)
+                if is_session_restore:
+                    decoded_token = await asyncio.to_thread(
+                        firebase_auth.verify_id_token, body.id_token, check_revoked=True, clock_skew_seconds=60
+                    )
+                else:
+                    decoded_token = await asyncio.to_thread(
+                        firebase_auth.verify_id_token, body.id_token, clock_skew_seconds=60
+                    )
             except Exception as retry_err:
-                log_failure("unknown", "clock_skew_verification_failed", 401)
+                record_user_login_failure(ip_address)
+                await log_failure("unknown", "clock_skew_verification_failed", 401)
                 raise HTTPException(status_code=401, detail="Invalid ID token or session generation failed")
         else:
             logger.error("Session Creation Stage 4: Firebase ID-token verification failed: %s", e)
-            log_failure("unknown", "invalid_id_token", 401)
+            record_user_login_failure(ip_address)
+            await log_failure("unknown", "invalid_id_token", 401)
             raise HTTPException(status_code=401, detail="Invalid ID token or session generation failed")
 
     t_stage4 = time.perf_counter()
@@ -275,18 +281,21 @@ async def create_session(
     try:
         auth_time = decoded_token.get("auth_time")
         if not auth_time:
-            log_failure(email, "auth_time_missing", 401)
+            record_user_login_failure(ip_address)
+            await log_failure(email, "auth_time_missing", 401)
             raise HTTPException(status_code=401, detail="Authentication time is too old")
         age = time.time() - auth_time
         if age > max_auth_age_seconds:
             logger.warning("Session Creation Stage 5: ID token auth_time is too old: %s", auth_time)
-            log_failure(email, "auth_time_expired", 401)
+            record_user_login_failure(ip_address)
+            await log_failure(email, "auth_time_expired", 401)
             raise HTTPException(status_code=401, detail="Authentication time is too old")
     except HTTPException:
         raise
     except Exception as e:
         logger.error("Session Creation Stage 5 failed: %s", e)
-        log_failure(email, "auth_time_validation_failed", 401)
+        record_user_login_failure(ip_address)
+        await log_failure(email, "auth_time_validation_failed", 401)
         raise HTTPException(status_code=401, detail="Invalid ID token or session generation failed")
 
     # Stage 6: email_verified validation
@@ -294,44 +303,46 @@ async def create_session(
         email_verified = decoded_token.get("email_verified")
         if not email_verified:
             logger.warning("Session Creation Stage 6: Email is not verified for %s", email)
-            log_failure(email, "email_not_verified", 401)
+            record_user_login_failure(ip_address)
+            await log_failure(email, "email_not_verified", 401)
             raise HTTPException(status_code=401, detail="Email is not verified. Please verify your email before signing in.")
     except HTTPException:
         raise
     except Exception as e:
         logger.error("Session Creation Stage 6 failed: %s", e)
-        log_failure(email, "email_verified_check_failed", 401)
+        record_user_login_failure(ip_address)
+        await log_failure(email, "email_verified_check_failed", 401)
         raise HTTPException(status_code=401, detail="Invalid ID token or session generation failed")
 
     # Stage 7: Email DB Authorization
     t_stage6 = time.perf_counter()
     try:
-        approval = repo.get_user_approval(email)
+        approval = await asyncio.to_thread(repo.get_user_approval, email)
         if not approval:
             if AUTH_MODE == "allowlist" and email in AUTH_ALLOWED_EMAILS:
-                repo.create_user_approval(email, "approved", timestamp)
-                repo.update_user_approval(email, "approved", timestamp, "system_allowlist")
+                await asyncio.to_thread(repo.create_user_approval, email, "approved", timestamp)
+                await asyncio.to_thread(repo.update_user_approval, email, "approved", timestamp, "system_allowlist")
                 approval = {"email": email, "status": "approved"}
             else:
-                repo.create_user_approval(email, "pending", timestamp)
+                await asyncio.to_thread(repo.create_user_approval, email, "pending", timestamp)
                 approval = {"email": email, "status": "pending"}
 
         status = approval.get("status")
         if status == "pending":
-            log_failure(email, "pending_approval", 403)
+            await log_failure(email, "pending_approval", 403)
             raise HTTPException(status_code=403, detail="Your login request is pending admin approval.")
         elif status == "revoked":
-            log_failure(email, "revoked_user", 403)
+            await log_failure(email, "revoked_user", 403)
             raise HTTPException(status_code=403, detail="Your access has been revoked by an administrator.")
         elif status != "approved":
-            log_failure(email, f"unauthorized_status_{status}", 403)
+            await log_failure(email, f"unauthorized_status_{status}", 403)
             raise HTTPException(status_code=403, detail="Forbidden: User is not authorized")
 
     except HTTPException:
         raise
     except Exception as e:
         logger.error("Session Creation Stage 7 failed: %s", e)
-        log_failure(email, "db_authorization_failed", 401)
+        await log_failure(email, "db_authorization_failed", 401)
         raise HTTPException(status_code=401, detail="Invalid ID token or session generation failed")
 
     t_stage7 = time.perf_counter()
@@ -339,16 +350,20 @@ async def create_session(
     # Stage 8: Firebase session-cookie creation
     try:
         expires_in = datetime.timedelta(days=SESSION_COOKIE_DAYS)
-        session_cookie = firebase_auth.create_session_cookie(body.id_token, expires_in=expires_in)
+        session_cookie = await asyncio.to_thread(
+            firebase_auth.create_session_cookie, body.id_token, expires_in=expires_in
+        )
     except Exception as e:
         logger.error("Session Creation Stage 8 failed: %s", e)
-        log_failure(email, "session_cookie_creation_failed", 401)
+        record_user_login_failure(ip_address)
+        await log_failure(email, "session_cookie_creation_failed", 401)
         raise HTTPException(status_code=401, detail="Invalid ID token or session generation failed")
 
     t_stage8 = time.perf_counter()
 
     # Stage 9: Cookie response creation
     try:
+        clear_user_login_failures(ip_address)
         max_age = SESSION_COOKIE_DAYS * 24 * 60 * 60
         response.set_cookie(
             key=SESSION_COOKIE_NAME,
@@ -362,7 +377,8 @@ async def create_session(
         
         # Log successful login
         try:
-            repo.log_login_attempt(
+            await asyncio.to_thread(
+                repo.log_login_attempt,
                 email=email,
                 status="success",
                 reason="google_login",
@@ -408,7 +424,7 @@ async def create_session(
         return {"status": "success"}
     except Exception as e:
         logger.error("Session Creation Stage 9 failed: %s", e)
-        log_failure(email, "cookie_response_failed", 401)
+        await log_failure(email, "cookie_response_failed", 401)
         raise HTTPException(status_code=401, detail="Invalid ID token or session generation failed")
 
 @router.get("/me", response_model=CurrentUser)
@@ -481,6 +497,20 @@ async def logout(body: LogoutRequest, request: Request, response: Response):
 
     # 2. Validate Origin
     validate_origin(request)
+
+    # 2.5 Best-effort Firebase refresh token revocation for active session
+    session_cookie = request.cookies.get(SESSION_COOKIE_NAME)
+    if session_cookie and AUTH_ENABLED:
+        try:
+            from firebase_admin import auth as firebase_auth
+            decoded = await asyncio.to_thread(
+                firebase_auth.verify_session_cookie, session_cookie, check_revoked=False
+            )
+            uid = decoded.get("uid") or decoded.get("sub")
+            if uid:
+                await asyncio.to_thread(firebase_auth.revoke_refresh_tokens, uid)
+        except Exception as e:
+            logger.debug("Best-effort refresh token revocation during logout skipped: %s", e)
 
     # 3. Clear session cookie
     response.delete_cookie(

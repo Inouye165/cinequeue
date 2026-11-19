@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { api } from "../../api";
 
 interface AiAgentDecisionsTabProps {
@@ -53,8 +53,18 @@ export const AiAgentDecisionsTab: React.FC<AiAgentDecisionsTabProps> = ({ authTo
     setTimeout(() => setCopiedMsg(null), 3000);
   };
 
+  const logsAbortRef = useRef<AbortController | null>(null);
+  const prevFilterUserRef = useRef<string>(filterUser);
+
   // --- Load Logs ---
-  const fetchLogs = async () => {
+  const fetchLogs = async (externalSignal?: AbortSignal) => {
+    logsAbortRef.current?.abort();
+    const controller = new AbortController();
+    logsAbortRef.current = controller;
+    if (externalSignal) {
+      if (externalSignal.aborted) controller.abort();
+      else externalSignal.addEventListener("abort", () => controller.abort(), { once: true });
+    }
     setLoadingLogs(true);
     try {
       const res = await api.adminAgentDecisionLogs(
@@ -64,14 +74,20 @@ export const AiAgentDecisionsTab: React.FC<AiAgentDecisionsTabProps> = ({ authTo
           candidate_type: filterType || undefined,
           fallback_only: filterFallback || undefined,
         },
-        authToken
+        authToken,
+        controller.signal
       );
-      setLogs(res.logs || []);
-      setTotalLogs(res.total || 0);
+      if (!controller.signal.aborted) {
+        setLogs(res.logs || []);
+        setTotalLogs(res.total || 0);
+      }
     } catch (e: any) {
+      if (controller.signal.aborted || e?.name === "AbortError") return;
       console.error("Error loading decision logs:", e);
     } finally {
-      setLoadingLogs(false);
+      if (!controller.signal.aborted) {
+        setLoadingLogs(false);
+      }
     }
   };
 
@@ -103,8 +119,23 @@ export const AiAgentDecisionsTab: React.FC<AiAgentDecisionsTabProps> = ({ authTo
   };
 
   useEffect(() => {
-    if (subTab === "logs") void fetchLogs();
-    else if (subTab === "settings") void fetchConfig();
+    if (subTab === "logs") {
+      const controller = new AbortController();
+      const userChanged = prevFilterUserRef.current !== filterUser;
+      prevFilterUserRef.current = filterUser;
+      if (userChanged) {
+        const timer = window.setTimeout(() => {
+          void fetchLogs(controller.signal);
+        }, 250);
+        return () => {
+          window.clearTimeout(timer);
+          controller.abort();
+        };
+      }
+      void fetchLogs(controller.signal);
+      return () => controller.abort();
+    }
+    if (subTab === "settings") void fetchConfig();
     else if (subTab === "prompts") void fetchPrompts();
   }, [subTab, filterType, filterUser, filterFallback]);
 
@@ -290,7 +321,7 @@ export const AiAgentDecisionsTab: React.FC<AiAgentDecisionsTabProps> = ({ authTo
               Fallback Only
             </label>
 
-            <button onClick={fetchLogs} style={{ padding: "6px 14px", background: "#333", color: "#fff", border: "none", borderRadius: "4px", cursor: "pointer" }}>Refresh</button>
+            <button onClick={() => void fetchLogs()} style={{ padding: "6px 14px", background: "#333", color: "#fff", border: "none", borderRadius: "4px", cursor: "pointer" }}>Refresh</button>
           </div>
 
           {/* Logs Table */}

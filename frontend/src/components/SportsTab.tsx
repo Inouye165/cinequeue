@@ -49,30 +49,36 @@ export function formatGameTime(isoString: string, statusDetail?: string): string
       hour: "numeric",
       minute: "2-digit",
     });
-    return isToday ? `Today, ${datePart} · ${timePart}` : `${datePart} · ${timePart}`;
+    return isToday ? `Today · ${timePart}` : `${datePart} · ${timePart}`;
   } catch {
     return statusDetail || "Scheduled";
   }
 }
 
-export function formatDayBadge(isoString: string): { text: string; isToday: boolean } {
+export function formatDayBadge(
+  isoString: string,
+  statusDetail?: string
+): { text: string; timeText: string; isToday: boolean } {
   try {
     const dt = new Date(isoString);
-    if (isNaN(dt.getTime())) return { text: "GAME DAY", isToday: false };
+    if (isNaN(dt.getTime())) {
+      return { text: "GAME DAY", timeText: statusDetail || "TBD", isToday: false };
+    }
     const now = new Date();
+    const timePart = dt.toLocaleTimeString(undefined, {
+      hour: "numeric",
+      minute: "2-digit",
+    });
     if (toLocalDateKey(dt) === toLocalDateKey(now)) {
-      const timePart = dt.toLocaleTimeString(undefined, {
-        hour: "numeric",
-        minute: "2-digit",
-      });
-      return { text: `TODAY · ${timePart}`, isToday: true };
+      return { text: "TODAY", timeText: timePart, isToday: true };
     }
     return {
       text: dt.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" }).toUpperCase(),
+      timeText: timePart,
       isToday: false,
     };
   } catch {
-    return { text: "GAME DAY", isToday: false };
+    return { text: "GAME DAY", timeText: statusDetail || "TBD", isToday: false };
   }
 }
 
@@ -124,7 +130,7 @@ export const SportsGameCard: React.FC<SportsGameCardProps> = ({
         : String(game.home_team.score)
       : null;
 
-  const dayBadge = formatDayBadge(game.start_time);
+  const dayBadge = formatDayBadge(game.start_time, game.status_detail);
 
   const requiredServiceNames =
     game.streaming_services.length > 0
@@ -248,11 +254,20 @@ export const SportsGameCard: React.FC<SportsGameCardProps> = ({
             </div>
           </div>
 
-          {/* Center VS / @ Medallion */}
-          <div className="sports-poster-vs-divider" aria-hidden="true">
-            <span className="sports-poster-vs-line" />
-            <span className="sports-poster-at-badge">@</span>
-            <span className="sports-poster-vs-line" />
+          {/* Center VS / @ Medallion + Prominent Game Time Pill Between Teams */}
+          <div className="sports-poster-vs-divider">
+            <span className="sports-poster-vs-line" aria-hidden="true" />
+            <div className="sports-poster-center-pill">
+              <span className="sports-poster-at-badge" aria-hidden="true">@</span>
+              <span className="sports-poster-kickoff-time">
+                {game.is_live
+                  ? game.status_detail || "LIVE NOW"
+                  : game.is_completed
+                  ? "FINAL"
+                  : dayBadge.timeText}
+              </span>
+            </div>
+            <span className="sports-poster-vs-line" aria-hidden="true" />
           </div>
 
           {/* Home Contender */}

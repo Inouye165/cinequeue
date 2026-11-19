@@ -1,44 +1,59 @@
+import re
 import secrets
 import logging
 from datetime import datetime, timezone, timedelta
 from typing import Any, Optional
-from fastapi import APIRouter, HTTPException, Request, Response, Depends
-from pydantic import BaseModel
+from fastapi import APIRouter, HTTPException, Query, Request, Response, Depends
+from pydantic import BaseModel, Field
 
 import app.config as config
 from app.config import (
     ADMIN_SESSION_COOKIE_NAME,
     SESSION_COOKIE_SECURE,
 )
-from app.routers.auth import validate_csrf
+from app.auth import validate_csrf, validate_origin, extract_client_ip
 from app.services.admin_auth import (
     verify_password,
+    verify_password_async,
+    dummy_password_work,
     hash_password,
+    hash_session_token,
     generate_salt,
     generate_session_token,
     get_current_admin,
+    is_admin_login_rate_limited,
+    record_admin_login_failure,
+    clear_admin_login_failures,
 )
 from app.services.email_service import send_invite_email
 
 logger = logging.getLogger(__name__)
+_EMAIL_RE = re.compile(r"^[^/\s@]+@[^/\s@]+\.[^/\s@]+$")
+
+
+def _normalize_valid_email(raw_email: str) -> str:
+    normalized = (raw_email or "").strip().lower()
+    if not normalized or len(normalized) > 254 or "/" in normalized or ".." in normalized or not _EMAIL_RE.match(normalized):
+        raise HTTPException(status_code=400, detail="Invalid email address format")
+    return normalized
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
 class AdminLoginRequest(BaseModel):
-    username: str
-    password: str
-    csrf_token: str
+    username: str = Field(..., max_length=254)
+    password: str = Field(..., max_length=1024)
+    csrf_token: str = Field(..., max_length=256)
 
 class InviteRequest(BaseModel):
-    email: str
-    csrf_token: str
+    email: str = Field(..., max_length=254)
+    csrf_token: str = Field(..., max_length=256)
 
 class ApprovalActionRequest(BaseModel):
-    email: str
-    csrf_token: str
+    email: str = Field(..., max_length=254)
+    csrf_token: str = Field(..., max_length=256)
 
 class AdminLogoutRequest(BaseModel):
-    csrf_token: str
+    csrf_token: str = Field(..., max_length=256)
 
 @router.post("/login")
 async def admin_login(
@@ -46,49 +61,76 @@ async def admin_login(
     request: Request,
     response: Response
 ) -> dict[str, str]:
-    # 1. CSRF Validation
+    # 1. Origin & CSRF Validation
+    validate_origin(request)
     validate_csrf(request, body.csrf_token)
 
-    ip_address = request.client.host if request.client else "unknown"
+    ip_address = extract_client_ip(request)
     user_agent = request.headers.get("user-agent", "unknown")
     repo = request.app.state.watchlist_repo
     timestamp = repo.utc_now_iso()
+    username_normalized = (body.username or "").strip().lower()
 
-    # 2. Check credentials
-    admin_user = repo.get_admin_user(body.username)
+    if is_admin_login_rate_limited(ip_address):
+        repo.log_login_attempt(
+            email=username_normalized or "unknown",
+            status="failed",
+            reason="rate_limited",
+            ip_address=ip_address,
+            user_agent=user_agent,
+            timestamp=timestamp,
+        )
+        logger.warning("Admin login rate limited for IP %s", ip_address)
+        raise HTTPException(status_code=429, detail="Too many failed login attempts. Please try again later.")
+
+    # 2. Check credentials with constant-time / dummy PBKDF2 defense
+    admin_user = repo.get_admin_user(username_normalized) if username_normalized else None
     success = False
     reason = "invalid_credentials"
 
-    if admin_user and verify_password(body.password, admin_user["password_hash"], admin_user["salt"]):
-        success = True
-    elif config.ENABLE_FALLBACK_ADMIN_AUTH and config.ADMIN_USERNAME and config.ADMIN_PASSWORD:
-        if secrets.compare_digest(body.username, config.ADMIN_USERNAME) and secrets.compare_digest(body.password, config.ADMIN_PASSWORD):
-            success = True
+    if admin_user:
+        success = await verify_password_async(body.password, admin_user["password_hash"], admin_user["salt"])
+    else:
+        await dummy_password_work(body.password)
+        if config.ENABLE_FALLBACK_ADMIN_AUTH and config.ADMIN_USERNAME and config.ADMIN_PASSWORD:
+            user_match = secrets.compare_digest(
+                username_normalized.encode("utf-8"),
+                config.ADMIN_USERNAME.strip().lower().encode("utf-8"),
+            )
+            pass_match = secrets.compare_digest(
+                body.password.encode("utf-8"),
+                config.ADMIN_PASSWORD.encode("utf-8"),
+            )
+            if user_match and pass_match:
+                success = True
 
     if not success:
+        record_admin_login_failure(ip_address)
         repo.log_login_attempt(
-            email=body.username,
+            email=username_normalized or "unknown",
             status="failed",
             reason=reason,
             ip_address=ip_address,
             user_agent=user_agent,
             timestamp=timestamp,
         )
-        logger.warning("Admin login failed for user: %s", body.username)
+        logger.warning("Admin login failed for user: %s", username_normalized or "<empty>")
         raise HTTPException(status_code=401, detail="Invalid admin credentials")
 
-    # 3. Create Admin Session
+    clear_admin_login_failures(ip_address)
+
+    # 3. Create Admin Session (store SHA-256 hash; return raw token in HttpOnly cookie)
     session_token = generate_session_token()
     expires_at = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
     repo.create_admin_session(
-        session_id=session_token,
-        username=body.username,
+        session_id=hash_session_token(session_token),
+        username=username_normalized,
         expires_at=expires_at,
     )
 
     # 4. Log attempt
     repo.log_login_attempt(
-        email=body.username,
+        email=username_normalized,
         status="success",
         reason="admin_login",
         ip_address=ip_address,
@@ -108,7 +150,7 @@ async def admin_login(
         max_age=max_age,
     )
 
-    logger.info("Admin %s logged in successfully", body.username)
+    logger.info("Admin %s logged in successfully", username_normalized)
     return {"status": "success"}
 
 @router.post("/logout")
@@ -117,11 +159,13 @@ async def admin_logout(
     request: Request,
     response: Response,
 ) -> dict[str, str]:
+    validate_origin(request)
     validate_csrf(request, body.csrf_token)
 
     session_cookie = request.cookies.get(ADMIN_SESSION_COOKIE_NAME)
     if session_cookie:
         repo = request.app.state.watchlist_repo
+        repo.delete_admin_session(hash_session_token(session_cookie))
         repo.delete_admin_session(session_cookie)
 
     response.delete_cookie(
@@ -155,8 +199,9 @@ async def approve_request(
     request: Request,
     current_admin: str = Depends(get_current_admin)
 ) -> dict[str, str]:
+    validate_origin(request)
     validate_csrf(request, body.csrf_token)
-    email_normalized = body.email.strip().lower()
+    email_normalized = _normalize_valid_email(body.email)
 
     repo = request.app.state.watchlist_repo
     decided_at = repo.utc_now_iso()
@@ -175,8 +220,9 @@ async def deny_request(
     request: Request,
     current_admin: str = Depends(get_current_admin)
 ) -> dict[str, str]:
+    validate_origin(request)
     validate_csrf(request, body.csrf_token)
-    email_normalized = body.email.strip().lower()
+    email_normalized = _normalize_valid_email(body.email)
 
     repo = request.app.state.watchlist_repo
     decided_at = repo.utc_now_iso()
@@ -195,8 +241,9 @@ async def invite_user(
     request: Request,
     current_admin: str = Depends(get_current_admin)
 ) -> dict[str, Any]:
+    validate_origin(request)
     validate_csrf(request, body.csrf_token)
-    email_normalized = body.email.strip().lower()
+    email_normalized = _normalize_valid_email(body.email)
 
     repo = request.app.state.watchlist_repo
     decided_at = repo.utc_now_iso()
@@ -235,10 +282,10 @@ async def invite_user(
         sender_admin=current_admin,
     )
 
-    ip_address = request.client.host if request.client else "unknown"
+    ip_address = extract_client_ip(request)
     user_agent = request.headers.get("user-agent", "unknown")
     log_status = "success" if email_sent else "warning"
-    log_reason = "invite_email_dispatched" if email_sent else f"invite_preapproved_no_email ({email_detail})"
+    log_reason = "invite_email_dispatched" if email_sent else "invite_preapproved_no_email"
 
     repo.log_login_attempt(
         email=email_normalized,
@@ -249,7 +296,7 @@ async def invite_user(
         timestamp=decided_at,
     )
 
-    msg = email_detail if email_sent else f"User {email_normalized} pre-approved! ({email_detail})"
+    msg = email_detail if email_sent else f"User {email_normalized} pre-approved, but invitation email failed to send; check server logs."
 
     return {
         "status": "success",
@@ -261,7 +308,7 @@ async def invite_user(
 @router.get("/login-logs")
 async def get_login_logs(
     request: Request,
-    limit: int = 100,
+    limit: int = Query(100, ge=1, le=500),
     email: Optional[str] = None,
     status: Optional[str] = None,
     reason: Optional[str] = None,
@@ -276,35 +323,39 @@ async def get_login_logs(
 
 class SaveDecisionConfigRequest(BaseModel):
     config: dict[str, Any]
-    change_note: str = "Updated decision configuration"
+    change_note: str = Field(default="Updated decision configuration", max_length=500)
 
 
 class SavePromptVersionRequest(BaseModel):
-    system_instruction_template: str
-    wording_instruction: str
-    change_note: str = "Updated wording instruction"
+    system_instruction_template: str = Field(..., max_length=16000)
+    wording_instruction: str = Field(..., max_length=4000)
+    change_note: str = Field(default="Updated wording instruction", max_length=500)
 
 
 class PreviewDecisionRequest(BaseModel):
-    user_id: str = "preview_user"
-    weather_condition: Optional[str] = "Rain"
-    significant_alert: Optional[str] = None
-    monitored_title_update: Optional[str] = "Spider-Man"
+    user_id: str = Field(default="preview_user", max_length=128)
+    weather_condition: Optional[str] = Field(default="Rain", max_length=128)
+    significant_alert: Optional[str] = Field(default=None, max_length=500)
+    monitored_title_update: Optional[str] = Field(default="Spider-Man", max_length=300)
     is_streaming_arrival: bool = True
-    trivia_fact: Optional[str] = None
-    major_news_title: Optional[str] = None
+    trivia_fact: Optional[str] = Field(default=None, max_length=1000)
+    major_news_title: Optional[str] = Field(default=None, max_length=300)
     user_interest_score: float = 0.85
     random_seed: Optional[int] = 42
 
 
 def _validate_cookie_csrf(request: Request) -> None:
-    """Validate X-CSRF-Token header when state-changing admin routes use cookie authentication."""
+    """Validate Origin and X-CSRF-Token header when state-changing admin routes use cookie authentication."""
     headers = getattr(request, "headers", None) or {}
     cookies = getattr(request, "cookies", None) or {}
-    auth_header = headers.get("Authorization") or headers.get("authorization") or ""
-    if auth_header.startswith("Bearer "):
+    used_cookie = getattr(getattr(request, "state", None), "used_admin_cookie_auth", None)
+    if used_cookie is False:
         return
-    if cookies.get(ADMIN_SESSION_COOKIE_NAME):
+    auth_header = headers.get("Authorization") or headers.get("authorization") or ""
+    has_non_empty_bearer = auth_header.startswith("Bearer ") and bool(auth_header[7:].strip())
+    has_admin_cookie = bool(cookies.get(config.ADMIN_SESSION_COOKIE_NAME) or cookies.get(ADMIN_SESSION_COOKIE_NAME))
+    if used_cookie is True or (not has_non_empty_bearer and has_admin_cookie):
+        validate_origin(request)
         csrf_header = headers.get("X-CSRF-Token") or headers.get("x-csrf-token") or ""
         validate_csrf(request, csrf_header)
 
@@ -312,8 +363,8 @@ def _validate_cookie_csrf(request: Request) -> None:
 @router.get("/agent/decision-logs")
 async def get_agent_decision_logs(
     request: Request,
-    limit: int = 50,
-    offset: int = 0,
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0, le=10_000),
     user_id: Optional[str] = None,
     candidate_type: Optional[str] = None,
     fallback_only: bool = False,
@@ -341,6 +392,8 @@ async def get_agent_decision_log_detail(
     request: Request,
     current_admin: str = Depends(get_current_admin),
 ) -> dict[str, Any]:
+    if not log_id or len(log_id) > 256 or "/" in log_id or "\\" in log_id or ".." in log_id:
+        raise HTTPException(status_code=400, detail="Invalid decision log ID")
     repo = request.app.state.watchlist_repo
     log = repo.get_decision_log(log_id)
     if not log:
@@ -369,7 +422,7 @@ async def save_agent_decision_config(
 
     # Validate config
     try:
-        cfg = DecisionConfig(**body.config)
+        cfg = DecisionConfig.from_dict(body.config)
         errs = cfg.validate()
         if errs:
             raise HTTPException(status_code=400, detail="; ".join(errs))
@@ -465,8 +518,8 @@ async def preview_agent_decision(
     from app.services.agent_service import AiAgentService
 
     repo = request.app.state.watchlist_repo
-    cfg = DecisionConfig(**repo.get_active_decision_config())
-    prompt_ver = PromptVersion(**repo.get_active_prompt_version())
+    cfg = DecisionConfig.from_dict(repo.get_active_decision_config())
+    prompt_ver = PromptVersion.from_dict(repo.get_active_prompt_version())
 
     raw_candidates: list[Candidate] = []
 

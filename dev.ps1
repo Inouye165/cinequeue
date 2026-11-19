@@ -57,7 +57,7 @@ Write-Host " CineQueue Dev Startup -- Checking Active Servers..." -ForegroundCol
 Write-Host "========================================================" -ForegroundColor Cyan
 
 $backendSafe = Stop-CinequeueServerOnPort -Port 8081 -ServerName "Backend" -Keywords @("app.main:app", "cinequeue\backend", "$rootDir\backend", "cinequeue")
-$frontendSafe = Stop-CinequeueServerOnPort -Port 5180 -ServerName "Frontend" -Keywords @("vite", "cinequeue\frontend", "$rootDir\frontend", "cinequeue")
+$frontendSafe = Stop-CinequeueServerOnPort -Port 5180 -ServerName "Frontend" -Keywords @("cinequeue\frontend", "$rootDir\frontend", "cinequeue")
 
 if (-not $backendSafe -or -not $frontendSafe) {
     Write-Host "[CineQueue] Startup aborted to protect non-CineQueue applications." -ForegroundColor Red
@@ -72,9 +72,9 @@ Write-Host "========================================================" -Foregroun
 Write-Host "Launching Backend server (http://localhost:8081)..." -ForegroundColor Yellow
 Start-Process cmd.exe -ArgumentList "/k title Cinequeue Backend (8081) & cd /d `"$rootDir\backend`" & .venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8081"
 
-# Start Frontend in a new window
+# Start Frontend in a new window (explicitly pin port 5180; NEVER use 5173)
 Write-Host "Launching Frontend server (http://localhost:5180)..." -ForegroundColor Yellow
-Start-Process cmd.exe -ArgumentList "/k title Cinequeue Frontend (5180) & cd /d `"$rootDir\frontend`" & npm run dev"
+Start-Process cmd.exe -ArgumentList "/k title Cinequeue Frontend (5180) & cd /d `"$rootDir\frontend`" & npm run dev -- --port 5180"
 
 Write-Host "========================================================" -ForegroundColor Cyan
 Write-Host " Both servers launching in separate terminal windows." -ForegroundColor Green

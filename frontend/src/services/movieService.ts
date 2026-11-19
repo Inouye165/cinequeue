@@ -2,6 +2,10 @@ import { db, type LocalMovie, type SyncOperation, type SyncRecord } from "../db/
 import type { MediaDetails, RatedMovie, WatchlistItem } from "../types";
 import { formatPosterUrl } from "../utils/mediaUtils";
 
+export function normalizePosterPath(path?: string | null): string | undefined {
+  return path ? path.replace(/^https?:\/\/image\.tmdb\.org\/t\/p\/w\d+/, "") : undefined;
+}
+
 export function watchlistItemToLocalMovie(
   item: WatchlistItem,
   ownerId: string
@@ -175,7 +179,7 @@ export const movieService = {
   async saveMovie(
     movieData: Partial<LocalMovie> & { title: string; tmdbId: number },
     ownerId: string,
-    operationType: "upsert" | "delete" | "patch" = "upsert"
+    operationType: "upsert" | "delete" = "upsert"
   ): Promise<LocalMovie> {
     const id = `${movieData.mediaType || "movie"}_${movieData.tmdbId}`;
     const nowIso = new Date().toISOString();
@@ -433,17 +437,40 @@ export const movieService = {
       if (typeof localStorage !== "undefined") {
         if (ownerId) {
           localStorage.removeItem(`${SNAPSHOT_PREFIX}${ownerId}`);
+          localStorage.removeItem(`sports_prefs:${ownerId}`);
+          localStorage.removeItem(`cinequeue_sports_schedule:${ownerId}`);
+          localStorage.removeItem("cinequeue_sports_schedule");
         } else {
           for (let i = localStorage.length - 1; i >= 0; i--) {
             const k = localStorage.key(i);
-            if (k && k.startsWith(SNAPSHOT_PREFIX)) {
+            if (
+              k &&
+              (k.startsWith(SNAPSHOT_PREFIX) ||
+                k.startsWith("sports_prefs:") ||
+                k.startsWith("cinequeue_sports_schedule"))
+            ) {
               localStorage.removeItem(k);
             }
           }
         }
       }
+      if (typeof sessionStorage !== "undefined") {
+        if (ownerId) {
+          sessionStorage.removeItem(`cinequeue_briefing_session_id:${ownerId}`);
+          sessionStorage.removeItem(`cinequeue_briefing_dismissed:${ownerId}`);
+          sessionStorage.removeItem("cinequeue_briefing_session_id");
+          sessionStorage.removeItem("cinequeue_briefing_dismissed");
+        } else {
+          for (let i = sessionStorage.length - 1; i >= 0; i--) {
+            const k = sessionStorage.key(i);
+            if (k && k.startsWith("cinequeue_briefing_")) {
+              sessionStorage.removeItem(k);
+            }
+          }
+        }
+      }
     } catch {
-      // Ignore localStorage access errors
+      // Ignore storage access errors
     }
     await db.transaction("rw", db.movies, db.syncQueue, db.localMetadata, async () => {
       if (ownerId) {
@@ -452,10 +479,21 @@ export const movieService = {
         await db.movies.bulkDelete(ids);
         await db.syncQueue.where("ownerId").equals(ownerId).delete();
         await db.localMetadata.delete(`sync_cursor:${ownerId}`);
+        await db.localMetadata.delete(`sports_prefs:${ownerId}`);
+        await db.localMetadata.delete(`sports_schedule:${ownerId}`);
+        await db.localMetadata.delete("sports_schedule");
+        await db.localMetadata
+          .filter(
+            (m) =>
+              m.key.startsWith(`recovery:${ownerId}:`) ||
+              m.key.startsWith(`healed_sync:${ownerId}:`)
+          )
+          .delete();
       } else {
         await db.movies.clear();
         await db.syncQueue.clear();
-        await db.localMetadata.clear();
+        // Preserve active cross-tab sync lease locks while clearing user metadata
+        await db.localMetadata.filter((m) => !m.key.startsWith("sync_lease:")).delete();
       }
     });
   },

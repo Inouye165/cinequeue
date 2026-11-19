@@ -1,26 +1,30 @@
 import logging
-from typing import Any
-from fastapi import APIRouter, Depends, HTTPException, Request
+from typing import Any, Literal
+from fastapi import APIRouter, Depends, HTTPException, Path, Request
 from pydantic import BaseModel, Field
 
-from app.auth import CurrentUser, get_current_user
+from app.auth import CurrentUser, get_current_user, require_cookie_csrf_and_origin
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/ratings", tags=["ratings"], dependencies=[Depends(get_current_user)])
+router = APIRouter(
+    prefix="/api/ratings",
+    tags=["ratings"],
+    dependencies=[Depends(get_current_user), Depends(require_cookie_csrf_and_origin)],
+)
 
 
 class RateMoviePayload(BaseModel):
-    media_type: str = "movie"
-    tmdb_id: int
-    title: str
-    poster_path: str | None = None
-    release_date: str | None = None
+    media_type: Literal["movie", "tv"] = "movie"
+    tmdb_id: int = Field(gt=0, le=2_147_483_647)
+    title: str = Field(..., min_length=1, max_length=500)
+    poster_path: str | None = Field(default=None, max_length=500)
+    release_date: str | None = Field(default=None, max_length=32)
     rating: int = Field(ge=1, le=5)
 
 
 @router.get("")
-async def list_rated_movies(
+def list_rated_movies(
     request: Request,
     current_user: CurrentUser = Depends(get_current_user),
 ) -> list[dict[str, Any]]:
@@ -29,11 +33,11 @@ async def list_rated_movies(
         return repo.list_rated_movies(current_user.uid)
     except Exception as e:
         logger.error("Error listing rated movies for user %s: %s", current_user.uid, e, exc_info=True)
-        return []
+        raise HTTPException(status_code=503, detail="Database unavailable")
 
 
 @router.post("")
-async def rate_movie(
+def rate_movie(
     payload: RateMoviePayload,
     request: Request,
     current_user: CurrentUser = Depends(get_current_user),
@@ -55,10 +59,10 @@ async def rate_movie(
 
 
 @router.delete("/{media_type}/{tmdb_id}")
-async def delete_rated_movie(
-    media_type: str,
-    tmdb_id: int,
-    request: Request,
+def delete_rated_movie(
+    media_type: Literal["movie", "tv"],
+    tmdb_id: int = Path(..., gt=0),
+    request: Request = ...,
     current_user: CurrentUser = Depends(get_current_user),
 ) -> dict[str, bool]:
     repo = request.app.state.watchlist_repo
@@ -71,4 +75,4 @@ async def delete_rated_movie(
         raise
     except Exception as e:
         logger.error("Error deleting rated movie for user %s: %s", current_user.uid, e, exc_info=True)
-        return {"success": True}
+        raise HTTPException(status_code=503, detail="Database unavailable")

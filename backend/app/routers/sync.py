@@ -4,27 +4,37 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field, StrictInt, StrictStr
 
-from app.auth import get_current_user
+from app.auth import get_current_user, require_cookie_csrf_and_origin
 from app.repository import DuplicateItemError, WatchlistRepository
 from app.sync_protocol import validate_operation
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/api/sync", tags=["sync"])
+router = APIRouter(
+    prefix="/api/sync",
+    tags=["sync"],
+    dependencies=[Depends(require_cookie_csrf_and_origin)],
+)
 
 
 class SyncOperationPayload(BaseModel):
-  operationId: str
-  entityType: str = "movie"
-  entityId: str
-  operationType: str  # "upsert", "delete", "patch"
+
+
+
+
   payload: Dict[str, Any]
-  createdAt: Optional[str] = None
-  baseRevision: Optional[StrictStr] = None
+
+  operationId: str = Field(..., max_length=256)
+  entityType: str = Field(default="movie", max_length=32)
+  entityId: str = Field(..., max_length=128)
+  operationType: str = Field(..., max_length=32)  # "upsert", "delete", "patch"
+  payload: Dict[str, Any]
+  createdAt: Optional[str] = Field(default=None, max_length=64)
+  baseRevision: Optional[StrictStr] = Field(default=None, max_length=256)
 
 
 class PushSyncRequest(BaseModel):
   protocolVersion: StrictInt = Field(default=1, ge=1, le=2)
-  operations: List[SyncOperationPayload]
+  operations: List[SyncOperationPayload] = Field(default_factory=list, max_length=250)
 
 
 class PushSyncResponse(BaseModel):
@@ -37,7 +47,7 @@ class PushSyncResponse(BaseModel):
 
 
 @router.post("/movies/push", response_model=PushSyncResponse)
-async def push_movie_sync(
+def push_movie_sync(
     request: Request,
     body: PushSyncRequest,
     current_user: Any = Depends(get_current_user),
@@ -77,9 +87,12 @@ async def push_movie_sync(
         else:
           processed_ids.append(operation["operationId"])
           applied.append(result["applied"])
-      except Exception as exc:
-        logger.exception("Failed to sync operation %s", operation["operationId"])
+      except ValueError as exc:
+        logger.warning("Invalid sync v2 operation %s: %s", operation["operationId"], exc)
         failed_ops.append({"operationId": operation["operationId"], "reason": str(exc)})
+      except Exception:
+        logger.exception("Failed to sync operation %s", operation["operationId"])
+        failed_ops.append({"operationId": operation["operationId"], "reason": "Internal sync error"})
     return PushSyncResponse(
         processed_operations=processed_ids, failed_operations=failed_ops,
         applied_operations=applied, conflicts=conflicts, server_timestamp=now_iso,
@@ -97,16 +110,42 @@ async def push_movie_sync(
             {"operationId": op.operationId, "reason": "Missing tmdb_id"}
         )
         continue
+      if media_type not in {"movie", "tv"}:
+        failed_ops.append(
+            {"operationId": op.operationId, "reason": "Invalid media_type"}
+        )
+        continue
+      try:
+        tmdb_id_int = int(tmdb_id)
+        if tmdb_id_int <= 0:
+          raise ValueError("tmdb_id must be positive")
+      except (TypeError, ValueError):
+        failed_ops.append(
+            {"operationId": op.operationId, "reason": "Invalid tmdb_id"}
+        )
+        continue
 
       if op.operationType == "delete" or p.get("deletedAt") or p.get("deleted_at"):
         # Tombstone deletion
-        repo.remove_item(user_id, media_type, int(tmdb_id))
+        repo.remove_item(user_id, media_type, tmdb_id_int)
+        repo.delete_rated_movie(
+            user_id, media_type, tmdb_id_int, remove_unowned_watched=False
+        )
         processed_ids.append(op.operationId)
       else:
         status = p.get("status", "queue")
         is_owned = bool(p.get("isOwned") or p.get("is_owned") or False)
         rating = p.get("rating")
-        user_rating = int(rating) if rating and rating > 0 else 0
+        user_rating = int(rating) if rating and not isinstance(rating, bool) and int(rating) > 0 else 0
+        if user_rating < 0 or user_rating > 5:
+          raise ValueError("rating must be between 0 and 5")
+        if status not in {"queue", "following", "library", "watched"}:
+          raise ValueError("Invalid status")
+        owned_fmt = p.get("ownedFormat")
+        if owned_fmt is not None and owned_fmt not in {"electronic", "cloud", "hard_copy"}:
+          raise ValueError("Invalid ownedFormat")
+        if not isinstance(title, str) or len(title) > 500:
+          raise ValueError("Invalid title")
 
         try:
           repo.add_item(
@@ -136,7 +175,7 @@ async def push_movie_sync(
               user_rating=user_rating,
           )
 
-        # Rate movie if rating present
+        # Rate movie if rating present; clear rating without removing an upserted item
         if user_rating > 0:
           repo.rate_movie(
               user_id=user_id,
@@ -147,13 +186,18 @@ async def push_movie_sync(
               release_date=p.get("releaseDate") or p.get("release_date"),
               rating=user_rating,
           )
-        elif rating is not None:
-          repo.delete_rated_movie(user_id, media_type, int(tmdb_id))
+        elif "rating" in p and rating is not None:
+          repo.delete_rated_movie(
+              user_id, media_type, int(tmdb_id), remove_unowned_watched=False
+          )
 
         processed_ids.append(op.operationId)
-    except Exception as e:
-      logger.exception(f"Failed to sync operation {op.operationId}: {e}")
+    except ValueError as e:
+      logger.warning("Invalid sync v1 operation %s: %s", op.operationId, e)
       failed_ops.append({"operationId": op.operationId, "reason": str(e)})
+    except Exception:
+      logger.exception("Failed to sync operation %s", op.operationId)
+      failed_ops.append({"operationId": op.operationId, "reason": "Internal sync error"})
 
   return PushSyncResponse(
       status="ok",
@@ -164,7 +208,7 @@ async def push_movie_sync(
 
 
 @router.get("/movies/pull")
-async def pull_movie_sync(
+def pull_movie_sync(
     request: Request,
     since_cursor: Optional[str] = Query(None),
     protocolVersion: int = Query(1, ge=1, le=2),

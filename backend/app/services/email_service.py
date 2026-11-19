@@ -2,8 +2,10 @@ import asyncio
 import html
 import logging
 import smtplib
+import ssl
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from urllib.parse import urlparse
 
 from app.config import (
     APP_BASE_URL,
@@ -18,10 +20,23 @@ from app.config import (
 logger = logging.getLogger(__name__)
 
 
+def _is_safe_http_url(raw_url: str) -> bool:
+    if not raw_url or any(ch in raw_url for ch in ('"', "'", "<", ">", "\r", "\n", "\x00")):
+        return False
+    parsed = urlparse(raw_url.strip())
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
 def _send_invite_email_sync(to_email: str, app_url: str, sender_admin: str) -> tuple[bool, str]:
     if not SMTP_HOST:
         logger.info("SMTP_HOST not configured. Skipping email dispatch for %s", to_email)
         return False, "SMTP server is not configured on this environment."
+
+    clean_url = (app_url or APP_BASE_URL).strip()
+    if not _is_safe_http_url(clean_url):
+        logger.warning("Refusing invite email with unsafe app_url scheme")
+        return False, "Invalid application URL configured for invite link."
+    app_url = clean_url
 
     from_addr = SMTP_FROM or SMTP_USER or "noreply@cinequeue.local"
 
@@ -81,7 +96,7 @@ def _send_invite_email_sync(to_email: str, app_url: str, sender_admin: str) -> t
     try:
         server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10)
         if SMTP_USE_TLS:
-            server.starttls()
+            server.starttls(context=ssl.create_default_context())
         if SMTP_USER and SMTP_PASSWORD:
             server.login(SMTP_USER, SMTP_PASSWORD)
 
@@ -91,7 +106,12 @@ def _send_invite_email_sync(to_email: str, app_url: str, sender_admin: str) -> t
         return True, f"Invitation email successfully sent to {to_email}."
     except Exception as err:
         logger.error("Failed to send invite email to %s: %s", to_email, err, exc_info=True)
-        return False, f"Email delivery failed: {err}"
+        err_str = str(err)
+        if SMTP_PASSWORD and SMTP_PASSWORD in err_str:
+            err_str = err_str.replace(SMTP_PASSWORD, "[REDACTED]")
+        if SMTP_USER and SMTP_USER in err_str:
+            err_str = err_str.replace(SMTP_USER, "[REDACTED]")
+        return False, f"Email delivery failed: {err_str}"
 
 
 async def send_invite_email(to_email: str, app_url: str = "", sender_admin: str = "An administrator") -> tuple[bool, str]:

@@ -10,18 +10,18 @@ from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, Strict
 class MoviePayload(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    tmdbId: StrictInt = Field(gt=0)
+    tmdbId: StrictInt = Field(gt=0, le=2_147_483_647)
     mediaType: Literal["movie", "tv"] = "movie"
-    title: StrictStr = "Untitled"
-    posterPath: StrictStr | None = None
-    releaseDate: StrictStr | None = None
+    title: StrictStr = Field(default="Untitled", max_length=500)
+    posterPath: StrictStr | None = Field(default=None, max_length=500)
+    releaseDate: StrictStr | None = Field(default=None, max_length=32)
     status: Literal["queue", "following", "watched", "library"] = "queue"
     isOwned: StrictBool = False
     ownedFormat: Literal["electronic", "cloud", "hard_copy"] | None = None
     watchFreeStreaming: StrictBool = False
     watchOnSaleBuy: StrictBool = False
     rating: StrictInt | None = Field(default=None, ge=0, le=5)
-    deletedAt: StrictStr | None = None
+    deletedAt: StrictStr | None = Field(default=None, max_length=64)
 
 
 def digest(value: Any) -> str:
@@ -39,8 +39,13 @@ def operation_fingerprint(operation: dict[str, Any]) -> str:
 
 def validate_operation(operation: dict[str, Any], user_id: str | None = None) -> None:
     """Validate the complete batch before entering any storage transaction."""
-    if not operation["operationId"].strip() or not operation.get("baseRevision"):
-        raise ValueError("operationId and baseRevision must be non-empty strings")
+    if (
+        not operation["operationId"].strip()
+        or len(operation["operationId"]) > 256
+        or not operation.get("baseRevision")
+        or len(operation["baseRevision"]) > 256
+    ):
+        raise ValueError("operationId and baseRevision must be non-empty strings <= 256 chars")
     if operation["operationType"] not in {"upsert", "delete"}:
         raise ValueError("Protocol v2 supports only upsert and delete")
     payload = MoviePayload.model_validate(operation["payload"])

@@ -1,5 +1,6 @@
 """Weather service orchestrating caching, provider fallback, and structured output."""
 
+from collections import OrderedDict
 import logging
 import time
 from typing import Any
@@ -14,7 +15,8 @@ from app.services.weather_provider import (
 logger = logging.getLogger(__name__)
 
 # Cache structure: {location_key: (timestamp, WeatherData)}
-_WEATHER_DATA_CACHE: dict[str, tuple[float, WeatherData]] = {}
+_WEATHER_DATA_CACHE: OrderedDict[str, tuple[float, WeatherData]] = OrderedDict()
+_MAX_WEATHER_CACHE_SIZE = 128
 _CACHE_TTL_SECONDS = 1200  # 20 minutes (within 15-30 min spec)
 
 
@@ -42,6 +44,7 @@ class WeatherService:
         if cache_key in _WEATHER_DATA_CACHE:
             cached_time, cached_data = _WEATHER_DATA_CACHE[cache_key]
             if now - cached_time < _CACHE_TTL_SECONDS:
+                _WEATHER_DATA_CACHE.move_to_end(cache_key)
                 cached_copy = WeatherData(**cached_data.to_dict())
                 cached_copy.status = "cached"
                 if ctx:
@@ -53,6 +56,7 @@ class WeatherService:
                         result={"location": loc_clean, "source": "in_memory_cache"},
                     )
                 return cached_copy
+            del _WEATHER_DATA_CACHE[cache_key]
 
         for provider in self.providers:
             try:
@@ -62,6 +66,9 @@ class WeatherService:
                 dur_ms = round((time.perf_counter() - start_t) * 1000, 2)
                 if data:
                     _WEATHER_DATA_CACHE[cache_key] = (now, data)
+                    _WEATHER_DATA_CACHE.move_to_end(cache_key)
+                    while len(_WEATHER_DATA_CACHE) > _MAX_WEATHER_CACHE_SIZE:
+                        _WEATHER_DATA_CACHE.popitem(last=False)
                     if ctx:
                         ctx.add_timeline_event(
                             stage="weather_collection",

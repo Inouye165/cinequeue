@@ -3,6 +3,7 @@ import { db, type SyncOperation } from "../db/cinequeueDb";
 import { movieService } from "./movieService";
 import { parsePush, parseSnapshot } from "./syncProtocol";
 import { withSyncLock } from "./syncLock";
+import { getCsrfCookie } from "../api";
 import { getAuthToken } from "../utils/authTokenStore";
 
 export type SyncState = "available_offline" | "local_loaded" | "offline" |
@@ -165,7 +166,7 @@ export class SyncService {
     const send = async (url: string, body?: unknown) => {
       const result = await fetch(url, {
         method: body ? "POST" : "GET", credentials: "include", signal: controller.signal,
-        headers: { "Content-Type": "application/json", "X-Sync-Owner": ownerId, ...(getAuthToken() ? { Authorization: `Bearer ${getAuthToken()}` } : {}) },
+        headers: { "Content-Type": "application/json", "X-Sync-Owner": ownerId, ...(getAuthToken() ? { Authorization: `Bearer ${getAuthToken()}` } : {}), ...(body && getCsrfCookie() ? { "X-CSRF-Token": getCsrfCookie()! } : {}) },
         ...(body ? { body: JSON.stringify(body) } : {}),
       });
       if (!current()) throw new Error("Workspace changed during sync");
@@ -311,7 +312,7 @@ export class SyncService {
     const cleared = await withSyncLock(ownerId, controller, async () => {
       await movieService.clearLocalData(ownerId);
       return true;
-    });
+    }, { ifAvailable: true });
     if (!cleared) throw new Error("Another tab is syncing. Try clearing again after it finishes.");
     await this.refreshStatus();
   }

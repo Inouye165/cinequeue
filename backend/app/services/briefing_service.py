@@ -9,6 +9,7 @@ from app.decision_models import (
     STARTUP_BRIEFING_CACHE_VERSION,
     StartupRunContext,
     build_stable_daily_cache_key,
+    reset_current_run_context,
     resolve_user_local_date,
     set_current_run_context,
 )
@@ -64,6 +65,72 @@ def _filter_unpresented_candidates(user_id: str, candidate_list: list[dict[str, 
 
 class BriefingService:
     @staticmethod
+    async def _wait_for_generating_briefing(
+        repo: WatchlistRepository,
+        user_id: str,
+        cache_key: str,
+        max_attempts: int = 12,
+        interval_seconds: float = 0.2,
+    ) -> tuple[dict[str, Any] | None, float]:
+        """Poll briefly for an in-flight daily greeting generation to complete."""
+        poll_start = time.perf_counter()
+        completed_record = None
+        for _ in range(max_attempts):
+            await asyncio.sleep(interval_seconds)
+            check_rec = repo.get_daily_greeting(user_id, cache_key)
+            if check_rec and check_rec.get("status") == "completed":
+                completed_record = check_rec
+                break
+        poll_dur_ms = round((time.perf_counter() - poll_start) * 1000, 2)
+        return completed_record, poll_dur_ms
+
+    @staticmethod
+    def _build_completed_cached_response(
+        user_id: str,
+        repo: WatchlistRepository,
+        run_ctx: StartupRunContext,
+        record: dict[str, Any],
+        brun_id: str,
+        req_id: str,
+        *,
+        poll_dur_ms: float | None = None,
+        cache_key: str = "",
+    ) -> dict[str, Any]:
+        b_text = record.get("briefing") or record.get("briefing_text") or ""
+        if poll_dur_ms is not None:
+            run_ctx.generation_wait_outcome = "completed"
+            run_ctx.add_timeline_event(
+                stage="persistent_daily_cache_lookup",
+                status="hit_after_wait",
+                duration_ms=poll_dur_ms,
+                result={"daily_cache_key": cache_key, "wait_duration_ms": poll_dur_ms},
+            )
+        _ensure_briefing_in_chat_history(user_id, b_text, repo)
+        res_src = record.get("result_source", "persistent_daily_cache")
+        run_ctx.served_from = "persistent_daily_cache"
+        run_ctx.content_origin = record.get("content_origin") or res_src
+        summary = run_ctx.finalize_run(
+            result_source=res_src,
+            final_status="success",
+            response_text=b_text,
+        )
+        try:
+            repo.add_decision_log(summary)
+        except Exception:
+            pass
+        unpresented = _filter_unpresented_candidates(user_id, record.get("selected_candidates", []), repo)
+        return {
+            "enabled": True,
+            "briefing": b_text,
+            "updates_count": len(unpresented),
+            "updates": unpresented,
+            "telemetry": summary,
+            "briefing_run_id": brun_id,
+            "request_id": req_id,
+            "cached": True,
+        }
+
+    @staticmethod
     async def evaluate_startup_briefing(
         user_id: str,
         repo: WatchlistRepository,
@@ -87,6 +154,32 @@ class BriefingService:
             refresh_reason="manual" if force_refresh else "daily_startup",
         )
         token = set_current_run_context(run_ctx)
+        try:
+            return await BriefingService._evaluate_startup_briefing_impl(
+                user_id=user_id,
+                repo=repo,
+                tmdb=tmdb,
+                session_id=session_id,
+                force_refresh=force_refresh,
+                brun_id=brun_id,
+                req_id=req_id,
+                run_ctx=run_ctx,
+            )
+        finally:
+            reset_current_run_context(token)
+
+    @staticmethod
+    async def _evaluate_startup_briefing_impl(
+        *,
+        user_id: str,
+        repo: WatchlistRepository,
+        tmdb: TmdbClient | None,
+        session_id: str | None,
+        force_refresh: bool,
+        brun_id: str,
+        req_id: str,
+        run_ctx: StartupRunContext,
+    ) -> dict[str, Any]:
         run_ctx.add_timeline_event("run_started", "completed")
 
         now_iso = repo.utc_now_iso()
@@ -100,7 +193,6 @@ class BriefingService:
                 repo.add_decision_log(summary)
             except Exception:
                 pass
-            set_current_run_context(None)
             return {"enabled": False, "briefing": None, "updates": []}
 
         # Step 2: Resolve user timezone & stable daily cache key
@@ -151,7 +243,6 @@ class BriefingService:
                         repo.add_decision_log(summary)
                     except Exception as e:
                         logger.warning(f"Error recording run summary: {e}")
-                    set_current_run_context(None)
 
                     unpresented = _filter_unpresented_candidates(user_id, cached_daily.get("selected_candidates", []), repo)
                     return {
@@ -159,6 +250,7 @@ class BriefingService:
                         "briefing": b_text,
                         "updates_count": len(unpresented),
                         "updates": unpresented,
+                        "auto_speak_briefing": bool(settings.get("auto_speak_briefing", False)),
                         "telemetry": summary,
                         "briefing_run_id": brun_id,
                         "request_id": req_id,
@@ -168,76 +260,45 @@ class BriefingService:
                 elif status == "generating":
                     run_ctx.daily_cache_result = "generating"
                     run_ctx.generation_claim_result = "not_acquired"
-                    poll_start = time.perf_counter()
-                    completed_record = None
-
-                    for _ in range(12):  # Poll up to 2.4s (12 x 200ms)
-                        await asyncio.sleep(0.2)
-                        check_rec = repo.get_daily_greeting(user_id, stable_cache_key)
-                        if check_rec and check_rec.get("status") == "completed":
-                            completed_record = check_rec
-                            break
-
-                    poll_dur_ms = round((time.perf_counter() - poll_start) * 1000, 2)
+                    completed_record, poll_dur_ms = await BriefingService._wait_for_generating_briefing(
+                        repo, user_id, stable_cache_key
+                    )
                     run_ctx.generation_wait_duration_ms = poll_dur_ms
 
                     if completed_record:
-                        b_text = completed_record.get("briefing") or completed_record.get("briefing_text") or ""
-                        run_ctx.generation_wait_outcome = "completed"
-                        run_ctx.add_timeline_event(
-                            stage="persistent_daily_cache_lookup",
-                            status="hit_after_wait",
-                            duration_ms=poll_dur_ms,
-                            result={"daily_cache_key": stable_cache_key, "wait_duration_ms": poll_dur_ms},
+                        return BriefingService._build_completed_cached_response(
+                            user_id,
+                            repo,
+                            run_ctx,
+                            completed_record,
+                            brun_id,
+                            req_id,
+                            poll_dur_ms=poll_dur_ms,
+                            cache_key=stable_cache_key,
                         )
-                        _ensure_briefing_in_chat_history(user_id, b_text, repo)
-                        res_src = completed_record.get("result_source", "persistent_daily_cache")
-                        run_ctx.served_from = "persistent_daily_cache"
-                        run_ctx.content_origin = completed_record.get("content_origin") or res_src
-                        summary = run_ctx.finalize_run(
-                            result_source=res_src,
-                            final_status="success",
-                            response_text=b_text
-                        )
-                        try:
-                            repo.add_decision_log(summary)
-                        except Exception:
-                            pass
-                        set_current_run_context(None)
-                        return {
-                            "enabled": True,
-                            "briefing": b_text,
-                            "updates_count": len(completed_record.get("selected_candidates", [])),
-                            "updates": completed_record.get("selected_candidates", []),
-                            "telemetry": summary,
-                            "briefing_run_id": brun_id,
-                            "request_id": req_id,
-                            "cached": True,
-                        }
                     else:
                         run_ctx.generation_wait_outcome = "timeout"
-                        # Return previously completed stale greeting or deterministic local greeting
-                        stale_text = (cached_daily.get("briefing") or cached_daily.get("briefing_text")) if cached_daily else None
+                        stale_text = (cached_daily.get("briefing") or cached_daily.get("briefing_text")) if (cached_daily and cached_daily.get("status") == "completed") else None
                         final_text = stale_text or "Welcome back! Everything is up to date on your monitored queue today."
                         res_src = cached_daily.get("result_source", "stale_cache_fallback") if stale_text else "local_rule_fallback"
                         run_ctx.served_from = "persistent_daily_cache" if stale_text else "local_fallback"
                         run_ctx.content_origin = res_src
-                        _ensure_briefing_in_chat_history(user_id, final_text, repo)
+                        if stale_text:
+                            _ensure_briefing_in_chat_history(user_id, stale_text, repo)
                         summary = run_ctx.finalize_run(result_source=res_src, final_status="success", response_text=final_text)
                         try:
                             repo.add_decision_log(summary)
                         except Exception:
                             pass
-                        set_current_run_context(None)
                         return {
                             "enabled": True,
                             "briefing": final_text,
-                            "updates_count": len(cached_daily.get("selected_candidates", [])) if cached_daily else 0,
-                            "updates": cached_daily.get("selected_candidates", []) if cached_daily else [],
+                            "updates_count": len(cached_daily.get("selected_candidates", [])) if stale_text else 0,
+                            "updates": cached_daily.get("selected_candidates", []) if stale_text else [],
                             "telemetry": summary,
                             "briefing_run_id": brun_id,
                             "request_id": req_id,
-                            "cached": True,
+                            "cached": bool(stale_text),
                         }
             else:
                 run_ctx.daily_cache_result = "miss"
@@ -259,32 +320,56 @@ class BriefingService:
         else:
             run_ctx.generation_claim_result = "not_acquired"
             run_ctx.add_timeline_event("generation_claim", "not_acquired", result={"daily_cache_key": stable_cache_key})
-            b_text = (existing_claim.get("briefing") or existing_claim.get("briefing_text")) if existing_claim else None
-            res_src = existing_claim.get("result_source", "stale_cache_fallback") if (existing_claim and b_text) else "local_rule_fallback"
-            run_ctx.served_from = "persistent_daily_cache" if (existing_claim and b_text) else "local_fallback"
-            run_ctx.content_origin = res_src
-            if not b_text:
-                b_text = "Welcome back! Everything is up to date on your monitored queue today."
-            _ensure_briefing_in_chat_history(user_id, b_text, repo)
+            if existing_claim and existing_claim.get("status") == "completed":
+                return BriefingService._build_completed_cached_response(
+                    user_id,
+                    repo,
+                    run_ctx,
+                    existing_claim,
+                    brun_id,
+                    req_id,
+                    cache_key=stable_cache_key,
+                )
+
+            # Wait briefly for the concurrent winner holding the generation claim to finish
+            completed_record, poll_dur_ms = await BriefingService._wait_for_generating_briefing(
+                repo, user_id, stable_cache_key
+            )
+            run_ctx.generation_wait_duration_ms = poll_dur_ms
+            if completed_record:
+                return BriefingService._build_completed_cached_response(
+                    user_id,
+                    repo,
+                    run_ctx,
+                    completed_record,
+                    brun_id,
+                    req_id,
+                    poll_dur_ms=poll_dur_ms,
+                    cache_key=stable_cache_key,
+                )
+
+            run_ctx.generation_wait_outcome = "timeout"
+            b_text = "Welcome back! Everything is up to date on your monitored queue today."
+            run_ctx.served_from = "local_fallback"
+            run_ctx.content_origin = "local_rule_fallback"
             summary = run_ctx.finalize_run(
-                result_source=res_src,
+                result_source="local_rule_fallback",
                 final_status="success",
-                response_text=b_text
+                response_text=b_text,
             )
             try:
                 repo.add_decision_log(summary)
             except Exception:
                 pass
-            set_current_run_context(None)
             return {
                 "enabled": True,
                 "briefing": b_text,
-                "updates_count": len(existing_claim.get("selected_candidates", [])) if existing_claim else 0,
-                "updates": existing_claim.get("selected_candidates", []) if existing_claim else [],
+                "updates_count": 0,
+                "updates": [],
                 "telemetry": summary,
                 "briefing_run_id": brun_id,
                 "request_id": req_id,
-                "cached": True,
+                "cached": False,
             }
 
         # Step 5: Data Collection & Generation (Protected by exception handler)
@@ -395,7 +480,7 @@ class BriefingService:
             for cand in candidate_items:
                 c_title = cand.get("title", "Monitored Item")
                 c_summary = cand.get("summary") or cand.get("message", "")
-                c_key = cand.get("item_key", f"monitored_{hash(c_title)}")
+                c_key = cand.get("item_key", f"monitored_{hashlib.sha256(c_title.encode('utf-8')).hexdigest()[:16]}")
                 engine_candidates.append(Candidate(
                     candidate_id=c_key,
                     type=CandidateType.MONITORED_TITLE_RELEASE.value,
@@ -410,8 +495,8 @@ class BriefingService:
                 ))
 
             # Run Decision Engine
-            decision_config = DecisionConfig(**repo.get_active_decision_config())
-            prompt_version = PromptVersion(**repo.get_active_prompt_version())
+            decision_config = DecisionConfig.from_dict(repo.get_active_decision_config())
+            prompt_version = PromptVersion.from_dict(repo.get_active_prompt_version())
 
             decision_log, selected_engine_candidates = DecisionEngine.evaluate(
                 user_id=user_id,
@@ -507,6 +592,7 @@ class BriefingService:
                 "updates_count": selected_count,
                 "updates": formatting_items,
                 "personality_preset": settings.get("personality_preset", "cinephile"),
+                "auto_speak_briefing": bool(settings.get("auto_speak_briefing", False)),
                 "location": location,
                 "weather": weather_data.to_dict() if weather_data else None,
                 "previous_login_at": previous_login_at,
@@ -573,7 +659,6 @@ class BriefingService:
             except Exception as e:
                 logger.warning(f"Error recording startup run summary: {e}")
 
-            set_current_run_context(None)
             return briefing_data
 
         except Exception as err:
@@ -591,12 +676,12 @@ class BriefingService:
                     repo.add_decision_log(summary)
                 except Exception:
                     pass
-                set_current_run_context(None)
                 return {
                     "enabled": True,
                     "briefing": b_text,
                     "updates_count": len(existing_completed_record.get("selected_candidates", [])),
                     "updates": existing_completed_record.get("selected_candidates", []),
+                    "auto_speak_briefing": bool(settings.get("auto_speak_briefing", False)),
                     "telemetry": summary,
                     "briefing_run_id": brun_id,
                     "request_id": req_id,
@@ -637,7 +722,6 @@ class BriefingService:
                 repo.add_decision_log(summary)
             except Exception:
                 pass
-            set_current_run_context(None)
             return {
                 "enabled": True,
                 "briefing": fallback_text,

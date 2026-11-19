@@ -1,4 +1,5 @@
 import os
+import re
 import uuid
 import time
 import json
@@ -10,6 +11,7 @@ logger = logging.getLogger(__name__)
 
 # Control detailed log outputs via environment flag
 AUTH_PERFORMANCE_DEBUG = os.getenv("AUTH_PERFORMANCE_DEBUG", "false").strip().lower() == "true"
+_TRACE_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
 def log_trace(perf_data: dict, status_code: int, total_duration_ms: float, result: str):
     """Outputs structured JSON performance details to stdout/logs."""
@@ -40,8 +42,9 @@ class AuthPerfMiddleware(BaseHTTPMiddleware):
         req_id = str(uuid.uuid4())
         request.state.request_id = req_id
 
-        # Extract X-Auth-Trace-Id
-        trace_id = request.headers.get("X-Auth-Trace-Id")
+        # Extract & validate X-Auth-Trace-Id against CRLF/log injection
+        raw_trace_id = request.headers.get("X-Auth-Trace-Id")
+        trace_id = raw_trace_id.strip() if raw_trace_id and _TRACE_ID_RE.match(raw_trace_id.strip()) else None
         request.state.trace_id = trace_id
 
         # Start timing
@@ -62,12 +65,15 @@ class AuthPerfMiddleware(BaseHTTPMiddleware):
             "authorization_header_scheme": "None",
         }
 
-        # Check authorization header presence / scheme
+        # Check authorization header presence / scheme (strict allowlist prevents raw credential leaks)
         auth_header = request.headers.get("Authorization")
         if auth_header:
             request.state.auth_perf["authorization_header_present"] = True
             parts = auth_header.split()
-            request.state.auth_perf["authorization_header_scheme"] = parts[0] if parts else "Unknown"
+            raw_scheme = parts[0] if parts else ""
+            request.state.auth_perf["authorization_header_scheme"] = (
+                raw_scheme.capitalize() if raw_scheme.lower() in {"bearer", "basic"} else "Other"
+            )
         
         request.state.auth_perf["timings"]["authorization_header_checked"] = time.perf_counter()
 

@@ -9,7 +9,8 @@ export function isSyncRecord(value: unknown): value is SyncRecord {
   return Number.isSafeInteger(value.tmdbId) && Number(value.tmdbId) > 0 &&
     (value.mediaType === "movie" || value.mediaType === "tv") &&
     value.id === `${value.mediaType}_${value.tmdbId}` &&
-    typeof value.title === "string" && typeof value.status === "string" &&
+    typeof value.title === "string" &&
+    (value.status === "queue" || value.status === "following" || value.status === "library" || value.status === "watched") &&
     typeof value.revision === "string" && value.revision.length > 0 &&
     (value.rating === null || (Number.isInteger(value.rating) && Number(value.rating) >= 0 && Number(value.rating) <= 5)) &&
     typeof value.isOwned === "boolean" &&

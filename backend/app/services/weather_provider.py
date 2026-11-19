@@ -55,7 +55,7 @@ class WttrInWeatherProvider(WeatherProvider):
         loc_str = location.strip()
         if not loc_str:
             return None
-        encoded_loc = quote(loc_str)
+        encoded_loc = quote(loc_str, safe="")
         try:
             async with httpx.AsyncClient(timeout=4.0) as client:
                 res = await client.get(f"https://wttr.in/{encoded_loc}?format=j1")

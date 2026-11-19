@@ -5,20 +5,31 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query, Request, Depends
 
 from app.auth import get_current_user
-from app.services.tmdb import TmdbClient, fetch_news
+from app.services.tmdb import TmdbClient, TmdbUpstreamError, fetch_news
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api", tags=["movies"], dependencies=[Depends(get_current_user)])
+def require_tmdb_client(request: Request) -> TmdbClient:
+    tmdb = getattr(request.app.state, "tmdb", None)
+    if not tmdb:
+        raise HTTPException(status_code=503, detail="TMDB_API_KEY is not configured")
+    return tmdb
+
+
+router = APIRouter(
+    prefix="/api",
+    tags=["movies"],
+    dependencies=[Depends(get_current_user), Depends(require_tmdb_client)],
+)
 
 
 @router.get("/search")
 async def search(
     request: Request,
-    q: str | None = Query(None, min_length=1),
+    q: str | None = Query(None, min_length=1, max_length=200),
     actor: list[str] | None = Query(None),
     actors: list[str] | None = Query(None),
-    director: str | None = Query(None),
+    director: str | None = Query(None, max_length=120),
     year: int | None = Query(None),
     year_before: int | None = Query(None),
     year_after: int | None = Query(None),
@@ -30,8 +41,12 @@ async def search(
     all_actors: list[str] = []
     if actor:
         all_actors.extend(actor)
+
+
     if actors:
         all_actors.extend(actors)
+    if len(all_actors) > 10 or any(len(a) > 120 for a in all_actors):
+        raise HTTPException(status_code=400, detail="At most 10 actor filters (<= 120 chars each) are supported")
 
     has_filters = bool(
         all_actors
@@ -72,9 +87,12 @@ async def search(
             result = await tmdb.search(clean_q or "")
         logger.info(f"Search returned {len(result)} results")
         return result
+    except TmdbUpstreamError as e:
+        logger.error("Search upstream failed (%s): %s", e.status_code, e.detail)
+        raise HTTPException(status_code=502, detail="Upstream media service error")
     except Exception as e:
         logger.error(f"Search failed: {e}")
-        raise
+        raise HTTPException(status_code=502, detail="Upstream media service error")
 
 
 @router.get("/upcoming")
@@ -85,9 +103,12 @@ async def upcoming(request: Request) -> list[dict[str, Any]]:
         result = await tmdb.upcoming_movies()
         logger.info(f"Upcoming returned {len(result)} results")
         return result
+    except TmdbUpstreamError as e:
+        logger.error("Upcoming movies upstream failed (%s): %s", e.status_code, e.detail)
+        raise HTTPException(status_code=502, detail="Upstream media service error")
     except Exception as e:
         logger.error(f"Upcoming movies failed: {e}")
-        raise
+        raise HTTPException(status_code=502, detail="Upstream media service error")
 
 
 @router.get("/now-playing")
@@ -98,9 +119,12 @@ async def now_playing(request: Request) -> list[dict[str, Any]]:
         result = await tmdb.now_playing()
         logger.info(f"Now playing returned {len(result)} results")
         return result
+    except TmdbUpstreamError as e:
+        logger.error("Now playing upstream failed (%s): %s", e.status_code, e.detail)
+        raise HTTPException(status_code=502, detail="Upstream media service error")
     except Exception as e:
         logger.error(f"Now playing failed: {e}")
-        raise
+        raise HTTPException(status_code=502, detail="Upstream media service error")
 
 
 @router.get("/trending")
@@ -111,9 +135,12 @@ async def trending(request: Request) -> list[dict[str, Any]]:
         result = await tmdb.trending()
         logger.info(f"Trending returned {len(result)} results")
         return result
+    except TmdbUpstreamError as e:
+        logger.error("Trending upstream failed (%s): %s", e.status_code, e.detail)
+        raise HTTPException(status_code=502, detail="Upstream media service error")
     except Exception as e:
         logger.error(f"Trending failed: {e}")
-        raise
+        raise HTTPException(status_code=502, detail="Upstream media service error")
 
 
 @router.get("/on-air")
@@ -124,9 +151,12 @@ async def on_air(request: Request) -> list[dict[str, Any]]:
         result = await tmdb.on_air_tv()
         logger.info(f"On air TV returned {len(result)} results")
         return result
+    except TmdbUpstreamError as e:
+        logger.error("On air TV upstream failed (%s): %s", e.status_code, e.detail)
+        raise HTTPException(status_code=502, detail="Upstream media service error")
     except Exception as e:
         logger.error(f"On air TV failed: {e}")
-        raise
+        raise HTTPException(status_code=502, detail="Upstream media service error")
 
 
 @router.get("/{media_type}/{tmdb_id}")
@@ -137,7 +167,7 @@ async def media_details(
     current_user: Any = Depends(get_current_user),
 ) -> dict[str, Any]:
     logger.info(f"Media details request: {media_type}/{tmdb_id}")
-    if media_type not in {"movie", "tv"}:
+    if media_type not in {"movie", "tv"} or tmdb_id <= 0 or tmdb_id > 2_147_483_647:
         logger.warning(f"Invalid media_type: {media_type}")
         raise HTTPException(status_code=400, detail="media_type must be movie or tv")
     tmdb: TmdbClient = request.app.state.tmdb
@@ -195,6 +225,13 @@ async def media_details(
             "cast_changes": cast_changes,
             "user_rating": user_rating,
         }
+    except HTTPException:
+        raise
+    except TmdbUpstreamError as e:
+        logger.error("Media details upstream failed for %s/%s (%s): %s", media_type, tmdb_id, e.status_code, e.detail)
+        if e.status_code == 404:
+            raise HTTPException(status_code=404, detail="Media not found")
+        raise HTTPException(status_code=502, detail="Upstream media service error")
     except Exception as e:
         logger.error(f"Media details failed for {media_type}/{tmdb_id}: {e}")
-        raise
+        raise HTTPException(status_code=502, detail="Upstream media service error")

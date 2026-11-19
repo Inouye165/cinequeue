@@ -117,7 +117,7 @@ describe("SportsTab Component", () => {
     ).toBeInTheDocument();
   });
 
-  it("renders movie-format game cards with both team logos and current records", () => {
+  it("renders movie-format game cards with both team logos, current records, and prominent game time between teams", () => {
     const prefs: SportsPreferences = {
       streaming_services: ["peacock"],
       tracked_teams: ["nfl_kc"],
@@ -125,7 +125,7 @@ describe("SportsTab Component", () => {
       setup_completed: true,
     };
 
-    render(
+    const { container } = render(
       <SportsTab
         catalog={DEFAULT_CATALOG}
         games={MOCK_GAMES}
@@ -140,6 +140,10 @@ describe("SportsTab Component", () => {
     expect(screen.getByAltText("Kansas City Chiefs logo")).toBeInTheDocument();
     expect(screen.getByText("5-1")).toBeInTheDocument();
     expect(screen.getByText("4-3")).toBeInTheDocument();
+
+    const kickoffPills = container.querySelectorAll(".sports-poster-kickoff-time");
+    expect(kickoffPills.length).toBe(2);
+    expect(kickoffPills[0].textContent).toMatch(/\d{1,2}:\d{2}/);
   });
 
   it("allows adding and deleting streaming services and filtering by My Services vs All Services and My Teams vs All Teams", () => {

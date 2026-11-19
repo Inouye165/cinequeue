@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 
 interface BeforeInstallPromptEvent extends Event {
   prompt: () => Promise<void>;
@@ -39,13 +40,26 @@ export function isIosDevice(): boolean {
   return /iphone|ipad|ipod/i.test(navigator.userAgent || "");
 }
 
+function syncStandaloneRootClass() {
+  if (typeof document === "undefined") return;
+  const standalone = isRunningStandalone();
+  document.documentElement.classList.toggle("pwa-standalone", standalone);
+  document.documentElement.classList.toggle("ios-standalone", standalone && isIosDevice());
+}
+
+if (typeof window !== "undefined") {
+  syncStandaloneRootClass();
+}
+
 export function usePwaInstall() {
   const [promptEvent, setPromptEvent] = useState<BeforeInstallPromptEvent | null>(deferredInstallPrompt);
   const [standalone, setStandalone] = useState<boolean>(() => isRunningStandalone());
   const [showGuide, setShowGuide] = useState(false);
 
   useEffect(() => {
+    syncStandaloneRootClass();
     const update = () => {
+      syncStandaloneRootClass();
       setPromptEvent(deferredInstallPrompt);
       setStandalone(isRunningStandalone());
     };
@@ -80,9 +94,19 @@ export function usePwaInstall() {
 
 export function InstallAppModal({ isOpen, onClose }: { isOpen: boolean; onClose: () => void }) {
   const isIos = isIosDevice();
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [isOpen, onClose]);
+
   if (!isOpen) return null;
 
-  return (
+  const content = (
     <div className="account-sheet-overlay" onClick={onClose} role="dialog" aria-modal="true" aria-label="Add CineQueue to Home Screen">
       <div className="account-sheet-container" onClick={(e) => e.stopPropagation()}>
         <div className="account-sheet-drag-handle" aria-hidden="true" />
@@ -137,4 +161,6 @@ export function InstallAppModal({ isOpen, onClose }: { isOpen: boolean; onClose:
       </div>
     </div>
   );
+
+  return typeof document !== "undefined" ? createPortal(content, document.body) : content;
 }

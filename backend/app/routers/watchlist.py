@@ -6,14 +6,18 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, Depends, BackgroundTasks
 
-from app.auth import get_current_user, CurrentUser
+from app.auth import get_current_user, require_cookie_csrf_and_origin, CurrentUser
 from app.models import days_label, days_until, poster_url
 from app.repository import DuplicateItemError
 from app.services.tmdb import TmdbClient, fetch_news
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/watchlist", tags=["watchlist"], dependencies=[Depends(get_current_user)])
+router = APIRouter(
+    prefix="/api/watchlist",
+    tags=["watchlist"],
+    dependencies=[Depends(get_current_user), Depends(require_cookie_csrf_and_origin)],
+)
 
 
 async def refresh_cache_in_background(repo, user_id: str, media_type: str, tmdb_id: int, tmdb: TmdbClient):
@@ -47,6 +51,7 @@ async def list_watchlist(
         rows = repo.list_items(current_user.uid)
 
         tmdb: TmdbClient | None = getattr(request.app.state, "tmdb", None)
+        enrich_semaphore = asyncio.Semaphore(8)
 
         async def enrich_item(item: dict[str, Any]) -> dict[str, Any]:
             enriched = dict(item)
@@ -96,19 +101,20 @@ async def list_watchlist(
                             tmdb,
                         )
                 elif tmdb:
-                    # No cache available, fetch synchronously if tmdb is available
+                    # No cache available, fetch synchronously if tmdb is available (bounded concurrency)
                     try:
-                        details = await tmdb.get_details(enriched["media_type"], enriched["tmdb_id"])
-                        try:
-                            providers = await tmdb.get_watch_providers(enriched["media_type"], enriched["tmdb_id"])
-                            details["watch_providers"] = providers
-                        except Exception:
-                            pass
-                        try:
-                            rel_info = await tmdb.get_release_info(enriched["media_type"], enriched["tmdb_id"])
-                            details["release_info"] = rel_info
-                        except Exception:
-                            pass
+                        async with enrich_semaphore:
+                            details = await tmdb.get_details(enriched["media_type"], enriched["tmdb_id"])
+                            try:
+                                providers = await tmdb.get_watch_providers(enriched["media_type"], enriched["tmdb_id"])
+                                details["watch_providers"] = providers
+                            except Exception:
+                                pass
+                            try:
+                                rel_info = await tmdb.get_release_info(enriched["media_type"], enriched["tmdb_id"])
+                                details["release_info"] = rel_info
+                            except Exception:
+                                pass
                         repo.update_item_cache(
                             current_user.uid,
                             enriched["media_type"],
@@ -146,7 +152,8 @@ async def list_watchlist(
                     next_season = details["next_season"]
                 elif tmdb:
                     try:
-                        full_details = await tmdb.get_details(enriched["media_type"], enriched["tmdb_id"])
+                        async with enrich_semaphore:
+                            full_details = await tmdb.get_details(enriched["media_type"], enriched["tmdb_id"])
                         if full_details.get("seasons"):
                             next_season = tmdb.get_next_season(full_details["seasons"])
                     except Exception as exc:
@@ -199,18 +206,38 @@ async def list_watchlist(
         raise
 
 
+def _is_strict_positive_int(val: Any) -> bool:
+    return isinstance(val, int) and not isinstance(val, bool) and 0 < val <= 2_147_483_647
+
+
+def _validate_optional_str(val: Any, field_name: str, max_len: int) -> str | None:
+    if val is None:
+        return None
+    if not isinstance(val, str) or len(val) > max_len or "\x00" in val:
+        raise HTTPException(status_code=400, detail=f"Invalid {field_name}")
+    return val
+
+
 @router.post("")
 async def add_to_watchlist(request: Request, body: dict[str, Any], current_user: CurrentUser = Depends(get_current_user)) -> dict[str, Any]:
     media_type = body.get("media_type")
     tmdb_id = body.get("tmdb_id")
     title = body.get("title")
-    logger.info(f"Add to watchlist request for user {current_user.uid}: {media_type}/{tmdb_id} - {title}")
-    if media_type not in {"movie", "tv"} or not tmdb_id or not title:
-        logger.warning(f"Invalid add to watchlist request: {body}")
-        raise HTTPException(status_code=400, detail="media_type, tmdb_id, and title are required")
+    logger.info("Add to watchlist request for user %s: %s/%s", current_user.uid, media_type, tmdb_id)
+    if (
+        media_type not in {"movie", "tv"}
+        or not _is_strict_positive_int(tmdb_id)
+        or not isinstance(title, str)
+        or not title.strip()
+        or len(title) > 500
+        or "\x00" in title
+    ):
+        logger.warning("Invalid add to watchlist request for user %s", current_user.uid)
+        raise HTTPException(status_code=400, detail="Valid media_type, positive integer tmdb_id, and title are required")
 
-    poster_path = body.get("poster_path")
-    release_date = body.get("release_date")
+    title = title.strip()
+    poster_path = _validate_optional_str(body.get("poster_path"), "poster_path", 500)
+    release_date = _validate_optional_str(body.get("release_date"), "release_date", 32)
     is_owned = body.get("is_owned", False)
     owned_format = body.get("owned_format", None)
     status = body.get("status", "queue")
@@ -218,18 +245,28 @@ async def add_to_watchlist(request: Request, body: dict[str, Any], current_user:
     watch_on_sale_buy = body.get("watch_on_sale_buy", False)
     user_rating = body.get("user_rating", None)
 
+    for b_name, b_val in (
+        ("is_owned", is_owned),
+        ("watch_free_streaming", watch_free_streaming),
+        ("watch_on_sale_buy", watch_on_sale_buy),
+    ):
+        if not isinstance(b_val, bool):
+            raise HTTPException(status_code=400, detail=f"{b_name} must be a boolean")
+
     if user_rating is not None:
+        if isinstance(user_rating, bool):
+            raise HTTPException(status_code=400, detail="user_rating must be an integer between 1 and 5")
         try:
             user_rating = int(user_rating)
             if not (1 <= user_rating <= 5):
                 raise ValueError()
-        except ValueError:
+        except (TypeError, ValueError):
             raise HTTPException(status_code=400, detail="user_rating must be an integer between 1 and 5")
 
     if is_owned and owned_format not in {"electronic", "cloud", "hard_copy"}:
         raise HTTPException(status_code=400, detail="Invalid owned_format. Must be 'electronic', 'cloud', or 'hard_copy'")
 
-    if status not in {"queue", "following", "library"}:
+    if status not in {"queue", "following", "library", "watched"}:
         raise HTTPException(status_code=400, detail="Invalid status. Must be 'queue', 'following', or 'library'")
 
     try:
@@ -249,6 +286,16 @@ async def add_to_watchlist(request: Request, body: dict[str, Any], current_user:
                 watch_on_sale_buy=watch_on_sale_buy,
                 user_rating=user_rating,
             )
+            if user_rating and user_rating > 0:
+                repo.rate_movie(
+                    user_id=current_user.uid,
+                    media_type=media_type,
+                    tmdb_id=tmdb_id,
+                    title=title,
+                    poster_path=poster_path,
+                    release_date=release_date,
+                    rating=user_rating,
+                )
 
             days = days_until(release_date)
             logger.info(f"Successfully added to watchlist: {media_type}/{tmdb_id}")
@@ -281,6 +328,16 @@ async def add_to_watchlist(request: Request, body: dict[str, Any], current_user:
                 user_rating=user_rating,
             )
             if updated:
+                if user_rating and user_rating > 0:
+                    repo.rate_movie(
+                        user_id=current_user.uid,
+                        media_type=media_type,
+                        tmdb_id=tmdb_id,
+                        title=updated.get("title") or title,
+                        poster_path=updated.get("poster_path") or poster_path,
+                        release_date=updated.get("release_date") or release_date,
+                        rating=user_rating,
+                    )
                 days = days_until(release_date)
                 return {
                     "media_type": media_type,
@@ -314,9 +371,9 @@ async def update_watchlist_item(
     current_user: CurrentUser = Depends(get_current_user),
 ) -> dict[str, Any]:
     logger.info(f"Update watchlist item request for user {current_user.uid}: {media_type}/{tmdb_id}")
-    if media_type not in {"movie", "tv"}:
-        logger.warning(f"Invalid media_type for update: {media_type}")
-        raise HTTPException(status_code=400, detail="Invalid media_type")
+    if media_type not in {"movie", "tv"} or tmdb_id <= 0 or tmdb_id > 2_147_483_647:
+        logger.warning(f"Invalid media_type or tmdb_id for update: {media_type}/{tmdb_id}")
+        raise HTTPException(status_code=400, detail="Invalid media_type or tmdb_id")
 
     is_owned = body.get("is_owned")
     owned_format = body.get("owned_format")
@@ -325,21 +382,31 @@ async def update_watchlist_item(
     watch_on_sale_buy = body.get("watch_on_sale_buy")
     user_rating = body.get("user_rating")
 
+    for b_name, b_val in (
+        ("is_owned", is_owned),
+        ("watch_free_streaming", watch_free_streaming),
+        ("watch_on_sale_buy", watch_on_sale_buy),
+    ):
+        if b_val is not None and not isinstance(b_val, bool):
+            raise HTTPException(status_code=400, detail=f"{b_name} must be a boolean")
+
     if is_owned is None and status is None and watch_free_streaming is None and watch_on_sale_buy is None and user_rating is None:
         raise HTTPException(status_code=400, detail="At least one field to update is required")
 
     if user_rating is not None:
+        if isinstance(user_rating, bool):
+            raise HTTPException(status_code=400, detail="user_rating must be an integer between 0 and 5")
         try:
             user_rating = int(user_rating)
             if not (0 <= user_rating <= 5):
                 raise ValueError()
-        except ValueError:
+        except (TypeError, ValueError):
             raise HTTPException(status_code=400, detail="user_rating must be an integer between 0 and 5")
 
     if is_owned is not None and is_owned and owned_format not in {"electronic", "cloud", "hard_copy"}:
         raise HTTPException(status_code=400, detail="Invalid owned_format. Must be 'electronic', 'cloud', or 'hard_copy'")
 
-    if status is not None and status not in {"queue", "following", "library"}:
+    if status is not None and status not in {"queue", "following", "library", "watched"}:
         raise HTTPException(status_code=400, detail="Invalid status. Must be 'queue', 'following', or 'library'")
 
     try:
@@ -358,6 +425,25 @@ async def update_watchlist_item(
         if not updated:
             logger.warning(f"Item not found for update: {media_type}/{tmdb_id}")
             raise HTTPException(status_code=404, detail="Not found")
+
+        if user_rating is not None:
+            if user_rating > 0:
+                repo.rate_movie(
+                    user_id=current_user.uid,
+                    media_type=media_type,
+                    tmdb_id=tmdb_id,
+                    title=updated.get("title") or "Untitled",
+                    poster_path=updated.get("poster_path"),
+                    release_date=updated.get("release_date"),
+                    rating=user_rating,
+                )
+            else:
+                repo.delete_rated_movie(
+                    current_user.uid,
+                    media_type,
+                    tmdb_id,
+                    remove_unowned_watched=False,
+                )
 
         logger.info(f"Successfully updated watchlist item: {media_type}/{tmdb_id}")
         return {
@@ -379,9 +465,9 @@ async def update_watchlist_item(
 @router.delete("/{media_type}/{tmdb_id}")
 async def remove_from_watchlist(media_type: str, tmdb_id: int, request: Request, current_user: CurrentUser = Depends(get_current_user)) -> dict[str, str]:
     logger.info(f"Remove from watchlist request for user {current_user.uid}: {media_type}/{tmdb_id}")
-    if media_type not in {"movie", "tv"}:
-        logger.warning(f"Invalid media_type for removal: {media_type}")
-        raise HTTPException(status_code=400, detail="Invalid media_type")
+    if media_type not in {"movie", "tv"} or tmdb_id <= 0 or tmdb_id > 2_147_483_647:
+        logger.warning(f"Invalid media_type or tmdb_id for removal: {media_type}/{tmdb_id}")
+        raise HTTPException(status_code=400, detail="Invalid media_type or tmdb_id")
     try:
         repo = request.app.state.watchlist_repo
         removed = repo.remove_item(current_user.uid, media_type, tmdb_id)

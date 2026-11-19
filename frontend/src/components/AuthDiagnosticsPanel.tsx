@@ -6,8 +6,10 @@ import {
   AuthTrace,
   AuthTraceEvent,
 } from "../utils/authPerformanceMonitor";
+import { useAuth } from "../context/AuthContext";
 
 export function AuthDiagnosticsPanel() {
+  const { isAdmin } = useAuth();
   const [isOpen, setIsOpen] = useState(false);
   const [trace, setTrace] = useState<AuthTrace | null>(null);
   const [history, setHistory] = useState<AuthTrace[]>([]);
@@ -25,8 +27,9 @@ export function AuthDiagnosticsPanel() {
   }, []);
 
   const debugEnabled =
-    import.meta.env.VITE_AUTH_PERFORMANCE_DEBUG === "true" ||
-    (typeof window !== "undefined" && new URLSearchParams(window.location.search).has("debug"));
+    (import.meta.env.DEV || isAdmin) &&
+    (import.meta.env.VITE_AUTH_PERFORMANCE_DEBUG === "true" ||
+      (typeof window !== "undefined" && new URLSearchParams(window.location.search).has("debug")));
 
   if (!debugEnabled) {
     return null;

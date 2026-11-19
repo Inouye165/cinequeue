@@ -115,7 +115,8 @@ async def test_weather_greeting_omitted_in_unrelated_chat(repo):
     repo.save_agent_settings(user_id, {"location": "Tokyo"})
     repo.add_item(user_id, "movie", 201, "Inception", None, "2026-08-01", status="queue")
 
-    res = await AiAgentService.process_chat(user_id, "When does Inception release?", repo, tmdb=None)
+    with patch("app.services.agent_service.WeatherService.get_weather_report", new=AsyncMock(return_value="Tokyo: 72°F, Clear sky")):
+        res = await AiAgentService.process_chat(user_id, "When does Inception release?", repo, tmdb=None)
     reply = res["message"]["content"]
     assert "Inception" in reply
     assert "°F" not in reply

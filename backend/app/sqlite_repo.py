@@ -4,11 +4,18 @@ import json
 import logging
 import sqlite3
 import hashlib
+import threading
 import time
 from contextlib import contextmanager
 from typing import Any, Optional
 
 from app.config import DATA_DIR, DB_PATH
+from app.repo_helpers import (
+    default_agent_settings,
+    default_sports_preferences,
+    format_rated_ago,
+    normalize_agent_settings,
+)
 from app.repository import DuplicateItemError, WatchlistRepository
 from app.sync_protocol import (
     check_receipt, operation_fingerprint, operation_result, sync_record, sync_records,
@@ -23,6 +30,8 @@ class SqliteWatchlistRepository(WatchlistRepository):
 
     def __init__(self) -> None:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
+        self._restoration_lock = threading.Lock()
+        self._restoration_cache: dict[str, float] = {}
         self._init_db()
 
     def _init_db(self) -> None:
@@ -465,11 +474,17 @@ class SqliteWatchlistRepository(WatchlistRepository):
 
     @contextmanager
     def _connection(self):
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=10.0)
         conn.row_factory = sqlite3.Row
         try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA busy_timeout=5000")
             yield conn
             conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 
@@ -605,6 +620,7 @@ class SqliteWatchlistRepository(WatchlistRepository):
         added_at = self.utc_now_iso()
         try:
             with self._connection() as conn:
+                conn.execute("BEGIN IMMEDIATE")
                 conn.execute(
                     """
                     INSERT INTO watchlist (user_id, media_type, tmdb_id, title, poster_path, release_date, added_at, is_owned, owned_format, status, watch_free_streaming, watch_on_sale_buy, target_rental_price, user_rating)
@@ -647,6 +663,7 @@ class SqliteWatchlistRepository(WatchlistRepository):
         user_rating: int | None = None,
     ) -> dict[str, Any] | None:
         with self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             # First check if item exists
             row = conn.execute(
                 "SELECT * FROM watchlist WHERE user_id = ? AND media_type = ? AND tmdb_id = ?",
@@ -762,6 +779,7 @@ class SqliteWatchlistRepository(WatchlistRepository):
             return result.rowcount > 0
 
     def create_admin_session(self, session_id: str, username: str, expires_at: str) -> None:
+        username_normalized = (username or "").strip().lower()
         created_at = self.utc_now_iso()
         with self._connection() as conn:
             conn.execute(
@@ -769,7 +787,7 @@ class SqliteWatchlistRepository(WatchlistRepository):
                 INSERT INTO admin_sessions (session_id, username, created_at, expires_at)
                 VALUES (?, ?, ?, ?)
                 """,
-                (session_id, username, created_at, expires_at),
+                (session_id, username_normalized, created_at, expires_at),
             )
 
     def get_admin_session(self, session_id: str) -> dict[str, Any] | None:
@@ -782,6 +800,13 @@ class SqliteWatchlistRepository(WatchlistRepository):
     def delete_admin_session(self, session_id: str) -> None:
         with self._connection() as conn:
             conn.execute("DELETE FROM admin_sessions WHERE session_id = ?", (session_id,))
+
+    def delete_admin_sessions_for_user(self, username: str) -> None:
+        username_normalized = (username or "").strip().lower()
+        if not username_normalized:
+            return
+        with self._connection() as conn:
+            conn.execute("DELETE FROM admin_sessions WHERE LOWER(username) = ?", (username_normalized,))
 
     def get_user_approval(self, email: str) -> dict[str, Any] | None:
         with self._connection() as conn:
@@ -846,8 +871,9 @@ class SqliteWatchlistRepository(WatchlistRepository):
         query = "SELECT * FROM login_logs WHERE 1=1"
         params: list[Any] = []
         if email:
-            query += " AND lower(email) LIKE ?"
-            params.append(f"%{email.strip().lower()}%")
+            escaped_email = email.strip().lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            query += " AND lower(email) LIKE ? ESCAPE '\\'"
+            params.append(f"%{escaped_email}%")
         if status:
             query += " AND status = ?"
             params.append(status.strip().lower())
@@ -872,22 +898,25 @@ class SqliteWatchlistRepository(WatchlistRepository):
             cache_key = hashlib.sha256(key_raw.encode("utf-8")).hexdigest()
             now = time.time()
 
-            if not hasattr(self, "_restoration_cache"):
-                self._restoration_cache = {}
+            if not hasattr(self, "_restoration_lock"):
+                self._restoration_lock = threading.Lock()
+            with self._restoration_lock:
+                if not hasattr(self, "_restoration_cache"):
+                    self._restoration_cache = {}
 
-            # Periodic cleanup of expired items if cache grows large
-            if len(self._restoration_cache) > 500:
-                self._restoration_cache = {
-                    k: t for k, t in self._restoration_cache.items()
-                    if (now - t) < window_seconds
-                }
+                # Periodic cleanup of expired items if cache grows large
+                if len(self._restoration_cache) > 500:
+                    self._restoration_cache = {
+                        k: t for k, t in self._restoration_cache.items()
+                        if (now - t) < window_seconds
+                    }
 
-            last_time = self._restoration_cache.get(cache_key)
-            if last_time is not None and (now - last_time) < window_seconds:
-                return True
+                last_time = self._restoration_cache.get(cache_key)
+                if last_time is not None and (now - last_time) < window_seconds:
+                    return True
 
-            self._restoration_cache[cache_key] = now
-            return False
+                self._restoration_cache[cache_key] = now
+                return False
         except Exception as e:
             logger.error("Error evaluating session restoration deduplication: %s", e)
             return False
@@ -898,19 +927,7 @@ class SqliteWatchlistRepository(WatchlistRepository):
                 "SELECT * FROM agent_settings WHERE user_id = ?", (user_id,)
             ).fetchone()
         if not row:
-            return {
-                "user_id": user_id,
-                "personality_preset": "cinephile",
-                "custom_prompt": "",
-                "location": "",
-                "timezone": "America/Los_Angeles",
-                "user_timezone": "America/Los_Angeles",
-                "notify_on_login": True,
-                "auto_add_mentioned": True,
-                "track_price_drops": True,
-                "auto_speak_briefing": False,
-                "updated_at": self.utc_now_iso(),
-            }
+            return default_agent_settings(user_id, self.utc_now_iso())
         keys = row.keys()
         tz = (row["timezone"] if ("timezone" in keys and row["timezone"] is not None) else (row["user_timezone"] if ("user_timezone" in keys and row["user_timezone"] is not None) else "America/Los_Angeles"))
         return {
@@ -929,19 +946,15 @@ class SqliteWatchlistRepository(WatchlistRepository):
 
     def save_agent_settings(self, user_id: str, settings: dict[str, Any]) -> dict[str, Any]:
         now = self.utc_now_iso()
-        preset = settings.get("personality_preset", "cinephile")
-        custom_prompt = settings.get("custom_prompt", "")
-        location = settings.get("location", "").strip()
-        if "timezone" in settings:
-            tz = (settings["timezone"] or "").strip()
-        elif "user_timezone" in settings:
-            tz = (settings["user_timezone"] or "").strip()
-        else:
-            tz = "America/Los_Angeles"
-        notify_on_login = 1 if settings.get("notify_on_login", True) else 0
-        auto_add_mentioned = 1 if settings.get("auto_add_mentioned", True) else 0
-        track_price_drops = 1 if settings.get("track_price_drops", True) else 0
-        auto_speak_briefing = 1 if settings.get("auto_speak_briefing", False) else 0
+        normalized = normalize_agent_settings(user_id, settings, now)
+        preset = normalized["personality_preset"]
+        custom_prompt = normalized["custom_prompt"]
+        location = normalized["location"]
+        tz = normalized["timezone"]
+        notify_on_login = 1 if normalized["notify_on_login"] else 0
+        auto_add_mentioned = 1 if normalized["auto_add_mentioned"] else 0
+        track_price_drops = 1 if normalized["track_price_drops"] else 0
+        auto_speak_briefing = 1 if normalized["auto_speak_briefing"] else 0
 
         with self._connection() as conn:
             conn.execute(
@@ -1216,6 +1229,7 @@ class SqliteWatchlistRepository(WatchlistRepository):
         lease_exp = (now_dt + timedelta(seconds=lease_seconds)).isoformat()
 
         with self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 "SELECT briefing_json FROM daily_greetings WHERE user_id = ? AND date_str = ?",
                 (user_id, date_str),
@@ -1233,6 +1247,8 @@ class SqliteWatchlistRepository(WatchlistRepository):
                     if status == "generating" and exp_str:
                         try:
                             exp_dt = datetime.fromisoformat(exp_str)
+                            if exp_dt.tzinfo is None:
+                                exp_dt = exp_dt.replace(tzinfo=timezone.utc)
                             if exp_dt > now_dt:
                                 return False, data
                         except Exception:
@@ -1299,35 +1315,7 @@ class SqliteWatchlistRepository(WatchlistRepository):
             d = dict(r)
             p_path = d.get("poster_path")
             d["poster_url"] = poster_url(p_path) if p_path else None
-            # Calculate time ago
-            rated_at_str = d.get("updated_at") or d.get("rated_at")
-            rated_ago = "recently"
-            if rated_at_str:
-                try:
-                    dt = datetime.fromisoformat(rated_at_str)
-                    if dt.tzinfo is None:
-                        dt = dt.replace(tzinfo=timezone.utc)
-                    seconds = int((now - dt).total_seconds())
-                    if seconds < 60:
-                        rated_ago = "just now"
-                    elif seconds < 3600:
-                        mins = seconds // 60
-                        rated_ago = f"{mins} min{'s' if mins > 1 else ''} ago"
-                    elif seconds < 86400:
-                        hrs = seconds // 3600
-                        rated_ago = f"{hrs} hour{'s' if hrs > 1 else ''} ago"
-                    elif seconds < 2592000:
-                        days = seconds // 86400
-                        rated_ago = f"{days} day{'s' if days > 1 else ''} ago"
-                    elif seconds < 31536000:
-                        months = seconds // 2592000
-                        rated_ago = f"{months} month{'s' if months > 1 else ''} ago"
-                    else:
-                        yrs = seconds // 31536000
-                        rated_ago = f"{yrs} year{'s' if yrs > 1 else ''} ago"
-                except Exception:
-                    rated_ago = "recently"
-            d["rated_ago"] = rated_ago
+            d["rated_ago"] = format_rated_ago(d.get("updated_at") or d.get("rated_at"), now=now)
             results.append(d)
         return results
 
@@ -1379,8 +1367,16 @@ class SqliteWatchlistRepository(WatchlistRepository):
             d["poster_url"] = poster_url(d["poster_path"])
         return d
 
-    def delete_rated_movie(self, user_id: str, media_type: str, tmdb_id: int) -> bool:
+    def delete_rated_movie(
+        self,
+        user_id: str,
+        media_type: str,
+        tmdb_id: int,
+        *,
+        remove_unowned_watched: bool = True,
+    ) -> bool:
         with self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             cursor = conn.execute(
                 "DELETE FROM rated_movies WHERE user_id = ? AND media_type = ? AND tmdb_id = ?",
                 (user_id, media_type, tmdb_id),
@@ -1390,7 +1386,7 @@ class SqliteWatchlistRepository(WatchlistRepository):
                 (user_id, media_type, tmdb_id),
             ).fetchone()
             if row:
-                if not bool(row["is_owned"]) and (row["status"] == "watched" or not row["status"]):
+                if remove_unowned_watched and not bool(row["is_owned"]) and (row["status"] == "watched" or not row["status"]):
                     conn.execute(
                         "DELETE FROM watchlist WHERE user_id = ? AND media_type = ? AND tmdb_id = ?",
                         (user_id, media_type, tmdb_id),
@@ -1539,8 +1535,11 @@ class SqliteWatchlistRepository(WatchlistRepository):
             params.append(end_date)
 
         if candidate_type:
-            conditions.append("(selected_candidates_json LIKE ? OR optional_candidates_json LIKE ? OR required_candidates_json LIKE ?)")
-            pat = f"%{candidate_type}%"
+            escaped_ct = candidate_type.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            conditions.append(
+                "(selected_candidates_json LIKE ? ESCAPE '\\' OR optional_candidates_json LIKE ? ESCAPE '\\' OR required_candidates_json LIKE ? ESCAPE '\\')"
+            )
+            pat = f"%{escaped_ct}%"
             params.extend([pat, pat, pat])
 
         where_clause = " WHERE " + " AND ".join(conditions) if conditions else ""
@@ -1614,6 +1613,7 @@ class SqliteWatchlistRepository(WatchlistRepository):
 
     def save_decision_config(self, config_dict: dict[str, Any], updated_by: str, change_note: str) -> dict[str, Any]:
         with self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             max_row = conn.execute("SELECT MAX(version) FROM agent_decision_configs").fetchone()
             new_ver = (max_row[0] or 0) + 1 if max_row else 1
             config_dict["version"] = new_ver
@@ -1658,6 +1658,7 @@ class SqliteWatchlistRepository(WatchlistRepository):
 
     def save_prompt_version(self, prompt_dict: dict[str, Any], updated_by: str, change_note: str) -> dict[str, Any]:
         with self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             max_row = conn.execute("SELECT MAX(version) FROM agent_prompt_versions").fetchone()
             new_ver = (max_row[0] or 0) + 1 if max_row else 1
             prompt_dict["version"] = new_ver
@@ -1728,7 +1729,8 @@ class SqliteWatchlistRepository(WatchlistRepository):
 
     def add_verified_trivia(self, fact_dict: dict[str, Any]) -> dict[str, Any]:
         now = self.utc_now_iso()
-        fact_id = fact_dict.get("fact_id") or f"trivia:{fact_dict.get('tmdb_id', 'gen')}:{hash(fact_dict.get('fact_text'))}"
+        fact_text_digest = hashlib.sha256(str(fact_dict.get("fact_text") or "").encode("utf-8")).hexdigest()[:16]
+        fact_id = fact_dict.get("fact_id") or f"trivia:{fact_dict.get('tmdb_id', 'gen')}:{fact_text_digest}"
         with self._connection() as conn:
             conn.execute(
                 """
@@ -1756,7 +1758,8 @@ class SqliteWatchlistRepository(WatchlistRepository):
 
     def add_major_news(self, news_dict: dict[str, Any]) -> dict[str, Any]:
         now = self.utc_now_iso()
-        story_id = news_dict.get("story_id") or f"news:{news_dict.get('story_cluster_id', 'c')}:{hash(news_dict.get('title'))}"
+        title_digest = hashlib.sha256(str(news_dict.get("title") or "").encode("utf-8")).hexdigest()[:16]
+        story_id = news_dict.get("story_id") or f"news:{news_dict.get('story_cluster_id', 'c')}:{title_digest}"
         with self._connection() as conn:
             conn.execute(
                 """
@@ -1790,14 +1793,7 @@ class SqliteWatchlistRepository(WatchlistRepository):
                 "SELECT * FROM sports_preferences WHERE user_id = ?", (user_id,)
             ).fetchone()
         if not row:
-            return {
-                "user_id": user_id,
-                "streaming_services": [],
-                "tracked_teams": [],
-                "show_in_queue": True,
-                "setup_completed": False,
-                "updated_at": None,
-            }
+            return default_sports_preferences(user_id)
         try:
             services = json.loads(row["streaming_services_json"] or "[]")
         except Exception:
@@ -1816,13 +1812,34 @@ class SqliteWatchlistRepository(WatchlistRepository):
         }
 
     def save_sports_preferences(self, user_id: str, prefs: dict[str, Any]) -> dict[str, Any]:
-        current = self.get_sports_preferences(user_id)
-        services = prefs.get("streaming_services", current["streaming_services"])
-        teams = prefs.get("tracked_teams", current["tracked_teams"])
-        show_in_queue = prefs.get("show_in_queue", current["show_in_queue"])
-        setup_completed = prefs.get("setup_completed", True)
         now = self.utc_now_iso()
         with self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM sports_preferences WHERE user_id = ?", (user_id,)
+            ).fetchone()
+            cur_services: list[str] = []
+            cur_teams: list[str] = []
+            cur_show = True
+            if row:
+                try:
+                    s = json.loads(row["streaming_services_json"] or "[]")
+                    if isinstance(s, list):
+                        cur_services = s
+                except Exception:
+                    pass
+                try:
+                    t = json.loads(row["tracked_teams_json"] or "[]")
+                    if isinstance(t, list):
+                        cur_teams = t
+                except Exception:
+                    pass
+                cur_show = bool(row["show_in_queue"])
+
+            services = prefs.get("streaming_services", cur_services)
+            teams = prefs.get("tracked_teams", cur_teams)
+            show_in_queue = prefs.get("show_in_queue", cur_show)
+            setup_completed = prefs.get("setup_completed", True)
             conn.execute(
                 """
                 INSERT INTO sports_preferences (

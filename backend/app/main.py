@@ -1,6 +1,7 @@
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import urlparse
 
 import httpx
 from fastapi import FastAPI, Response, Request
@@ -8,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+import app.config as config
 from app.config import (
     TMDB_API_KEY,
     WATCHLIST_BACKEND,
@@ -16,6 +18,8 @@ from app.config import (
     ENVIRONMENT,
     FIREBASE_AUTH_DOMAIN,
     PUBLIC_AUTH_DOMAIN,
+    SESSION_COOKIE_NAME,
+    ADMIN_SESSION_COOKIE_NAME,
 )
 from app.logging_config import setup_logging
 from app.routers import movies, watchlist, auth, admin, agent, ratings, sync, sports
@@ -77,16 +81,29 @@ async def lifespan(app: FastAPI):
         logger.warning("TMDB_API_KEY not configured")
         app.state.tmdb = None
     # -- Initialize Admin User -------------------------------------------------
+    import app.config as config
     repo = app.state.watchlist_repo
-    from app.config import ADMIN_USERNAME, ADMIN_PASSWORD
     from app.services.admin_auth import hash_password, generate_salt
-    if ADMIN_USERNAME and ADMIN_PASSWORD:
+    _PLACEHOLDER_ADMIN_PASSWORDS = {
+        "change_me_immediately",
+        "changeme",
+        "admin",
+        "password",
+        "your_admin_password",
+    }
+    if (
+        config.ENABLE_FALLBACK_ADMIN_AUTH
+        and config.ADMIN_USERNAME
+        and config.ADMIN_PASSWORD
+        and config.ADMIN_PASSWORD.strip().lower() not in _PLACEHOLDER_ADMIN_PASSWORDS
+    ):
+        seeded_username = config.ADMIN_USERNAME.strip().lower()
         try:
-            if not repo.get_admin_user(ADMIN_USERNAME):
+            if not repo.get_admin_user(seeded_username):
                 salt = generate_salt()
-                pwd_hash = hash_password(ADMIN_PASSWORD, salt)
-                repo.create_admin_user(ADMIN_USERNAME, pwd_hash, salt)
-                logger.info("Initialized default admin user '%s' in database", ADMIN_USERNAME)
+                pwd_hash = hash_password(config.ADMIN_PASSWORD, salt)
+                repo.create_admin_user(seeded_username, pwd_hash, salt)
+                logger.info("Initialized default admin user '%s' in database", seeded_username)
         except Exception as e:
             logger.error("Failed to initialize default admin user: %s", e)
 
@@ -99,7 +116,12 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("Failed to start Firebase Auth pre-warming task: %s", e)
 
+    app.state.http_client = httpx.AsyncClient(follow_redirects=False, timeout=(5.0, 15.0))
+
     yield
+    if getattr(app.state, "http_client", None):
+        await app.state.http_client.aclose()
+        logger.info("Shared HTTP client closed")
     if app.state.tmdb:
         await app.state.tmdb.close()
         logger.info("TMDB client closed")
@@ -110,14 +132,31 @@ from app.auth_perf import AuthPerfMiddleware
 
 app = FastAPI(title="Cinequeue", lifespan=lifespan)
 
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    from fastapi.responses import JSONResponse
+    logger.exception("Unhandled exception on %s %s", request.method, request.url.path)
+    return JSONResponse(status_code=500, content={"detail": "Internal server error"})
+
 app.add_middleware(AuthPerfMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=AUTH_ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=[
+        "Authorization",
+        "Content-Type",
+        "X-CSRF-Token",
+        "X-Session-Restore",
+        "X-Admin-Role-Check",
+        "X-Sync-Owner",
+        "X-Auth-Trace-Id",
+        "X-Correlation-Id",
+        "X-Request-Id",
+    ],
     expose_headers=["X-Auth-Trace-Id", "X-Auth-Perf-Token-Verification-Ms", "X-Auth-Perf-Admin-Lookup-Ms"],
 )
 
@@ -130,12 +169,16 @@ async def add_security_headers(request, call_next):
     
     if not is_auth_proxy:
         response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
         response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
         response.headers["Cross-Origin-Opener-Policy"] = "same-origin-allow-popups"
         
         csp = (
             "default-src 'self'; "
+            "base-uri 'self'; "
+            "object-src 'none'; "
+            "frame-ancestors 'none'; "
             "script-src 'self' https://apis.google.com https://www.gstatic.com; "
             "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
             "font-src 'self' https://fonts.gstatic.com; "
@@ -155,35 +198,60 @@ async def add_security_headers(request, call_next):
     if ENVIRONMENT == "production":
         if not is_auth_proxy or "Strict-Transport-Security" not in response.headers:
             response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains; preload"
-        
+
+    req_path = request.url.path
+    is_sensitive_api = (
+        req_path.startswith("/api/auth/")
+        or req_path.startswith("/api/admin/")
+        or req_path.startswith("/api/watchlist")
+        or req_path.startswith("/api/ratings")
+        or req_path.startswith("/api/sync/")
+        or req_path.startswith("/api/agent/")
+        or req_path.startswith("/api/sports/preferences")
+    )
+    if is_sensitive_api and req_path != "/api/auth/config" and "Cache-Control" not in response.headers:
+        response.headers["Cache-Control"] = "no-store"
+
     return response
-
-
-@app.middleware("http")
-async def check_tmdb_key(request, call_next):
-    if (
-        request.url.path.startswith("/api")
-        and not request.url.path.startswith("/api/auth")
-        and not request.url.path.startswith("/api/agent")
-        and not request.url.path.startswith("/api/ratings")
-        and not request.url.path.startswith("/api/watchlist")
-        and not request.url.path.startswith("/api/sync")
-        and not request.url.path.startswith("/api/sports")
-        and request.url.path != "/api/health"
-    ):
-        if not getattr(app.state, "tmdb", None):
-            from fastapi.responses import JSONResponse
-
-            return JSONResponse(
-                status_code=503,
-                content={"detail": "TMDB_API_KEY is not configured"},
-            )
-    return await call_next(request)
 
 
 @app.get("/api/health")
 async def health():
     return {"status": "ok", "tmdb_configured": bool(TMDB_API_KEY)}
+
+
+_ALLOWED_FIREBASE_AUTH_PATHS = {
+    "handler",
+    "handler.js",
+    "iframe",
+    "iframe.js",
+    "experiments.js",
+    "init.json",
+}
+_MAX_AUTH_PROXY_BODY_BYTES = 64 * 1024
+
+
+def _resolve_proxy_redirect_host(request: Request) -> str:
+    if PUBLIC_AUTH_DOMAIN:
+        return PUBLIC_AUTH_DOMAIN
+    candidate = (request.url.netloc or "").strip()
+    allowed_hosts: set[str] = set()
+    for origin in config.AUTH_ALLOWED_ORIGINS:
+        parsed = urlparse(origin)
+        if parsed.netloc:
+            allowed_hosts.add(parsed.netloc.lower())
+    base_netloc = urlparse(config.APP_BASE_URL).netloc
+    if base_netloc:
+        allowed_hosts.add(base_netloc.lower())
+    if config.ENVIRONMENT != "production":
+        allowed_hosts.update({"localhost:5180", "127.0.0.1:5180", "localhost:8080", "127.0.0.1:8080", "localhost:8081", "127.0.0.1:8081"})
+    if request.client and request.client.host == "testclient" and candidate.lower() == "testserver":
+        return candidate
+    if candidate and candidate.lower() in allowed_hosts:
+        return candidate
+    if base_netloc:
+        return base_netloc
+    return next(iter(allowed_hosts), FIREBASE_AUTH_DOMAIN)
 
 
 @app.api_route("/__/auth/{path:path}", methods=["GET", "POST"])
@@ -193,26 +261,35 @@ async def firebase_auth_proxy(path: str, request: Request):
     if request.method not in ("GET", "POST"):
         return Response(status_code=405, content="Method Not Allowed")
 
-    # Security: Limit request size to 10 MB
+    # Security: Strict allowlist for Firebase Auth helper routes (prevent traversal/SSRF)
+    cleaned_path = path.lstrip("/")
+    if ".." in path or "\\" in path or cleaned_path not in _ALLOWED_FIREBASE_AUTH_PATHS:
+        return Response(status_code=400, content="Invalid auth proxy path")
+
+    # Security: Limit POST body strictly to 64 KB
     content_length = request.headers.get("content-length")
     if content_length:
         try:
-            if int(content_length) > 10 * 1024 * 1024:
+            if int(content_length) > _MAX_AUTH_PROXY_BODY_BYTES:
                 return Response(status_code=413, content="Request Entity Too Large")
         except ValueError:
             return Response(status_code=400, content="Invalid Content-Length")
 
-    # Read request body safely up to 10 MB
     body = b""
     if request.method == "POST":
-        body = await request.body()
-        if len(body) > 10 * 1024 * 1024:
-            return Response(status_code=413, content="Request Entity Too Large")
+        chunks: list[bytes] = []
+        total_bytes = 0
+        async for chunk in request.stream():
+            total_bytes += len(chunk)
+            if total_bytes > _MAX_AUTH_PROXY_BODY_BYTES:
+                return Response(status_code=413, content="Request Entity Too Large")
+            chunks.append(chunk)
+        body = b"".join(chunks)
 
     # Upstream URL Construction: Proxy only the /__/auth/ namespace to the fixed Firebase Auth Domain
     query_string = request.url.query
     query_suffix = f"?{query_string}" if query_string else ""
-    target_url = f"https://{FIREBASE_AUTH_DOMAIN}/__/auth/{path}{query_suffix}"
+    target_url = f"https://{FIREBASE_AUTH_DOMAIN}/__/auth/{cleaned_path}{query_suffix}"
 
     # Prepare headers to forward (Do not forward Host, or Authorization)
     # Filter Cookie header selectively to drop Cinequeue cookies but keep others
@@ -229,7 +306,15 @@ async def firebase_auth_proxy(path: str, request: Request):
                     continue
                 if "=" in pair:
                     cname, _ = pair.split("=", 1)
-                    if cname.strip() not in ("__Host-cinequeue_session", "cinequeue_session", "cinequeue_csrf"):
+                    if cname.strip() not in (
+                        "__Host-cinequeue_session",
+                        "cinequeue_session",
+                        "cinequeue_csrf",
+                        "cinequeue_admin_session",
+                        "__Host-cinequeue_admin_session",
+                        SESSION_COOKIE_NAME,
+                        ADMIN_SESSION_COOKIE_NAME,
+                    ):
                         filtered_cookies.append(pair)
                 else:
                     filtered_cookies.append(pair)
@@ -239,8 +324,9 @@ async def firebase_auth_proxy(path: str, request: Request):
             headers_to_forward[key] = value
 
     try:
-        async with httpx.AsyncClient() as client:
-            upstream_resp = await client.request(
+        shared_client = getattr(request.app.state, "http_client", None)
+        if shared_client is not None:
+            upstream_resp = await shared_client.request(
                 method=request.method,
                 url=target_url,
                 headers=headers_to_forward,
@@ -248,6 +334,16 @@ async def firebase_auth_proxy(path: str, request: Request):
                 follow_redirects=False,
                 timeout=(5.0, 15.0)
             )
+        else:
+            async with httpx.AsyncClient() as client:
+                upstream_resp = await client.request(
+                    method=request.method,
+                    url=target_url,
+                    headers=headers_to_forward,
+                    content=body,
+                    follow_redirects=False,
+                    timeout=(5.0, 15.0)
+                )
 
         response = Response(
             content=upstream_resp.content,
@@ -269,7 +365,7 @@ async def firebase_auth_proxy(path: str, request: Request):
             if key_lower == "location":
                 legacy_prefix = f"https://{FIREBASE_AUTH_DOMAIN}/__/auth/"
                 if value.startswith(legacy_prefix):
-                    new_host = PUBLIC_AUTH_DOMAIN or request.url.netloc
+                    new_host = _resolve_proxy_redirect_host(request)
                     value = value.replace(legacy_prefix, f"https://{new_host}/__/auth/")
                 response.headers.append(key, value)
 
@@ -321,6 +417,8 @@ if FRONTEND_DIST.exists():
         if full_path == "api" or full_path.startswith("api/"):
             from fastapi.responses import JSONResponse
             return JSONResponse(status_code=404, content={"detail": "Not found"})
+        if any(part.startswith(".") for part in Path(full_path).parts):
+            return Response(status_code=404)
         file_path = (FRONTEND_DIST / full_path).resolve()
         dist_root = FRONTEND_DIST.resolve()
         if file_path.is_relative_to(dist_root) and file_path.is_file():

@@ -1,43 +1,50 @@
 """Sports router for catalog, live NFL/NBA schedule, and user sports preferences."""
 
 import logging
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from pydantic import BaseModel, Field, StringConstraints
 
-from app.auth import CurrentUser, get_current_user
+from app.auth import CurrentUser, get_current_user, require_cookie_csrf_and_origin
 from app.services.sports_service import sports_service
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/sports", tags=["sports"])
+router = APIRouter(
+    prefix="/api/sports",
+    tags=["sports"],
+    dependencies=[Depends(get_current_user), Depends(require_cookie_csrf_and_origin)],
+)
+
+
+ShortIdStr = Annotated[str, StringConstraints(min_length=1, max_length=64)]
 
 
 class SportsPreferencesPayload(BaseModel):
-    streaming_services: list[str] | None = None
-    tracked_teams: list[str] | None = None
+    streaming_services: list[ShortIdStr] | None = Field(default=None, max_length=50)
+    tracked_teams: list[ShortIdStr] | None = Field(default=None, max_length=100)
     show_in_queue: bool | None = None
     setup_completed: bool | None = None
 
 
 @router.get("/catalog")
-async def get_sports_catalog() -> dict[str, Any]:
+def get_sports_catalog() -> dict[str, Any]:
     return sports_service.get_catalog()
 
 
 @router.get("/schedule")
 async def get_sports_schedule(
-    teams: str | None = None,
+    teams: str | None = Query(default=None, max_length=2000),
     force_refresh: bool = False,
 ) -> dict[str, Any]:
-    tracked = [t.strip() for t in teams.split(",") if t.strip()] if teams else None
+    tracked = [t.strip() for t in teams.split(",") if t.strip()][:100] if teams else None
     games = await sports_service.get_schedule(tracked_teams=tracked, force_refresh=force_refresh)
     return {"games": games}
 
 
 @router.get("/preferences")
-async def get_sports_preferences(
+def get_sports_preferences(
     request: Request,
     current_user: CurrentUser = Depends(get_current_user),
 ) -> dict[str, Any]:
@@ -46,17 +53,11 @@ async def get_sports_preferences(
         return repo.get_sports_preferences(current_user.uid)
     except Exception as exc:
         logger.error("Error getting sports preferences for %s: %s", current_user.uid, exc, exc_info=True)
-        return {
-            "user_id": current_user.uid,
-            "streaming_services": [],
-            "tracked_teams": [],
-            "show_in_queue": True,
-            "setup_completed": False,
-        }
+        raise HTTPException(status_code=503, detail="Sports preferences temporarily unavailable")
 
 
 @router.put("/preferences")
-async def save_sports_preferences(
+def save_sports_preferences(
     payload: SportsPreferencesPayload,
     request: Request,
     current_user: CurrentUser = Depends(get_current_user),

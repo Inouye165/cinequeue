@@ -103,4 +103,39 @@ describe("SearchHeader", () => {
 
     expect(screen.getByText("Advanced Search Filters")).not.toBeNull();
   });
+
+  it("portals AccountSheet and InstallAppModal outside the sticky header into document.body", () => {
+    const { container } = render(
+      <SearchHeader
+        query=""
+        setQuery={() => {}}
+        onSubmit={() => {}}
+        filters={defaultFilters}
+        user={mockUser}
+      />
+    );
+
+    const header = container.querySelector("header");
+    expect(header).not.toBeNull();
+
+    // Open AccountSheet
+    fireEvent.click(screen.getByRole("button", { name: /open account menu for test user/i }));
+    const accountDialog = screen.getByRole("dialog");
+    expect(header?.contains(accountDialog)).toBe(false);
+    expect(document.body.contains(accountDialog)).toBe(true);
+
+    // Close AccountSheet via Escape
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+
+    // Open InstallAppModal ("Get App")
+    fireEvent.click(screen.getByRole("button", { name: /install cinequeue app to home screen/i }));
+    const installDialog = screen.getByRole("dialog", { name: /add cinequeue to home screen/i });
+    expect(header?.contains(installDialog)).toBe(false);
+    expect(document.body.contains(installDialog)).toBe(true);
+
+    // Close InstallAppModal via Escape
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: /add cinequeue to home screen/i })).toBeNull();
+  });
 });

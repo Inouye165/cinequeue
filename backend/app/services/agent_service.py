@@ -6,6 +6,7 @@ import re
 import time
 import uuid
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 
@@ -89,9 +90,12 @@ RECOMMENDED_SYSTEM_PROMPT = (
 
 
 def get_system_prompt(settings: dict[str, Any], weather_report: str | None = None) -> str:
+    preset = settings.get("personality_preset", "cinephile")
     custom = settings.get("custom_prompt", "").strip()
-    if settings.get("personality_preset") == "custom" and custom:
+    if preset == "custom" and custom:
         base_prompt = f"{RECOMMENDED_SYSTEM_PROMPT}\n\nUser Custom Preference:\n{custom}"
+    elif preset in PERSONALITY_PRESETS and preset != "cinephile":
+        base_prompt = f"{RECOMMENDED_SYSTEM_PROMPT}\n\nPersona Style:\n{PERSONALITY_PRESETS[preset]}"
     else:
         base_prompt = RECOMMENDED_SYSTEM_PROMPT
 
@@ -183,11 +187,15 @@ class AgentResult:
 
 def sanitize_log_data(data: Any) -> Any:
     """Sanitize log data to prevent secrets, tokens, emails, or cookies from leaking."""
+    from app.decision_models import is_secret_field_name, redact_secret_strings
+
+    if isinstance(data, str):
+        return redact_secret_strings(data)
     if isinstance(data, dict):
         sanitized = {}
         for k, v in data.items():
-            lk = k.lower()
-            if any(secret_key in lk for secret_key in ["api_key", "token", "cookie", "email", "authorization", "password", "secret"]):
+            lk = str(k).lower()
+            if is_secret_field_name(lk, include_email=True):
                 sanitized[k] = "[REDACTED]"
             elif lk == "message" and not AGENT_DEBUG:
                 sanitized[k] = "[REDACTED_TEXT]"
@@ -460,22 +468,14 @@ class AiAgentService:
         return await BriefingService.evaluate_startup_briefing(user_id, repo, tmdb)
 
     @staticmethod
-    def _get_time_of_day() -> str:
-        import datetime
-        hour = datetime.datetime.now().hour
-        if 5 <= hour < 12:
-            return "morning"
-        elif 12 <= hour < 17:
-            return "afternoon"
-        elif 17 <= hour < 22:
-            return "evening"
-        else:
-            return "night"
-
-    @staticmethod
-    def _get_time_of_day() -> str:
-        import datetime
-        hour = datetime.datetime.now().hour
+    def _get_time_of_day(tz_name: str | None = None) -> str:
+        resolved_tz = ZoneInfo("America/New_York")
+        if isinstance(tz_name, str) and tz_name.strip():
+            try:
+                resolved_tz = ZoneInfo(tz_name.strip())
+            except ZoneInfoNotFoundError:
+                pass
+        hour = datetime.now(resolved_tz).hour
         if 5 <= hour < 12:
             return "morning"
         elif 12 <= hour < 17:
@@ -611,7 +611,8 @@ class AiAgentService:
         force_refresh: bool = False,
     ) -> str:
         location = settings.get("location", "").strip()
-        time_of_day = AiAgentService._get_time_of_day()
+        tz_name = settings.get("timezone") or settings.get("user_timezone")
+        time_of_day = AiAgentService._get_time_of_day(tz_name)
 
         weather_json = None
         if weather_data:
@@ -699,6 +700,8 @@ class AiAgentService:
         """Process chat message, recognize intents (auto-monitoring, ratings, status, search), update history, and generate response."""
         settings = repo.get_agent_settings(user_id)
         history = repo.list_chat_messages(user_id, limit=20)
+        repo.add_chat_message(user_id, "user", user_message)
+        allow_implicit_add = bool(settings.get("auto_add_mentioned", True))
 
         actions_taken = []
         context_notes: list[str] = []
@@ -742,7 +745,7 @@ class AiAgentService:
 
         # Extract intent titles first to check for explicit movie/series names
         rate_title, rating_val = AiAgentService._extract_rating_action(user_message)
-        ext_title, target_price = AiAgentService._extract_title_and_price(user_message)
+        ext_title, target_price = AiAgentService._extract_title_and_price(user_message, allow_implicit=allow_implicit_add)
         explicit_title_raw = rate_title or ext_title
         parsed_title, start_idx, end_idx, is_range = AiAgentService._parse_ordinal_range(explicit_title_raw) if explicit_title_raw else (None, None, None, False)
 
@@ -751,8 +754,9 @@ class AiAgentService:
         has_explicit_title = bool(parsed_title and len(parsed_words - ignored_words) > 0 and len(parsed_title) > 1)
 
         # 0. Intent Recognition: Conversational Context / Pronoun Action (ONLY if NO explicit title is named)
-        pronoun_words = ["those", "them", "these", "it", "the remaining ones", "those movies", "the movies", "all of them", "yes add", "yes rate", "do it", "sure", "add those", "rate those"]
-        is_pronoun_ref = not has_explicit_title and any(p in msg_lower for p in pronoun_words)
+        has_pronoun_phrase = bool(re.search(r"\b(?:those|them|these|it|that|this|the remaining ones|those movies|the movies|all of them)\b", msg_lower))
+        is_short_confirm = bool(re.search(r"^\s*(?:yes(?:\s+(?:add|rate))?|sure|do\s+it)\s*[.!]?\s*$", msg_lower))
+        is_pronoun_ref = not has_explicit_title and (has_pronoun_phrase or is_short_confirm)
         if is_pronoun_ref and history:
             recent_titles = AiAgentService._extract_titles_from_recent_history(history)
             if recent_titles:
@@ -764,15 +768,16 @@ class AiAgentService:
                         rate_val = int(val)
                     except ValueError:
                         pass
-                if rate_val is None and any(k in msg_lower for k in ["rate", "rating", "rated", "stars", "star"]):
+                if rate_val is None and re.search(r"\b(?:rate|rating|rated|stars?)\b", msg_lower):
                     rate_val = 5
 
-                has_rate_intent = rate_val is not None or any(k in msg_lower for k in ["rate", "rating", "rated", "stars", "star"])
-                has_add_intent = any(k in msg_lower for k in ["add", "queue", "watchlist", "list", "put", "insert", "log"]) or not has_rate_intent
+                has_rate_intent = rate_val is not None or bool(re.search(r"\b(?:rate|rating|rated|stars?)\b", msg_lower))
+                has_add_intent = bool(re.search(r"\b(?:add|queue|watchlist|put|insert|save|track|monitor|yes\s+add)\b", msg_lower)) or is_short_confirm
+                target_titles = recent_titles if (has_rate_intent or has_add_intent) else []
 
                 processed_count = 0
                 from app.models import poster_url
-                for title_item in recent_titles:
+                for title_item in target_titles:
                     t_name = title_item
                     m_type = "movie"
                     t_id = None
@@ -998,26 +1003,35 @@ class AiAgentService:
             items = repo.list_items(user_id)
             match_i = next((i for i in items if status_title.lower() in (i.get("title") or "").lower()), None)
             if match_i:
-                repo.update_item(
-                    user_id,
-                    match_i["media_type"],
-                    match_i["tmdb_id"],
-                    status=new_status,
-                    is_owned=is_owned_flag,
-                )
-                act_desc = f"Updated status of '{match_i['title']}' to {new_status or 'updated'}"
-                if is_owned_flag is True:
-                    act_desc += " and marked as owned"
-                actions_taken.append({
-                    "action": "update_status",
-                    "title": match_i["title"],
-                    "status": new_status,
-                    "is_owned": is_owned_flag,
-                })
-                context_notes.append(f"Status Update Action Executed: {act_desc}.")
+                if new_status == "dropped":
+                    repo.remove_item(user_id, match_i["media_type"], match_i["tmdb_id"])
+                    actions_taken.append({
+                        "action": "remove_item",
+                        "title": match_i["title"],
+                    })
+                    context_notes.append(f"Remove Action Executed: Removed '{match_i['title']}' from queue.")
+                else:
+                    effective_status = "following" if new_status == "watching" else new_status
+                    repo.update_item(
+                        user_id,
+                        match_i["media_type"],
+                        match_i["tmdb_id"],
+                        status=effective_status,
+                        is_owned=is_owned_flag,
+                    )
+                    act_desc = f"Updated status of '{match_i['title']}' to {effective_status or 'updated'}"
+                    if is_owned_flag is True:
+                        act_desc += " and marked as owned"
+                    actions_taken.append({
+                        "action": "update_status",
+                        "title": match_i["title"],
+                        "status": effective_status,
+                        "is_owned": is_owned_flag,
+                    })
+                    context_notes.append(f"Status Update Action Executed: {act_desc}.")
 
         # 4. Intent Recognition: Auto-Monitoring / Add to Queue Execution
-        ext_title, target_price = AiAgentService._extract_title_and_price(user_message)
+        ext_title, target_price = AiAgentService._extract_title_and_price(user_message, allow_implicit=allow_implicit_add)
         already_acted = any(
             (a.get("title") or "").lower() in (ext_title or "").lower() or (ext_title or "").lower() in (a.get("title") or "").lower()
             for a in actions_taken
@@ -1258,6 +1272,9 @@ class AiAgentService:
                         rating_rec_note = f"\n[System Note: Recommendation Request: The user asked for a recommendation. User loved '{sample_top['title']}' (rated {sample_top['user_rating']}/5 stars). Suggest '{r_title}' which is similar, mentioning why they might like it: {r_overview[:120]}...]"
             except Exception as e:
                 logger.warning(f"Error generating recommendation from ratings: {e}")
+
+        if rating_rec_note:
+            context_notes.append(rating_rec_note.strip())
 
         location = settings.get("location", "").strip()
         weather_report = await WeatherService.get_weather_report(location) if location else None
@@ -1574,19 +1591,22 @@ class AiAgentService:
 
 
     @staticmethod
-    def _extract_title_and_price(text: str) -> tuple[str | None, float | None]:
+    def _extract_title_and_price(text: str, allow_implicit: bool = True) -> tuple[str | None, float | None]:
         """Extract title and optional target price from user prompt."""
         price_match = re.search(r'(?:\$|under\s+\$?|to\s+rent\s+for\s+\$?)\s*(\d+(?:\.\d{1,2})?)', text, re.IGNORECASE)
         target_price = float(price_match.group(1)) if price_match else None
 
-        patterns = [
+        explicit_patterns = [
             r"(?:add|track|monitor|follow|enter|put|insert|save|log)\s+['\"]?([^'.\"$\n]+?)['\"]?\s+(?:to|into|in|on)\s+(?:my\s+)?(?:monitor\s+|watch\s*)?(?:list|queue|monitoring|watchlist)",
-            r"(?:waiting|wait|looking)\s+for\s+(?:the\s+movie\s+|the\s+show\s+)?['\"]?([^'.\"$\n]+?)['\"]?\s*(?:to\s+(?:come|air|drop|rent|release)|under|\$|$)",
             r"(?:notify|alert|tell)\s+me\s+when\s+(?:the\s+movie\s+|the\s+show\s+)?['\"]?([^'.\"$\n]+?)['\"]?\s*(?:drops|is|available|to\s+rent|under|\$|$)",
             r"(?:add|track|monitor|enter|put|insert|save|log)\s+['\"]?([^'.\"$\n]+?)['\"]?$",
+        ]
+        implicit_patterns = [
+            r"(?:waiting|wait|looking)\s+for\s+(?:the\s+movie\s+|the\s+show\s+)?['\"]?([^'.\"$\n]+?)['\"]?\s*(?:to\s+(?:come|air|drop|rent|release)|under|\$|$)",
             r"(?:waiting\s+for)\s+['\"]?([^'.\"$\n]+?)['\"]?$",
             r"(?:can't|cant)\s+wait\s+for\s+['\"]?([^'.\"$\n]+?)['\"]?\s*(?:to\s+drop|to\s+rent|under|\$|$)",
         ]
+        patterns = explicit_patterns + (implicit_patterns if allow_implicit else [])
         for p in patterns:
             m = re.search(p, text.strip(), re.IGNORECASE)
             if m:
@@ -1657,6 +1677,75 @@ class AiAgentService:
             return title_str, new_status, is_owned
 
         return None, None, None
+
+    @staticmethod
+    def _emit_gemini_log(
+        repo: Any,
+        *,
+        log_prefix: str,
+        event_type: str,
+        run_ctx: Any,
+        session_id: str | None,
+        user_id: str | None,
+        gemini_request_id: str,
+        timestamp: str,
+        **extra_fields: Any,
+    ) -> None:
+        if not repo or not hasattr(repo, "add_decision_log"):
+            return
+        payload = {
+            "log_id": f"{log_prefix}_{uuid.uuid4().hex[:10]}",
+            "event_type": event_type,
+            "telemetry_version": 2,
+            "briefing_run_id": run_ctx.briefing_run_id if run_ctx else None,
+            "request_id": run_ctx.request_id if run_ctx else None,
+            "session_id": session_id or (run_ctx.session_id if run_ctx else None),
+            "user_id": user_id or (run_ctx.user_id if run_ctx else "unknown"),
+            "gemini_request_id": gemini_request_id,
+            "timestamp": timestamp,
+            "gemini_called": True,
+            **extra_fields,
+        }
+        try:
+            repo.add_decision_log(payload)
+        except Exception as log_err:
+            logger.warning(f"Error logging {event_type}: {log_err}")
+
+    @staticmethod
+    def _emit_gemini_attempt_log(
+        repo: Any,
+        *,
+        log_prefix: str,
+        event_type: str,
+        run_ctx: Any,
+        session_id: str | None,
+        user_id: str | None,
+        gemini_request_id: str,
+        timestamp: str,
+        caller: str,
+        model_attempted: str,
+        attempt_number: int,
+        is_fallback: bool,
+        daily_cache_key: str | None,
+        **extra_fields: Any,
+    ) -> None:
+        AiAgentService._emit_gemini_log(
+            repo,
+            log_prefix=log_prefix,
+            event_type=event_type,
+            run_ctx=run_ctx,
+            session_id=session_id,
+            user_id=user_id,
+            gemini_request_id=gemini_request_id,
+            timestamp=timestamp,
+            caller=caller,
+            model_requested=GEMINI_PRIMARY_MODEL,
+            model_attempted=model_attempted,
+            attempt_number=attempt_number,
+            is_fallback_attempt=is_fallback,
+            daily_cache_key=daily_cache_key or (run_ctx.daily_cache_key if run_ctx else None),
+            **extra_fields,
+        )
 
     @staticmethod
     async def _call_gemini_api(
@@ -1746,35 +1835,29 @@ class AiAgentService:
                         run_ctx.fallback_attempted = True
 
                 # Emit Attempt Started Event
-                if repo and hasattr(repo, "add_decision_log"):
-                    try:
-                        repo.add_decision_log({
-                            "log_id": f"log_att_start_{uuid.uuid4().hex[:10]}",
-                            "event_type": "gemini_http_attempt_started",
-                            "telemetry_version": 2,
-                            "briefing_run_id": run_ctx.briefing_run_id if run_ctx else None,
-                            "request_id": run_ctx.request_id if run_ctx else None,
-                            "session_id": session_id or (run_ctx.session_id if run_ctx else None),
-                            "user_id": user_id or (run_ctx.user_id if run_ctx else "unknown"),
-                            "gemini_request_id": gemini_request_id,
-                            "timestamp": start_time_iso,
-                            "caller": caller,
-                            "model_requested": GEMINI_PRIMARY_MODEL,
-                            "model_attempted": model_name,
-                            "attempt_number": idx,
-                            "is_fallback_attempt": is_fallback,
-                            "gemini_called": True,
-                            "fallback_used": is_fallback,
-                            "daily_cache_key": daily_cache_key or (run_ctx.daily_cache_key if run_ctx else None),
-                            "selection_summary": f"Gemini HTTP Attempt #{idx} Started ({model_name})",
-                        })
-                    except Exception as log_err:
-                        logger.warning(f"Error logging gemini_http_attempt_started: {log_err}")
+                AiAgentService._emit_gemini_attempt_log(
+                    repo,
+                    log_prefix="log_att_start",
+                    event_type="gemini_http_attempt_started",
+                    run_ctx=run_ctx,
+                    session_id=session_id,
+                    user_id=user_id,
+                    gemini_request_id=gemini_request_id,
+                    timestamp=start_time_iso,
+                    caller=caller,
+                    model_attempted=model_name,
+                    attempt_number=idx,
+                    is_fallback=is_fallback,
+                    daily_cache_key=daily_cache_key,
+                    fallback_used=is_fallback,
+                    selection_summary=f"Gemini HTTP Attempt #{idx} Started ({model_name})",
+                )
 
-                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
+                headers = {"x-goog-api-key": GEMINI_API_KEY}
                 start_time = time.perf_counter()
                 try:
-                    resp = await client.post(url, json=payload)
+                    resp = await client.post(url, json=payload, headers=headers)
                     duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
                     end_time_iso = datetime.now(timezone.utc).isoformat()
                     last_http_status = resp.status_code
@@ -1809,50 +1892,43 @@ class AiAgentService:
                                 )
 
                                 # Emit Attempt Completed Success Event
-                                if repo and hasattr(repo, "add_decision_log"):
-                                    try:
-                                        repo.add_decision_log({
-                                            "log_id": f"log_att_comp_{uuid.uuid4().hex[:10]}",
-                                            "event_type": "gemini_http_attempt_completed",
-                                            "telemetry_version": 2,
-                                            "briefing_run_id": run_ctx.briefing_run_id if run_ctx else None,
-                                            "request_id": run_ctx.request_id if run_ctx else None,
-                                            "session_id": session_id or (run_ctx.session_id if run_ctx else None),
-                                            "user_id": user_id or (run_ctx.user_id if run_ctx else "unknown"),
-                                            "gemini_request_id": gemini_request_id,
-                                            "timestamp": end_time_iso,
-                                            "started_at": start_time_iso,
-                                            "completed_at": end_time_iso,
-                                            "duration_ms": duration_ms,
-                                            "caller": caller,
-                                            "model_requested": GEMINI_PRIMARY_MODEL,
-                                            "model_used": model_name,
-                                            "model_attempted": model_name,
-                                            "attempt_number": idx,
-                                            "is_fallback_attempt": is_fallback,
-                                            "http_status": 200,
-                                            "success": True,
-                                            "finish_reason": finish_reason,
-                                            "candidate_count": len(candidates),
-                                            "response_text_length": r_chars,
-                                            "partial_text_present": partial_text,
-                                            "prompt_token_count": p_tokens,
-                                            "candidate_token_count": r_tokens,
-                                            "total_token_count": t_tokens,
-                                            "cached_content_token_count": cached_tokens,
-                                            "error_type": None,
-                                            "error_category": None,
-                                            "gemini_called": True,
-                                            "fallback_used": is_fallback,
-                                            "fallback_reason": last_fallback_reason if is_fallback else None,
-                                            "daily_cache_key": daily_cache_key or (run_ctx.daily_cache_key if run_ctx else None),
-                                            "request_duration_ms": duration_ms,
-                                            "selection_summary": f"Gemini HTTP Attempt #{idx} Succeeded (200 OK, {duration_ms}ms, model: '{model_name}')",
-                                            "raw_model_response": text_out,
-                                            "final_response": text_out,
-                                        })
-                                    except Exception as log_err:
-                                        logger.warning(f"Error logging attempt completed: {log_err}")
+                                AiAgentService._emit_gemini_attempt_log(
+                                    repo,
+                                    log_prefix="log_att_comp",
+                                    event_type="gemini_http_attempt_completed",
+                                    run_ctx=run_ctx,
+                                    session_id=session_id,
+                                    user_id=user_id,
+                                    gemini_request_id=gemini_request_id,
+                                    timestamp=end_time_iso,
+                                    caller=caller,
+                                    model_attempted=model_name,
+                                    attempt_number=idx,
+                                    is_fallback=is_fallback,
+                                    daily_cache_key=daily_cache_key,
+                                    started_at=start_time_iso,
+                                    completed_at=end_time_iso,
+                                    duration_ms=duration_ms,
+                                    model_used=model_name,
+                                    http_status=200,
+                                    success=True,
+                                    finish_reason=finish_reason,
+                                    candidate_count=len(candidates),
+                                    response_text_length=r_chars,
+                                    partial_text_present=partial_text,
+                                    prompt_token_count=p_tokens,
+                                    candidate_token_count=r_tokens,
+                                    total_token_count=t_tokens,
+                                    cached_content_token_count=cached_tokens,
+                                    error_type=None,
+                                    error_category=None,
+                                    fallback_used=is_fallback,
+                                    fallback_reason=last_fallback_reason if is_fallback else None,
+                                    request_duration_ms=duration_ms,
+                                    selection_summary=f"Gemini HTTP Attempt #{idx} Succeeded (200 OK, {duration_ms}ms, model: '{model_name}')",
+                                    raw_model_response=text_out,
+                                    final_response=text_out,
+                                )
 
                                 # Emit Logical Gemini Completion Event
                                 total_gem_dur = round((time.perf_counter() - start_gem_perf) * 1000, 2)
@@ -1867,31 +1943,25 @@ class AiAgentService:
                                         result={"model": model_name, "attempts": idx},
                                     )
 
-                                if repo and hasattr(repo, "add_decision_log"):
-                                    try:
-                                        repo.add_decision_log({
-                                            "log_id": f"log_gem_comp_{uuid.uuid4().hex[:10]}",
-                                            "event_type": "gemini_request_completed",
-                                            "telemetry_version": 2,
-                                            "briefing_run_id": run_ctx.briefing_run_id if run_ctx else None,
-                                            "request_id": run_ctx.request_id if run_ctx else None,
-                                            "session_id": session_id or (run_ctx.session_id if run_ctx else None),
-                                            "user_id": user_id or (run_ctx.user_id if run_ctx else "unknown"),
-                                            "gemini_request_id": gemini_request_id,
-                                            "timestamp": end_time_iso,
-                                            "attempts_made": idx,
-                                            "fallback_attempted": is_fallback,
-                                            "fallback_trigger": last_fallback_reason if is_fallback else None,
-                                            "primary_model": GEMINI_PRIMARY_MODEL,
-                                            "final_model": model_name,
-                                            "final_success": True,
-                                            "final_error_type": None,
-                                            "total_duration_ms": total_gem_dur,
-                                            "gemini_called": True,
-                                            "selection_summary": f"Gemini logical request {gemini_request_id} completed successfully using '{model_name}' after {idx} attempt(s)",
-                                        })
-                                    except Exception as log_err:
-                                        logger.warning(f"Error logging gemini_request_completed: {log_err}")
+                                AiAgentService._emit_gemini_log(
+                                    repo,
+                                    log_prefix="log_gem_comp",
+                                    event_type="gemini_request_completed",
+                                    run_ctx=run_ctx,
+                                    session_id=session_id,
+                                    user_id=user_id,
+                                    gemini_request_id=gemini_request_id,
+                                    timestamp=end_time_iso,
+                                    attempts_made=idx,
+                                    fallback_attempted=is_fallback,
+                                    fallback_trigger=last_fallback_reason if is_fallback else None,
+                                    primary_model=GEMINI_PRIMARY_MODEL,
+                                    final_model=model_name,
+                                    final_success=True,
+                                    final_error_type=None,
+                                    total_duration_ms=total_gem_dur,
+                                    selection_summary=f"Gemini logical request {gemini_request_id} completed successfully using '{model_name}' after {idx} attempt(s)",
+                                )
 
                                 return AgentResult(
                                     text=text_out,
@@ -1931,47 +2001,40 @@ class AiAgentService:
                                     run_ctx.fallback_attempted = True
                                     run_ctx.fallback_trigger = last_fallback_reason
 
-                                if repo and hasattr(repo, "add_decision_log"):
-                                    try:
-                                        repo.add_decision_log({
-                                            "log_id": f"log_att_fail_{uuid.uuid4().hex[:10]}",
-                                            "event_type": "gemini_http_attempt_failed",
-                                            "telemetry_version": 2,
-                                            "briefing_run_id": run_ctx.briefing_run_id if run_ctx else None,
-                                            "request_id": run_ctx.request_id if run_ctx else None,
-                                            "session_id": session_id or (run_ctx.session_id if run_ctx else None),
-                                            "user_id": user_id or (run_ctx.user_id if run_ctx else "unknown"),
-                                            "gemini_request_id": gemini_request_id,
-                                            "timestamp": end_time_iso,
-                                            "started_at": start_time_iso,
-                                            "completed_at": end_time_iso,
-                                            "duration_ms": duration_ms,
-                                            "caller": caller,
-                                            "model_requested": GEMINI_PRIMARY_MODEL,
-                                            "model_attempted": model_name,
-                                            "attempt_number": idx,
-                                            "is_fallback_attempt": is_fallback,
-                                            "http_status": 200,
-                                            "success": False,
-                                            "finish_reason": finish_reason,
-                                            "candidate_count": len(candidates),
-                                            "response_text_length": r_chars,
-                                            "partial_text_present": partial_text,
-                                            "prompt_token_count": p_tokens,
-                                            "candidate_token_count": r_tokens,
-                                            "total_token_count": t_tokens,
-                                            "cached_content_token_count": cached_tokens,
-                                            "error_type": error_type,
-                                            "error_category": "unusable_response",
-                                            "fallback_reason": last_fallback_reason,
-                                            "gemini_called": True,
-                                            "fallback_used": True,
-                                            "daily_cache_key": daily_cache_key or (run_ctx.daily_cache_key if run_ctx else None),
-                                            "request_duration_ms": duration_ms,
-                                            "selection_summary": f"Gemini HTTP Attempt #{idx} Failed ({error_type}, {duration_ms}ms, model: '{model_name}')",
-                                        })
-                                    except Exception as log_err:
-                                        logger.warning(f"Error logging attempt failure: {log_err}")
+                                AiAgentService._emit_gemini_attempt_log(
+                                    repo,
+                                    log_prefix="log_att_fail",
+                                    event_type="gemini_http_attempt_failed",
+                                    run_ctx=run_ctx,
+                                    session_id=session_id,
+                                    user_id=user_id,
+                                    gemini_request_id=gemini_request_id,
+                                    timestamp=end_time_iso,
+                                    caller=caller,
+                                    model_attempted=model_name,
+                                    attempt_number=idx,
+                                    is_fallback=is_fallback,
+                                    daily_cache_key=daily_cache_key,
+                                    started_at=start_time_iso,
+                                    completed_at=end_time_iso,
+                                    duration_ms=duration_ms,
+                                    http_status=200,
+                                    success=False,
+                                    finish_reason=finish_reason,
+                                    candidate_count=len(candidates),
+                                    response_text_length=r_chars,
+                                    partial_text_present=partial_text,
+                                    prompt_token_count=p_tokens,
+                                    candidate_token_count=r_tokens,
+                                    total_token_count=t_tokens,
+                                    cached_content_token_count=cached_tokens,
+                                    error_type=error_type,
+                                    error_category="unusable_response",
+                                    fallback_reason=last_fallback_reason,
+                                    fallback_used=True,
+                                    request_duration_ms=duration_ms,
+                                    selection_summary=f"Gemini HTTP Attempt #{idx} Failed ({error_type}, {duration_ms}ms, model: '{model_name}')",
+                                )
                                 continue
                         else:
                             error_type = "NO_CANDIDATES"
@@ -1995,39 +2058,32 @@ class AiAgentService:
                             run_ctx.fallback_trigger = last_fallback_reason
 
                     # Emit Attempt Failed Event for non-200 or empty response
-                    if repo and hasattr(repo, "add_decision_log"):
-                        try:
-                            repo.add_decision_log({
-                                "log_id": f"log_att_fail_{uuid.uuid4().hex[:10]}",
-                                "event_type": "gemini_http_attempt_failed",
-                                "telemetry_version": 2,
-                                "briefing_run_id": run_ctx.briefing_run_id if run_ctx else None,
-                                "request_id": run_ctx.request_id if run_ctx else None,
-                                "session_id": session_id or (run_ctx.session_id if run_ctx else None),
-                                "user_id": user_id or (run_ctx.user_id if run_ctx else "unknown"),
-                                "gemini_request_id": gemini_request_id,
-                                "timestamp": end_time_iso,
-                                "started_at": start_time_iso,
-                                "completed_at": end_time_iso,
-                                "duration_ms": duration_ms,
-                                "caller": caller,
-                                "model_requested": GEMINI_PRIMARY_MODEL,
-                                "model_attempted": model_name,
-                                "attempt_number": idx,
-                                "is_fallback_attempt": is_fallback,
-                                "http_status": resp.status_code,
-                                "success": False,
-                                "error_type": error_type,
-                                "error_category": error_category,
-                                "fallback_reason": last_fallback_reason,
-                                "gemini_called": True,
-                                "fallback_used": True,
-                                "daily_cache_key": daily_cache_key or (run_ctx.daily_cache_key if run_ctx else None),
-                                "request_duration_ms": duration_ms,
-                                "selection_summary": f"Gemini HTTP Attempt #{idx} Failed (HTTP {resp.status_code}, {duration_ms}ms, model: '{model_name}')",
-                            })
-                        except Exception as log_err:
-                            logger.warning(f"Error logging attempt failure: {log_err}")
+                    AiAgentService._emit_gemini_attempt_log(
+                        repo,
+                        log_prefix="log_att_fail",
+                        event_type="gemini_http_attempt_failed",
+                        run_ctx=run_ctx,
+                        session_id=session_id,
+                        user_id=user_id,
+                        gemini_request_id=gemini_request_id,
+                        timestamp=end_time_iso,
+                        caller=caller,
+                        model_attempted=model_name,
+                        attempt_number=idx,
+                        is_fallback=is_fallback,
+                        daily_cache_key=daily_cache_key,
+                        started_at=start_time_iso,
+                        completed_at=end_time_iso,
+                        duration_ms=duration_ms,
+                        http_status=resp.status_code,
+                        success=False,
+                        error_type=error_type,
+                        error_category=error_category,
+                        fallback_reason=last_fallback_reason,
+                        fallback_used=True,
+                        request_duration_ms=duration_ms,
+                        selection_summary=f"Gemini HTTP Attempt #{idx} Failed (HTTP {resp.status_code}, {duration_ms}ms, model: '{model_name}')",
+                    )
 
                 except httpx.TimeoutException as e:
                     duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
@@ -2038,39 +2094,32 @@ class AiAgentService:
                         run_ctx.fallback_attempted = True
                         run_ctx.fallback_trigger = last_fallback_reason
 
-                    if repo and hasattr(repo, "add_decision_log"):
-                        try:
-                            repo.add_decision_log({
-                                "log_id": f"log_att_fail_{uuid.uuid4().hex[:10]}",
-                                "event_type": "gemini_http_attempt_failed",
-                                "telemetry_version": 2,
-                                "briefing_run_id": run_ctx.briefing_run_id if run_ctx else None,
-                                "request_id": run_ctx.request_id if run_ctx else None,
-                                "session_id": session_id or (run_ctx.session_id if run_ctx else None),
-                                "user_id": user_id or (run_ctx.user_id if run_ctx else "unknown"),
-                                "gemini_request_id": gemini_request_id,
-                                "timestamp": end_time_iso,
-                                "started_at": start_time_iso,
-                                "completed_at": end_time_iso,
-                                "duration_ms": duration_ms,
-                                "caller": caller,
-                                "model_requested": GEMINI_PRIMARY_MODEL,
-                                "model_attempted": model_name,
-                                "attempt_number": idx,
-                                "is_fallback_attempt": is_fallback,
-                                "http_status": None,
-                                "success": False,
-                                "error_type": error_type,
-                                "error_category": "timeout",
-                                "fallback_reason": last_fallback_reason,
-                                "gemini_called": True,
-                                "fallback_used": True,
-                                "daily_cache_key": daily_cache_key or (run_ctx.daily_cache_key if run_ctx else None),
-                                "request_duration_ms": duration_ms,
-                                "selection_summary": f"Gemini HTTP Attempt #{idx} Timeout ({error_type}, {duration_ms}ms)",
-                            })
-                        except Exception as log_err:
-                            logger.warning(f"Error logging timeout failure: {log_err}")
+                    AiAgentService._emit_gemini_attempt_log(
+                        repo,
+                        log_prefix="log_att_fail",
+                        event_type="gemini_http_attempt_failed",
+                        run_ctx=run_ctx,
+                        session_id=session_id,
+                        user_id=user_id,
+                        gemini_request_id=gemini_request_id,
+                        timestamp=end_time_iso,
+                        caller=caller,
+                        model_attempted=model_name,
+                        attempt_number=idx,
+                        is_fallback=is_fallback,
+                        daily_cache_key=daily_cache_key,
+                        started_at=start_time_iso,
+                        completed_at=end_time_iso,
+                        duration_ms=duration_ms,
+                        http_status=None,
+                        success=False,
+                        error_type=error_type,
+                        error_category="timeout",
+                        fallback_reason=last_fallback_reason,
+                        fallback_used=True,
+                        request_duration_ms=duration_ms,
+                        selection_summary=f"Gemini HTTP Attempt #{idx} Timeout ({error_type}, {duration_ms}ms)",
+                    )
 
                 except httpx.NetworkError as e:
                     duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
@@ -2081,39 +2130,32 @@ class AiAgentService:
                         run_ctx.fallback_attempted = True
                         run_ctx.fallback_trigger = last_fallback_reason
 
-                    if repo and hasattr(repo, "add_decision_log"):
-                        try:
-                            repo.add_decision_log({
-                                "log_id": f"log_att_fail_{uuid.uuid4().hex[:10]}",
-                                "event_type": "gemini_http_attempt_failed",
-                                "telemetry_version": 2,
-                                "briefing_run_id": run_ctx.briefing_run_id if run_ctx else None,
-                                "request_id": run_ctx.request_id if run_ctx else None,
-                                "session_id": session_id or (run_ctx.session_id if run_ctx else None),
-                                "user_id": user_id or (run_ctx.user_id if run_ctx else "unknown"),
-                                "gemini_request_id": gemini_request_id,
-                                "timestamp": end_time_iso,
-                                "started_at": start_time_iso,
-                                "completed_at": end_time_iso,
-                                "duration_ms": duration_ms,
-                                "caller": caller,
-                                "model_requested": GEMINI_PRIMARY_MODEL,
-                                "model_attempted": model_name,
-                                "attempt_number": idx,
-                                "is_fallback_attempt": is_fallback,
-                                "http_status": None,
-                                "success": False,
-                                "error_type": error_type,
-                                "error_category": "network_error",
-                                "fallback_reason": last_fallback_reason,
-                                "gemini_called": True,
-                                "fallback_used": True,
-                                "daily_cache_key": daily_cache_key or (run_ctx.daily_cache_key if run_ctx else None),
-                                "request_duration_ms": duration_ms,
-                                "selection_summary": f"Gemini HTTP Attempt #{idx} Network Error ({error_type}, {duration_ms}ms)",
-                            })
-                        except Exception as log_err:
-                            logger.warning(f"Error logging network failure: {log_err}")
+                    AiAgentService._emit_gemini_attempt_log(
+                        repo,
+                        log_prefix="log_att_fail",
+                        event_type="gemini_http_attempt_failed",
+                        run_ctx=run_ctx,
+                        session_id=session_id,
+                        user_id=user_id,
+                        gemini_request_id=gemini_request_id,
+                        timestamp=end_time_iso,
+                        caller=caller,
+                        model_attempted=model_name,
+                        attempt_number=idx,
+                        is_fallback=is_fallback,
+                        daily_cache_key=daily_cache_key,
+                        started_at=start_time_iso,
+                        completed_at=end_time_iso,
+                        duration_ms=duration_ms,
+                        http_status=None,
+                        success=False,
+                        error_type=error_type,
+                        error_category="network_error",
+                        fallback_reason=last_fallback_reason,
+                        fallback_used=True,
+                        request_duration_ms=duration_ms,
+                        selection_summary=f"Gemini HTTP Attempt #{idx} Network Error ({error_type}, {duration_ms}ms)",
+                    )
 
                 except Exception as e:
                     duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
@@ -2124,39 +2166,32 @@ class AiAgentService:
                         run_ctx.fallback_attempted = True
                         run_ctx.fallback_trigger = last_fallback_reason
 
-                    if repo and hasattr(repo, "add_decision_log"):
-                        try:
-                            repo.add_decision_log({
-                                "log_id": f"log_att_fail_{uuid.uuid4().hex[:10]}",
-                                "event_type": "gemini_http_attempt_failed",
-                                "telemetry_version": 2,
-                                "briefing_run_id": run_ctx.briefing_run_id if run_ctx else None,
-                                "request_id": run_ctx.request_id if run_ctx else None,
-                                "session_id": session_id or (run_ctx.session_id if run_ctx else None),
-                                "user_id": user_id or (run_ctx.user_id if run_ctx else "unknown"),
-                                "gemini_request_id": gemini_request_id,
-                                "timestamp": end_time_iso,
-                                "started_at": start_time_iso,
-                                "completed_at": end_time_iso,
-                                "duration_ms": duration_ms,
-                                "caller": caller,
-                                "model_requested": GEMINI_PRIMARY_MODEL,
-                                "model_attempted": model_name,
-                                "attempt_number": idx,
-                                "is_fallback_attempt": is_fallback,
-                                "http_status": None,
-                                "success": False,
-                                "error_type": error_type,
-                                "error_category": "unknown_error",
-                                "fallback_reason": last_fallback_reason,
-                                "gemini_called": True,
-                                "fallback_used": True,
-                                "daily_cache_key": daily_cache_key or (run_ctx.daily_cache_key if run_ctx else None),
-                                "request_duration_ms": duration_ms,
-                                "selection_summary": f"Gemini HTTP Attempt #{idx} Error ({error_type}, {duration_ms}ms)",
-                            })
-                        except Exception as log_err:
-                            logger.warning(f"Error logging attempt error: {log_err}")
+                    AiAgentService._emit_gemini_attempt_log(
+                        repo,
+                        log_prefix="log_att_fail",
+                        event_type="gemini_http_attempt_failed",
+                        run_ctx=run_ctx,
+                        session_id=session_id,
+                        user_id=user_id,
+                        gemini_request_id=gemini_request_id,
+                        timestamp=end_time_iso,
+                        caller=caller,
+                        model_attempted=model_name,
+                        attempt_number=idx,
+                        is_fallback=is_fallback,
+                        daily_cache_key=daily_cache_key,
+                        started_at=start_time_iso,
+                        completed_at=end_time_iso,
+                        duration_ms=duration_ms,
+                        http_status=None,
+                        success=False,
+                        error_type=error_type,
+                        error_category="unknown_error",
+                        fallback_reason=last_fallback_reason,
+                        fallback_used=True,
+                        request_duration_ms=duration_ms,
+                        selection_summary=f"Gemini HTTP Attempt #{idx} Error ({error_type}, {duration_ms}ms)",
+                    )
 
         # Emit Logical Gemini Failure Event if all models failed
         total_gem_dur = round((time.perf_counter() - start_gem_perf) * 1000, 2)
@@ -2174,32 +2209,26 @@ class AiAgentService:
                 result={"reason": last_fallback_reason, "fallback_trigger": run_ctx.fallback_trigger},
             )
 
-        if repo and hasattr(repo, "add_decision_log"):
-            try:
-                repo.add_decision_log({
-                    "log_id": f"log_gem_fail_{uuid.uuid4().hex[:10]}",
-                    "event_type": "gemini_request_failed",
-                    "telemetry_version": 2,
-                    "briefing_run_id": run_ctx.briefing_run_id if run_ctx else None,
-                    "request_id": run_ctx.request_id if run_ctx else None,
-                    "session_id": session_id or (run_ctx.session_id if run_ctx else None),
-                    "user_id": user_id or (run_ctx.user_id if run_ctx else "unknown"),
-                    "gemini_request_id": gemini_request_id,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "attempts_made": len(models_to_try),
-                    "fallback_attempted": True,
-                    "fallback_trigger": run_ctx.fallback_trigger if run_ctx else last_fallback_reason,
-                    "final_failure_reason": last_fallback_reason,
-                    "primary_model": GEMINI_PRIMARY_MODEL,
-                    "final_model": None,
-                    "final_success": False,
-                    "final_error_type": last_fallback_reason,
-                    "total_duration_ms": total_gem_dur,
-                    "gemini_called": True,
-                    "selection_summary": f"Gemini logical request {gemini_request_id} failed after {len(models_to_try)} attempt(s). Trigger: {run_ctx.fallback_trigger if run_ctx else last_fallback_reason}, Final failure: {last_fallback_reason}",
-                })
-            except Exception as log_err:
-                logger.warning(f"Error logging gemini_request_failed: {log_err}")
+        AiAgentService._emit_gemini_log(
+            repo,
+            log_prefix="log_gem_fail",
+            event_type="gemini_request_failed",
+            run_ctx=run_ctx,
+            session_id=session_id,
+            user_id=user_id,
+            gemini_request_id=gemini_request_id,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            attempts_made=len(models_to_try),
+            fallback_attempted=True,
+            fallback_trigger=run_ctx.fallback_trigger if run_ctx else last_fallback_reason,
+            final_failure_reason=last_fallback_reason,
+            primary_model=GEMINI_PRIMARY_MODEL,
+            final_model=None,
+            final_success=False,
+            final_error_type=last_fallback_reason,
+            total_duration_ms=total_gem_dur,
+            selection_summary=f"Gemini logical request {gemini_request_id} failed after {len(models_to_try)} attempt(s). Trigger: {run_ctx.fallback_trigger if run_ctx else last_fallback_reason}, Final failure: {last_fallback_reason}",
+        )
 
         est_p_tokens = max(1, total_prompt_chars // 4) if total_prompt_chars else 0
         est_cost = calculate_estimated_cost(GEMINI_PRIMARY_MODEL, est_p_tokens, 0)

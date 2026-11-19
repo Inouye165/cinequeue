@@ -1,11 +1,15 @@
 """Authentication and authorization utilities using Firebase Admin SDK."""
 
 import logging
+import os
+import ipaddress
 import secrets
 import hmac
 import re
 import time
 import asyncio
+import threading
+from collections import deque
 from typing import Optional
 from fastapi import HTTPException, Depends, Request
 from fastapi.security import APIKeyCookie
@@ -16,6 +20,7 @@ from requests.adapters import HTTPAdapter
 import firebase_admin
 from firebase_admin import auth, credentials
 
+import app.config as config
 from app.config import (
     AUTH_ENABLED,
     AUTH_MODE,
@@ -25,6 +30,19 @@ from app.config import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def extract_client_ip(request: Request) -> str:
+    """Safely extract client IP address, trusting X-Forwarded-For only under Cloud Run."""
+    if os.getenv("K_SERVICE"):
+        forwarded = request.headers.get("x-forwarded-for")
+        if forwarded:
+            candidate = forwarded.split(",")[-1].strip()
+            try:
+                return str(ipaddress.ip_address(candidate))
+            except ValueError:
+                pass
+    return request.client.host if request.client else "unknown"
 
 
 class KeepAliveHTTPAdapter(HTTPAdapter):
@@ -97,11 +115,15 @@ def configure_firebase_adapters(app_instance=None):
 
 def warmup_firebase_auth():
     """Pre-fetch Google public certs & pre-warm Identity Toolkit TCP connection."""
-    if not AUTH_ENABLED:
+    if not config.AUTH_ENABLED:
         return
     t_start = time.perf_counter()
     try:
-        f_app = firebase_admin.get_app()
+        try:
+            f_app = firebase_admin.get_app()
+        except ValueError:
+            cred = credentials.ApplicationDefault()
+            f_app = firebase_admin.initialize_app(cred, {"projectId": config.FIREBASE_PROJECT_ID})
         client = auth._get_client(f_app)
         configure_firebase_adapters(f_app)
 
@@ -122,7 +144,7 @@ def warmup_firebase_auth():
         if hasattr(client, "_token_generator") and hasattr(client._token_generator, "http_client"):
             sess = getattr(client._token_generator.http_client, "session", None)
             if sess:
-                url = f"https://identitytoolkit.googleapis.com/v1/projects/{FIREBASE_PROJECT_ID}:createSessionCookie"
+                url = f"https://identitytoolkit.googleapis.com/v1/projects/{config.FIREBASE_PROJECT_ID}:createSessionCookie"
                 try:
                     # Send lightweight dummy POST to establish TLS 1.3 Keep-Alive session
                     sess.post(url, json={"idToken": "warmup_ping", "validDuration": 3600}, timeout=5.0)
@@ -165,6 +187,51 @@ class CurrentUser(BaseModel):
 session_cookie_scheme = APIKeyCookie(name=SESSION_COOKIE_NAME, auto_error=False)
 
 
+USER_LOGIN_MAX_FAILURES = 20
+USER_LOGIN_WINDOW_SECONDS = 300.0
+_user_login_failures: dict[str, deque[float]] = {}
+_user_login_lock = threading.Lock()
+
+
+def reset_user_login_rate_limits() -> None:
+    """Reset the in-memory user session creation failure tracker."""
+    with _user_login_lock:
+        _user_login_failures.clear()
+
+
+def _prune_user_failures_locked(dq: deque[float], cutoff: float) -> None:
+    while dq and dq[0] < cutoff:
+        dq.popleft()
+
+
+def is_user_login_rate_limited(client_ip: str) -> bool:
+    now = time.monotonic()
+    cutoff = now - USER_LOGIN_WINDOW_SECONDS
+    with _user_login_lock:
+        dq = _user_login_failures.get(client_ip)
+        if not dq:
+            return False
+        _prune_user_failures_locked(dq, cutoff)
+        if not dq:
+            _user_login_failures.pop(client_ip, None)
+            return False
+        return len(dq) >= USER_LOGIN_MAX_FAILURES
+
+
+def record_user_login_failure(client_ip: str) -> None:
+    now = time.monotonic()
+    cutoff = now - USER_LOGIN_WINDOW_SECONDS
+    with _user_login_lock:
+        dq = _user_login_failures.setdefault(client_ip, deque())
+        _prune_user_failures_locked(dq, cutoff)
+        dq.append(now)
+
+
+def clear_user_login_failures(client_ip: str) -> None:
+    with _user_login_lock:
+        _user_login_failures.pop(client_ip, None)
+
+
 def generate_csrf_token() -> str:
     """Generate a cryptographically secure CSRF token."""
     return secrets.token_hex(32)
@@ -177,6 +244,51 @@ def verify_csrf_token(token_a: str, token_b: str) -> bool:
     return hmac.compare_digest(token_a, token_b)
 
 
+def validate_origin(request: Request) -> None:
+    """Validate the Origin header against exact configured allowlist when auth is enabled."""
+    if not config.AUTH_ENABLED:
+        return
+
+    origin = request.headers.get("origin")
+    if origin:
+        normalized_origin = origin.rstrip("/")
+        if normalized_origin not in config.AUTH_ALLOWED_ORIGINS:
+            logger.warning("Origin validation failed: %s not in %s", origin, config.AUTH_ALLOWED_ORIGINS)
+            raise HTTPException(status_code=401, detail="Origin not allowed")
+    else:
+        logger.warning("Origin header is missing for state-changing operation")
+        raise HTTPException(status_code=401, detail="Missing Origin header")
+
+
+def validate_csrf(request: Request, request_csrf: str) -> None:
+    """Validate CSRF token against the cookie value without logging raw tokens."""
+    cookies = getattr(request, "cookies", None) or {}
+    cookie_csrf = cookies.get("cinequeue_csrf")
+    if not request_csrf or not cookie_csrf or not verify_csrf_token(request_csrf, cookie_csrf):
+        logger.warning(
+            "CSRF token mismatch or missing (request_present=%s, cookie_present=%s)",
+            bool(request_csrf),
+            bool(cookie_csrf),
+        )
+        raise HTTPException(status_code=401, detail="CSRF validation failed")
+
+
+async def require_cookie_csrf_and_origin(request: Request) -> None:
+    """Enforce Origin + X-CSRF-Token header validation on cookie-authenticated mutations."""
+    if not config.AUTH_ENABLED or request.method in {"GET", "HEAD", "OPTIONS"}:
+        return
+
+    auth_header = request.headers.get("Authorization") or request.headers.get("authorization") or ""
+    if auth_header.startswith("Bearer ") and auth_header[7:].strip():
+        return
+
+    cookies = getattr(request, "cookies", None) or {}
+    if cookies.get(config.SESSION_COOKIE_NAME):
+        validate_origin(request)
+        csrf_header = request.headers.get("X-CSRF-Token") or request.headers.get("x-csrf-token") or ""
+        validate_csrf(request, csrf_header)
+
+
 async def get_current_user(
     request: Request,
     session_cookie: Optional[str] = Depends(session_cookie_scheme)
@@ -185,7 +297,7 @@ async def get_current_user(
     FastAPI dependency to retrieve the authenticated user.
     If AUTH_ENABLED is False, returns a mock user.
     """
-    if not AUTH_ENABLED:
+    if not config.AUTH_ENABLED:
         return CurrentUser(
             uid="local_test_user",
             email="local@test.com",
@@ -193,6 +305,8 @@ async def get_current_user(
             photo_url=None
         )
 
+    cookies = getattr(request, "cookies", None) or {}
+    session_cookie = cookies.get(config.SESSION_COOKIE_NAME) or session_cookie
     auth_header = request.headers.get("Authorization") or request.headers.get("authorization") or ""
     bearer_token = auth_header[7:].strip() if auth_header.startswith("Bearer ") else ""
 
@@ -202,22 +316,46 @@ async def get_current_user(
 
     try:
         decoded_claims = None
-        if session_cookie:
+        used_cookie_auth = False
+
+        if bearer_token:
+            try:
+                decoded_claims = await asyncio.to_thread(
+                    auth.verify_id_token, bearer_token, clock_skew_seconds=60
+                )
+                if not decoded_claims.get("email_verified"):
+                    logger.warning("Bearer token email is not verified")
+                    raise HTTPException(status_code=401, detail="Email is not verified")
+            except HTTPException:
+                raise
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                if session_cookie:
+                    logger.debug("Bearer token verification failed (%s); falling back to session cookie", e)
+                else:
+                    raise
+
+        if decoded_claims is None and session_cookie:
+            used_cookie_auth = True
             try:
                 # Verify the session cookie, checking for revoked or disabled sessions.
                 # Local verification is used (check_revoked=False) to avoid network overhead.
-                decoded_claims = auth.verify_session_cookie(session_cookie, check_revoked=False, clock_skew_seconds=60)
+                decoded_claims = await asyncio.to_thread(
+                    auth.verify_session_cookie,
+                    session_cookie,
+                    check_revoked=False,
+                    clock_skew_seconds=60,
+                )
             except Exception as e:  # pylint: disable=broad-exception-caught
                 if "Token used too early" in str(e):
                     match = re.search(r"Token used too early,\s*(\d+)\s*<\s*(\d+)", str(e))
-                    sleep_time = 5.0
+                    sleep_time = 2.0
                     drift_val = "unknown"
                     if match:
                         local_time_val = int(match.group(1))
                         token_time_val = int(match.group(2))
                         drift_seconds = token_time_val - local_time_val
                         drift_val = str(drift_seconds)
-                        sleep_time = min(max(float(drift_seconds) + 1.0, 0.0), 10.0)
+                        sleep_time = min(max(float(drift_seconds) + 0.5, 0.0), 2.0)
 
                     logger.warning(
                         "Session cookie used too early due to clock skew (%s seconds drift). "
@@ -225,14 +363,19 @@ async def get_current_user(
                         drift_val, sleep_time
                     )
                     await asyncio.sleep(sleep_time)
-                    decoded_claims = auth.verify_session_cookie(session_cookie, check_revoked=False)
-                elif bearer_token:
-                    logger.debug("Session cookie verification failed (%s); falling back to Bearer token", e)
+                    decoded_claims = await asyncio.to_thread(
+                        auth.verify_session_cookie, session_cookie, check_revoked=False
+                    )
                 else:
                     raise
 
-        if decoded_claims is None and bearer_token:
-            decoded_claims = auth.verify_id_token(bearer_token, clock_skew_seconds=60)
+        if hasattr(request, "state"):
+            request.state.used_cookie_auth = used_cookie_auth
+
+        if used_cookie_auth and request.method not in {"GET", "HEAD", "OPTIONS"}:
+            validate_origin(request)
+            csrf_header = request.headers.get("X-CSRF-Token") or request.headers.get("x-csrf-token") or ""
+            validate_csrf(request, csrf_header)
 
         email = decoded_claims.get("email")
         if not email:
@@ -245,13 +388,14 @@ async def get_current_user(
         repo = getattr(request.app.state, "watchlist_repo", None) if hasattr(request.app, "state") else None
         
         if repo:
-            approval = repo.get_user_approval(email_normalized)
+            approval = await asyncio.to_thread(repo.get_user_approval, email_normalized)
             if approval:
                 status = approval.get("status")
                 if status != "approved":
-                    ip_address = request.client.host if request.client else "unknown"
+                    ip_address = extract_client_ip(request)
                     user_agent = request.headers.get("user-agent", "unknown")
-                    repo.log_login_attempt(
+                    await asyncio.to_thread(
+                        repo.log_login_attempt,
                         email=email_normalized,
                         status="failed",
                         reason=f"session_auth_status_{status}",
@@ -262,11 +406,12 @@ async def get_current_user(
                     logger.warning("User %s access status is %s", email_normalized, status)
                     raise HTTPException(status_code=403, detail=f"Forbidden: User status is {status}")
             else:
-                # No DB approval record found
-                if AUTH_MODE == "allowlist" and email_normalized not in AUTH_ALLOWED_EMAILS:
-                    ip_address = request.client.host if request.client else "unknown"
+                # No DB approval record found — fail closed unless explicitly on static allowlist
+                if email_normalized not in config.AUTH_ALLOWED_EMAILS:
+                    ip_address = extract_client_ip(request)
                     user_agent = request.headers.get("user-agent", "unknown")
-                    repo.log_login_attempt(
+                    await asyncio.to_thread(
+                        repo.log_login_attempt,
                         email=email_normalized,
                         status="failed",
                         reason="session_auth_not_approved_or_allowlisted",
@@ -277,7 +422,7 @@ async def get_current_user(
                     logger.warning("User %s is not approved in database or static allowlist", email_normalized)
                     raise HTTPException(status_code=403, detail="Forbidden: User is not authorized")
         else:
-            if AUTH_MODE == "allowlist" and email_normalized not in AUTH_ALLOWED_EMAILS:
+            if email_normalized not in config.AUTH_ALLOWED_EMAILS:
                 logger.warning("User %s is not in static allowlist", email_normalized)
                 raise HTTPException(status_code=403, detail="Forbidden: User is not authorized")
 
