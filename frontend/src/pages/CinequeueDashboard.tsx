@@ -14,6 +14,7 @@ import { useAuth } from "../context/AuthContext";
 import { StarRating } from "../components/StarRating";
 import { BatchRateModal } from "../components/BatchRateModal";
 import { SportsTab, SportsGameCard, SportsSetupModal } from "../components/SportsTab";
+import { SportsGameDetailModal } from "../components/SportsGameDetailModal";
 import { movieService, normalizePosterPath } from "../services/movieService";
 import { DEFAULT_CATALOG, sportsService } from "../services/sportsService";
 import { syncService } from "../services/syncService";
@@ -69,6 +70,7 @@ export function CinequeueDashboard({ onSignIn }: { onSignIn?: () => void }) {
   const [sportsGames, setSportsGames] = useState<SportsGame[]>(() => sportsService.getInstantSchedule(ownerId));
   const [sportsPrefs, setSportsPrefs] = useState<SportsPreferences>(() => sportsService.getInstantPreferences(ownerId));
   const [sportsLoading, setSportsLoading] = useState(false);
+  const [selectedSportsGameId, setSelectedSportsGameId] = useState<string | null>(null);
   const enrichedShows = useRef(new Set<number>());
   const detailRequestIdRef = useRef(0);
   const detailAbortRef = useRef<AbortController | null>(null);
@@ -918,6 +920,7 @@ export function CinequeueDashboard({ onSignIn }: { onSignIn?: () => void }) {
           onSavePreferences={handleSaveSportsPrefs}
           onRefreshSchedule={() => loadSportsData(true)}
           isSetupModalOpen={isSportsSetupModalOpen}
+          onSelectGame={(g) => setSelectedSportsGameId(g.id)}
           onSetSetupModalOpen={setIsSportsSetupModalOpen}
         />
       ) : loading ? (
@@ -998,6 +1001,7 @@ export function CinequeueDashboard({ onSignIn }: { onSignIn?: () => void }) {
                 userServices={userServicesSet}
                 trackedTeams={trackedTeamsSet}
                 compactQueueMode={true}
+                onSelectGame={(g) => setSelectedSportsGameId(g.id)}
                 onOpenSportsTab={() => setTab("sports")}
                 onOpenSetupModal={() => setIsSportsSetupModalOpen(true)}
                 onToggleService={(serviceId) => void handleToggleStreamingService(serviceId)}
@@ -1086,6 +1090,27 @@ export function CinequeueDashboard({ onSignIn }: { onSignIn?: () => void }) {
           onClose={() => setIsSportsSetupModalOpen(false)}
         />
       )}
+
+      <SportsGameDetailModal
+        game={sportsGames.find((g) => g.id === selectedSportsGameId) ?? null}
+        onClose={() => setSelectedSportsGameId(null)}
+        userServices={userServicesSet}
+        trackedTeams={trackedTeamsSet}
+        onToggleService={(serviceId) => void handleToggleStreamingService(serviceId)}
+        onToggleTrackTeam={(teamId) => {
+          void handleSaveSportsPrefs((curr) => {
+            const next = new Set(curr.tracked_teams);
+            if (next.has(teamId)) next.delete(teamId);
+            else next.add(teamId);
+            return {
+              tracked_teams: Array.from(next),
+              setup_completed: true,
+            };
+          });
+        }}
+        onRefreshScores={() => loadSportsData(true)}
+        isRefreshing={sportsLoading}
+      />
 
 
       {selected ? (

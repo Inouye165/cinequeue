@@ -351,6 +351,7 @@ export interface SportsTeam {
   logo: string;
   score?: string | number | null;
   record?: string;
+  linescores?: string[];
   color?: string | null;
   alt_color?: string | null;
 }
@@ -365,6 +366,9 @@ export interface SportsGame {
   status_detail: string;
   is_live: boolean;
   is_completed: boolean;
+  period?: number | null;
+  clock?: string | null;
+  last_play?: string | null;
   venue?: string;
   home_team: SportsTeam;
   away_team: SportsTeam;

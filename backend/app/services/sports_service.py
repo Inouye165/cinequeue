@@ -425,6 +425,14 @@ def _parse_espn_events(league: str, data: dict[str, Any]) -> list[dict[str, Any]
                 score_val = None
             team_color = str(t_obj.get("color") or "").strip("#")
             alt_color = str(t_obj.get("alternateColor") or "").strip("#")
+            raw_linescores = comp_entry.get("linescores") or []
+            linescores: list[str] = []
+            if isinstance(raw_linescores, list):
+                for ls in raw_linescores:
+                    if isinstance(ls, dict):
+                        val = ls.get("displayValue") if ls.get("displayValue") is not None else ls.get("value")
+                        if val is not None:
+                            linescores.append(str(val))
             return {
                 "id": canonical["id"],
                 "league": league,
@@ -434,6 +442,7 @@ def _parse_espn_events(league: str, data: dict[str, Any]) -> list[dict[str, Any]
                 "logo": logo,
                 "score": score_val,
                 "record": record_summary,
+                "linescores": linescores,
                 "color": f"#{team_color}" if team_color else None,
                 "alt_color": f"#{alt_color}" if alt_color else None,
             }
@@ -465,6 +474,11 @@ def _parse_espn_events(league: str, data: dict[str, Any]) -> list[dict[str, Any]
         is_live = state == "in"
         is_completed = state == "post" or bool(status_type.get("completed"))
         status_detail = status_type.get("shortDetail") or status_type.get("detail") or "Scheduled"
+        period = status_obj.get("period")
+        clock = status_obj.get("displayClock")
+        situation = comp.get("situation") if isinstance(comp.get("situation"), dict) else {}
+        last_play_obj = situation.get("lastPlay") if isinstance(situation.get("lastPlay"), dict) else {}
+        last_play = str(last_play_obj.get("text") or "").strip() or None
 
         venue_obj = comp.get("venue") or {}
         venue_name = venue_obj.get("fullName") or ""
@@ -481,6 +495,9 @@ def _parse_espn_events(league: str, data: dict[str, Any]) -> list[dict[str, Any]
             "status_detail": status_detail,
             "is_live": is_live,
             "is_completed": is_completed,
+            "period": period,
+            "clock": clock,
+            "last_play": last_play,
             "venue": venue_name,
             "home_team": home_team,
             "away_team": away_team,
@@ -494,7 +511,7 @@ def _parse_espn_events(league: str, data: dict[str, Any]) -> list[dict[str, Any]
 class SportsService:
     """Fetches and caches live NFL & NBA schedules with streaming service mappings."""
 
-    def __init__(self, cache_ttl_seconds: int = 600, refresh_cooldown_seconds: int = 30, max_cache_entries: int = 64) -> None:
+    def __init__(self, cache_ttl_seconds: int = 600, refresh_cooldown_seconds: int = 10, max_cache_entries: int = 64) -> None:
         self._cache_ttl = cache_ttl_seconds
         self._refresh_cooldown = refresh_cooldown_seconds
         self._max_cache_entries = max_cache_entries

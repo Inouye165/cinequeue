@@ -242,4 +242,53 @@ describe("SportsTab Component", () => {
 
     expect(screen.getByText(/Watch on FOX One/i)).toBeInTheDocument();
   });
+
+  it("opens full-screen scoreboard modal when a game card is clicked and supports live score refresh", async () => {
+    const liveGame: SportsGame = {
+      ...MOCK_GAMES[0],
+      id: "nba_live_1",
+      status: "live",
+      status_detail: "Q3 4:12",
+      is_live: true,
+      is_completed: false,
+      last_play: "LeBron James makes 3-pt jump shot",
+      home_team: { ...MOCK_GAMES[0].home_team, score: "82", linescores: ["28", "26", "28"] },
+      away_team: { ...MOCK_GAMES[0].away_team, score: "79", linescores: ["24", "30", "25"] },
+    };
+
+    const handleRefresh = vi.fn().mockResolvedValue(undefined);
+    const prefs: SportsPreferences = {
+      streaming_services: ["youtube_tv"],
+      tracked_teams: ["nba_lal"],
+      show_in_queue: true,
+      setup_completed: true,
+    };
+
+    render(
+      <SportsTab
+        catalog={DEFAULT_CATALOG}
+        games={[liveGame]}
+        preferences={prefs}
+        loading={false}
+        onSavePreferences={vi.fn()}
+        onRefreshSchedule={handleRefresh}
+      />
+    );
+
+    const card = screen.getByRole("button", { name: /NFL: San Francisco 49ers at Kansas City Chiefs/i });
+    fireEvent.click(card);
+
+    const dialog = screen.getByRole("dialog", { name: /San Francisco 49ers at Kansas City Chiefs scoreboard/i });
+    expect(dialog).toBeInTheDocument();
+    expect(screen.getByTestId("away-score")).toHaveTextContent("79");
+    expect(screen.getByTestId("home-score")).toHaveTextContent("82");
+    expect(screen.getByText("LeBron James makes 3-pt jump shot")).toBeInTheDocument();
+    expect(screen.getByText("Score by Period")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Refresh live score/i }));
+    expect(handleRefresh).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole("button", { name: /Close game scoreboard/i }));
+    expect(screen.queryByRole("dialog", { name: /scoreboard/i })).toBeNull();
+  });
 });

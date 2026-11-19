@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from "react";
 import type { SportsCatalog, SportsGame, SportsLeague, SportsPreferences, SportsTeam } from "../types";
 import { DEFAULT_TEAMS, toLocalDateKey } from "../services/sportsService";
+import { SportsGameDetailModal } from "./SportsGameDetailModal";
 
 interface SportsTabProps {
   catalog: SportsCatalog;
@@ -11,6 +12,7 @@ interface SportsTabProps {
   onRefreshSchedule: () => Promise<void>;
   isSetupModalOpen?: boolean;
   onSetSetupModalOpen?: (open: boolean) => void;
+  onSelectGame?: (game: SportsGame) => void;
 }
 
 const CATALOG_LOGO_BY_ID: Record<string, string> = Object.fromEntries(
@@ -91,6 +93,7 @@ interface SportsGameCardProps {
   onOpenSetupModal?: () => void;
   compactQueueMode?: boolean;
   onOpenSportsTab?: () => void;
+  onSelectGame?: (game: SportsGame) => void;
 }
 
 export const SportsGameCard: React.FC<SportsGameCardProps> = ({
@@ -102,6 +105,7 @@ export const SportsGameCard: React.FC<SportsGameCardProps> = ({
   onOpenSetupModal,
   compactQueueMode = false,
   onOpenSportsTab,
+  onSelectGame,
 }) => {
   const [awayLogoErr, setAwayLogoErr] = useState(false);
   const [homeLogoErr, setHomeLogoErr] = useState(false);
@@ -177,8 +181,21 @@ export const SportsGameCard: React.FC<SportsGameCardProps> = ({
         game.is_live ? "is-live" : ""
       } ${awayTracked || homeTracked ? "has-tracked-team" : ""} ${
         compactQueueMode ? "queue-sports-card" : ""
-      }`}
+      } ${onSelectGame ? "is-clickable" : ""}`}
       aria-label={`${game.league}: ${game.away_team.name} at ${game.home_team.name}`}
+      onClick={onSelectGame ? () => onSelectGame(game) : undefined}
+      onKeyDown={
+        onSelectGame
+          ? (e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                onSelectGame(game);
+              }
+            }
+          : undefined
+      }
+      tabIndex={onSelectGame ? 0 : undefined}
+      role={onSelectGame ? "button" : undefined}
     >
       {/* 1. Sports Matchup Poster Area (mirrors MediaCard .poster-wrap) */}
       <div
@@ -669,12 +686,14 @@ export const SportsTab: React.FC<SportsTabProps> = ({
   onRefreshSchedule,
   isSetupModalOpen: externalSetupModalOpen,
   onSetSetupModalOpen,
+  onSelectGame,
 }) => {
   const [serviceFilter, setServiceFilter] = useState<"all" | "my_services">("all");
   const [teamFilter, setTeamFilter] = useState<"all" | "my_teams">("all");
   const [leagueFilter, setLeagueFilter] = useState<"ALL" | SportsLeague>("ALL");
   const [dayFilter, setDayFilter] = useState<string>("ALL");
   const [internalSetupModalOpen, setInternalSetupModalOpen] = useState(false);
+  const [internalSelectedGameId, setInternalSelectedGameId] = useState<string | null>(null);
 
   const isSetupModalOpen =
     externalSetupModalOpen !== undefined ? externalSetupModalOpen : internalSetupModalOpen;
@@ -993,6 +1012,7 @@ export const SportsTab: React.FC<SportsTabProps> = ({
               trackedTeams={trackedTeamsSet}
               onToggleTrackTeam={(teamId) => void handleToggleTeam(teamId)}
               onToggleService={(serviceId) => void handleToggleService(serviceId)}
+              onSelectGame={onSelectGame ?? ((g) => setInternalSelectedGameId(g.id))}
             />
           ))}
         </div>
@@ -1051,6 +1071,19 @@ export const SportsTab: React.FC<SportsTabProps> = ({
         onSavePreferences={onSavePreferences}
         onClose={() => setIsSetupModalOpen(false)}
       />
+
+      {!onSelectGame && (
+        <SportsGameDetailModal
+          game={games.find((g) => g.id === internalSelectedGameId) ?? null}
+          onClose={() => setInternalSelectedGameId(null)}
+          userServices={userServicesSet}
+          trackedTeams={trackedTeamsSet}
+          onToggleTrackTeam={(teamId) => void handleToggleTeam(teamId)}
+          onToggleService={(serviceId) => void handleToggleService(serviceId)}
+          onRefreshScores={onRefreshSchedule}
+          isRefreshing={loading}
+        />
+      )}
     </div>
   );
 };
