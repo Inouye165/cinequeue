@@ -92,13 +92,13 @@ a {
 }
 
 html.ios-standalone {
-  --sat: max(env(safe-area-inset-top, 0px), 54px);
+  --sat: max(env(safe-area-inset-top, 0px), 59px);
 }
 
 @supports (-webkit-touch-callout: none) {
   @media (display-mode: standalone) {
     :root {
-      --sat: max(env(safe-area-inset-top, 0px), 54px);
+      --sat: max(env(safe-area-inset-top, 0px), 59px);
     }
   }
 }
@@ -6578,8 +6578,38 @@ body {
   }
 
   .avatar-icon-btn {
-    width: 32px !important;
-    height: 32px !important;
+    width: 40px !important;
+    height: 40px !important;
+    flex-shrink: 0;
+  }
+}
+
+/* Dynamic Island & horizontal safe-area support (portrait + landscape) */
+.brand-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 767px) {
+  .app-shell {
+    padding: calc(16px + var(--sat)) calc(14px + var(--sar)) calc(80px + max(env(safe-area-inset-bottom, 0px), 16px)) calc(14px + var(--sal));
+  }
+
+  .mobile-app-bar {
+    margin: calc(-16px - var(--sat)) calc(-14px - var(--sar)) 14px calc(-14px - var(--sal));
+    padding: calc(12px + var(--sat)) calc(14px + var(--sar)) 12px calc(14px + var(--sal));
+  }
+}
+
+@media (min-width: 768px) {
+  .app-shell {
+    padding: calc(28px + var(--sat)) calc(24px + var(--sar)) 60px calc(24px + var(--sal));
+  }
+
+  .mobile-app-bar {
+    margin: calc(-28px - var(--sat)) calc(-24px - var(--sar)) 20px calc(-24px - var(--sal));
+    padding: calc(14px + var(--sat)) calc(24px + var(--sar)) 16px calc(24px + var(--sal));
   }
 }
 
