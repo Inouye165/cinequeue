@@ -110,18 +110,6 @@ function isConsoleDebugEnabled(): boolean {
   return false;
 }
 
-function isConsoleDebugEnabled(): boolean {
-  try {
-    if (import.meta.env.VITE_AUTH_DEBUG === "true") return true;
-    if (typeof localStorage !== "undefined" && localStorage.getItem("cinequeue_auth_debug") === "true") {
-      return true;
-    }
-  } catch {
-    // ignore storage access issues
-  }
-  return false;
-}
-
 function pushEntry(
   level: AuthDebugEntry["level"],
   label: string,

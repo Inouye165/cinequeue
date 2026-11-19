@@ -645,6 +645,7 @@ def test_admin_bearer_token_passive_role_check_returns_200_for_non_admin(mock_ve
     mock_verify_token.return_value = {
         "uid": "nonadmin_uid_456",
         "email": "user@example.com",
+        "email_verified": True,
     }
 
     response = client_with_admin_auth.get(
